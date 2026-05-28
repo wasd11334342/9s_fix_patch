@@ -6,10 +6,25 @@
 namespace
 {
 HHOOK g_msgBoxHook = nullptr;
-constexpr uintptr_t kPatchOffset = 0x4AA10;
-constexpr DWORD kMessageBoxAutoCloseMs = 5000;
+constexpr DWORD kMessageBoxAutoCloseMs = 3000;
 
-const BYTE kPatchBytes[] = {
+struct MemoryPatch
+{
+    const char* name;
+    uintptr_t offset;
+    const BYTE* bytes;
+    size_t size;
+};
+
+struct PatchResult
+{
+    const MemoryPatch* patch;
+    void* address;
+    bool applied;
+};
+
+// Dragon vein fix
+const BYTE kDragonVeinPatchBytes[] = {
     0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0xC7, 0x45,
     0xEC, 0x00, 0x00, 0x00, 0x2D, 0x66, 0xC7, 0x45,
     0xF0, 0x00, 0x02, 0xC7, 0x45, 0xF2, 0x00, 0x00,
@@ -22,6 +37,19 @@ const BYTE kPatchBytes[] = {
     0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
     0x90, 0x90, 0x90, 0x90
 };
+
+// Break egg fix
+const BYTE kBreakEggPatchBytes[] = {
+    0x6A, 0x01, 0x8D, 0x04, 0x24, 0x6A, 0x01, 0x50,
+    0x68, 0xE9, 0x25, 0x00, 0x00, 0xE8, 0xEE, 0x37,
+    0x01, 0x00, 0x83, 0xC4, 0x04
+};
+
+const MemoryPatch kPatches[] = {
+    { "Dragon vein fix", 0x4AA10, kDragonVeinPatchBytes, sizeof(kDragonVeinPatchBytes) },
+    { "Break egg fix", 0x36B60, kBreakEggPatchBytes, sizeof(kBreakEggPatchBytes) },
+};
+constexpr size_t kPatchCount = sizeof(kPatches) / sizeof(kPatches[0]);
 
 bool PatchBytes(void* address, const void* patch, size_t size)
 {
@@ -37,13 +65,34 @@ bool PatchBytes(void* address, const void* patch, size_t size)
     return VirtualProtect(address, size, oldProtect, &unusedProtect) != FALSE;
 }
 
+PatchResult ApplyPatch(uintptr_t base, const MemoryPatch& patch)
+{
+    void* address = reinterpret_cast<void*>(base + patch.offset);
+    return { &patch, address, PatchBytes(address, patch.bytes, patch.size) };
+}
+
+size_t AppendMessage(char* buffer, size_t capacity, size_t used, const char* text)
+{
+    if (used >= capacity) {
+        return used;
+    }
+
+    const int written = std::snprintf(buffer + used, capacity - used, "%s", text);
+    if (written <= 0) {
+        return used;
+    }
+
+    const size_t added = static_cast<size_t>(written);
+    return used + (added < capacity - used ? added : capacity - used - 1);
+}
+
 DWORD WINAPI CloseMessageBoxThread(LPVOID hwndParam)
 {
     Sleep(kMessageBoxAutoCloseMs);
 
     HWND hwnd = reinterpret_cast<HWND>(hwndParam);
     if (IsWindow(hwnd)) {
-        PostMessageA(hwnd, WM_COMMAND, IDOK, 0);
+        PostMessageA(hwnd, WM_CLOSE, 0, 0);
     }
 
     return 0;
@@ -88,20 +137,42 @@ DWORD WINAPI MainThread(LPVOID)
 {
     HMODULE mainModule = GetModuleHandleA(nullptr);
     uintptr_t base = reinterpret_cast<uintptr_t>(mainModule);
-    void* patchAddress = reinterpret_cast<void*>(base + kPatchOffset);
-    const bool patched = PatchBytes(patchAddress, kPatchBytes, sizeof(kPatchBytes));
+    PatchResult results[kPatchCount]{};
+
+    size_t appliedCount = 0;
+    for (size_t i = 0; i < kPatchCount; ++i) {
+        results[i] = ApplyPatch(base, kPatches[i]);
+        if (results[i].applied) {
+            ++appliedCount;
+        }
+    }
 
     const DWORD pid = GetCurrentProcessId();
-    char message[128]{};
-    std::snprintf(
+    char message[1024]{};
+    const int headerLength = std::snprintf(
         message,
         sizeof(message),
-        "PID: %lu\nPID hex: 0x%lX\nBase: 0x%p\nPatch %s\nAddress: 0x%p",
+        "PID: %lu\nPID hex: 0x%lX\nBase: %p\nPatches: %zu/%zu applied\n",
         pid,
         pid,
         reinterpret_cast<void*>(base),
-        patched ? "OK" : "FAILED",
-        patchAddress);
+        appliedCount,
+        kPatchCount);
+    size_t used = headerLength > 0 ? static_cast<size_t>(headerLength) : 0;
+
+    for (const PatchResult& result : results) {
+        char line[192]{};
+        std::snprintf(
+            line,
+            sizeof(line),
+            "%s @ +0x%lX -> %p (%zu bytes): %s\n",
+            result.patch->name,
+            static_cast<unsigned long>(result.patch->offset),
+            result.address,
+            result.patch->size,
+            result.applied ? "OK" : "FAILED");
+        used = AppendMessage(message, sizeof(message), used, line);
+    }
 
     g_msgBoxHook = SetWindowsHookExA(WH_CBT, MessageBoxHook, nullptr, GetCurrentThreadId());
     MessageBoxA(nullptr, message, "MyPatch", MB_OK);
