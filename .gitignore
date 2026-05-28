@@ -1,0 +1,44 @@
+# Build directories
+build/
+out/
+bin/
+obj/
+Debug/
+Release/
+x64/
+x86/
+Win32/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+*.sln
+*.slnx
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Compiled binaries and debug artifacts
+*.exe
+*.dll
+*.lib
+*.exp
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.ipdb
+*.iobj
+
+# Visual Studio / editor state
+.vs/
+.vscode/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.tlog
+*.recipe
