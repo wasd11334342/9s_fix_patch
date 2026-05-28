@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <climits>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -20,6 +21,33 @@ struct PatchResult
 {
     const MemoryPatch* patch;
     void* address;
+    bool applied;
+};
+
+struct CodeBuffer
+{
+    BYTE* data;
+    size_t capacity;
+    size_t size;
+    uintptr_t address;
+};
+
+using CodeBuilder = bool (*)(uintptr_t base, CodeBuffer& code);
+
+struct JumpPatch
+{
+    const char* name;
+    uintptr_t hookOffset;
+    size_t overwriteSize;
+    CodeBuilder buildCode;
+};
+
+struct JumpPatchResult
+{
+    const JumpPatch* patch;
+    void* hookAddress;
+    void* codeAddress;
+    size_t codeSize;
     bool applied;
 };
 
@@ -51,6 +79,13 @@ const MemoryPatch kPatches[] = {
 };
 constexpr size_t kPatchCount = sizeof(kPatches) / sizeof(kPatches[0]);
 
+bool BuildSend37A4Code(uintptr_t base, CodeBuffer& code);
+
+const JumpPatch kJumpPatches[] = {
+    { "Fast Daily Battle", 0x4A785, 11, BuildSend37A4Code },
+};
+constexpr size_t kJumpPatchCount = sizeof(kJumpPatches) / sizeof(kJumpPatches[0]);
+
 bool PatchBytes(void* address, const void* patch, size_t size)
 {
     DWORD oldProtect = 0;
@@ -65,10 +100,137 @@ bool PatchBytes(void* address, const void* patch, size_t size)
     return VirtualProtect(address, size, oldProtect, &unusedProtect) != FALSE;
 }
 
+bool CanWrite(CodeBuffer& code, size_t bytes)
+{
+    return code.size <= code.capacity && bytes <= code.capacity - code.size;
+}
+
+bool AppendByte(CodeBuffer& code, BYTE value)
+{
+    if (!CanWrite(code, 1)) {
+        return false;
+    }
+
+    code.data[code.size++] = value;
+    return true;
+}
+
+bool AppendU32(CodeBuffer& code, uint32_t value)
+{
+    if (!CanWrite(code, sizeof(value))) {
+        return false;
+    }
+
+    std::memcpy(code.data + code.size, &value, sizeof(value));
+    code.size += sizeof(value);
+    return true;
+}
+
+bool GetRel32(uintptr_t sourceNext, uintptr_t destination, int32_t& displacement)
+{
+    const long long diff = static_cast<long long>(destination) - static_cast<long long>(sourceNext);
+    if (diff < INT_MIN || diff > INT_MAX) {
+        return false;
+    }
+
+    displacement = static_cast<int32_t>(diff);
+    return true;
+}
+
+bool AppendPushImm32(CodeBuffer& code, uint32_t value)
+{
+    return AppendByte(code, 0x68) && AppendU32(code, value);
+}
+
+bool AppendCallPtr(CodeBuffer& code, uint32_t pointerAddress)
+{
+    return AppendByte(code, 0xFF) && AppendByte(code, 0x15) && AppendU32(code, pointerAddress);
+}
+
+bool AppendRel32Instruction(CodeBuffer& code, BYTE opcode, uintptr_t destination)
+{
+    if (!CanWrite(code, 5)) {
+        return false;
+    }
+
+    const uintptr_t sourceNext = code.address + code.size + 5;
+    int32_t displacement = 0;
+    if (!GetRel32(sourceNext, destination, displacement)) {
+        return false;
+    }
+
+    return AppendByte(code, opcode) && AppendU32(code, static_cast<uint32_t>(displacement));
+}
+
+bool WriteRel32Jump(void* source, void* destination, size_t overwriteSize)
+{
+    if (overwriteSize < 5) {
+        return false;
+    }
+
+    int32_t displacement = 0;
+    const uintptr_t sourceNext = reinterpret_cast<uintptr_t>(source) + 5;
+    if (!GetRel32(sourceNext, reinterpret_cast<uintptr_t>(destination), displacement)) {
+        return false;
+    }
+
+    BYTE jumpBytes[32]{};
+    if (overwriteSize > sizeof(jumpBytes)) {
+        return false;
+    }
+
+    jumpBytes[0] = 0xE9;
+    std::memcpy(jumpBytes + 1, &displacement, sizeof(displacement));
+    std::memset(jumpBytes + 5, 0x90, overwriteSize - 5);
+    return PatchBytes(source, jumpBytes, overwriteSize);
+}
+
 PatchResult ApplyPatch(uintptr_t base, const MemoryPatch& patch)
 {
     void* address = reinterpret_cast<void*>(base + patch.offset);
     return { &patch, address, PatchBytes(address, patch.bytes, patch.size) };
+}
+
+JumpPatchResult ApplyJumpPatch(uintptr_t base, const JumpPatch& patch)
+{
+    constexpr size_t kCodeCapacity = 128;
+    void* codeMemory = VirtualAlloc(nullptr, kCodeCapacity, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    void* hookAddress = reinterpret_cast<void*>(base + patch.hookOffset);
+    if (!codeMemory) {
+        return { &patch, hookAddress, nullptr, 0, false };
+    }
+
+    CodeBuffer code{
+        static_cast<BYTE*>(codeMemory),
+        kCodeCapacity,
+        0,
+        reinterpret_cast<uintptr_t>(codeMemory),
+    };
+
+    if (!patch.buildCode(base, code)) {
+        VirtualFree(codeMemory, 0, MEM_RELEASE);
+        return { &patch, hookAddress, nullptr, 0, false };
+    }
+
+    FlushInstructionCache(GetCurrentProcess(), codeMemory, code.size);
+    const bool patched = WriteRel32Jump(hookAddress, codeMemory, patch.overwriteSize);
+    if (!patched) {
+        VirtualFree(codeMemory, 0, MEM_RELEASE);
+        return { &patch, hookAddress, nullptr, code.size, false };
+    }
+
+    return { &patch, hookAddress, codeMemory, code.size, true };
+}
+
+bool BuildSend37A4Code(uintptr_t base, CodeBuffer& code)
+{
+    return AppendPushImm32(code, static_cast<uint32_t>(base + 0x2304BC)) &&
+        AppendCallPtr(code, static_cast<uint32_t>(base + 0x1C4418)) &&
+        AppendByte(code, 0x6A) && AppendByte(code, 0x00) &&
+        AppendByte(code, 0x6A) && AppendByte(code, 0x00) &&
+        AppendPushImm32(code, 0x37A4) &&
+        AppendRel32Instruction(code, 0xE8, base + 0x4A360) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x4A790);
 }
 
 size_t AppendMessage(char* buffer, size_t capacity, size_t used, const char* text)
@@ -138,6 +300,7 @@ DWORD WINAPI MainThread(LPVOID)
     HMODULE mainModule = GetModuleHandleA(nullptr);
     uintptr_t base = reinterpret_cast<uintptr_t>(mainModule);
     PatchResult results[kPatchCount]{};
+    JumpPatchResult jumpResults[kJumpPatchCount]{};
 
     size_t appliedCount = 0;
     for (size_t i = 0; i < kPatchCount; ++i) {
@@ -147,17 +310,27 @@ DWORD WINAPI MainThread(LPVOID)
         }
     }
 
+    size_t appliedJumpCount = 0;
+    for (size_t i = 0; i < kJumpPatchCount; ++i) {
+        jumpResults[i] = ApplyJumpPatch(base, kJumpPatches[i]);
+        if (jumpResults[i].applied) {
+            ++appliedJumpCount;
+        }
+    }
+
     const DWORD pid = GetCurrentProcessId();
     char message[1024]{};
     const int headerLength = std::snprintf(
         message,
         sizeof(message),
-        "PID: %lu\nPID hex: 0x%lX\nBase: %p\nPatches: %zu/%zu applied\n",
+        "PID: %lu\nPID hex: 0x%lX\nBase: %p\nByte patches: %zu/%zu applied\nJump patches: %zu/%zu applied\n",
         pid,
         pid,
         reinterpret_cast<void*>(base),
         appliedCount,
-        kPatchCount);
+        kPatchCount,
+        appliedJumpCount,
+        kJumpPatchCount);
     size_t used = headerLength > 0 ? static_cast<size_t>(headerLength) : 0;
 
     for (const PatchResult& result : results) {
@@ -170,6 +343,20 @@ DWORD WINAPI MainThread(LPVOID)
             static_cast<unsigned long>(result.patch->offset),
             result.address,
             result.patch->size,
+            result.applied ? "OK" : "FAILED");
+        used = AppendMessage(message, sizeof(message), used, line);
+    }
+
+    for (const JumpPatchResult& result : jumpResults) {
+        char line[224]{};
+        std::snprintf(
+            line,
+            sizeof(line),
+            "%s @ +0x%lX -> %p (%zu bytes): %s\n",
+            result.patch->name,
+            static_cast<unsigned long>(result.patch->hookOffset),
+            result.codeAddress,
+            result.codeSize,
             result.applied ? "OK" : "FAILED");
         used = AppendMessage(message, sizeof(message), used, line);
     }
