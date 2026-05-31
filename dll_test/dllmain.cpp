@@ -39,6 +39,7 @@ struct JumpPatch
     const char* name;
     uintptr_t hookOffset;
     size_t overwriteSize;
+    size_t codeCapacity;
     CodeBuilder buildCode;
 };
 
@@ -50,6 +51,16 @@ struct JumpPatchResult
     size_t codeSize;
     bool applied;
 };
+
+uintptr_t g_mainBase = 0;
+volatile LONG g_dailySignNeedSign = 0;
+volatile LONG g_dailySignBonusBits = 0;
+volatile LONG g_dailySignLastQuery = 0;
+uint32_t g_dailySignBonusPayload = 0;
+
+const wchar_t kDailySignLogFormat[] = L"%s";
+const wchar_t kDailySignLogDaily[] = L"\x6BCF\x65E5\x7C3D\x5230";
+const wchar_t kDailySignLogBonus[] = L"\x7D2F\x7A4D\x7C3D\x5230";
 
 // Dragon vein fix
 const BYTE kDragonVeinPatchBytes[] = {
@@ -80,9 +91,13 @@ const MemoryPatch kPatches[] = {
 constexpr size_t kPatchCount = sizeof(kPatches) / sizeof(kPatches[0]);
 
 bool BuildSend37A4Code(uintptr_t base, CodeBuffer& code);
+bool BuildDailySignSendCode(uintptr_t base, CodeBuffer& code);
+bool BuildDailySignDispatchCode(uintptr_t base, CodeBuffer& code);
 
 const JumpPatch kJumpPatches[] = {
-    { "Fast Daily Battle", 0x4A785, 11, BuildSend37A4Code },
+    { "Fast Daily Battle", 0x4A785, 11, 128, BuildSend37A4Code },
+    { "Daily Sign send tick", 0x38F90, 5, 128, BuildDailySignSendCode },
+    { "Daily Sign recv dispatch", 0x42AD0, 5, 128, BuildDailySignDispatchCode },
 };
 constexpr size_t kJumpPatchCount = sizeof(kJumpPatches) / sizeof(kJumpPatches[0]);
 
@@ -147,6 +162,38 @@ bool AppendCallPtr(CodeBuffer& code, uint32_t pointerAddress)
     return AppendByte(code, 0xFF) && AppendByte(code, 0x15) && AppendU32(code, pointerAddress);
 }
 
+bool AppendPushEdx(CodeBuffer& code)
+{
+    return AppendByte(code, 0x52);
+}
+
+bool AppendPushEax(CodeBuffer& code)
+{
+    return AppendByte(code, 0x50);
+}
+
+bool AppendPushad(CodeBuffer& code)
+{
+    return AppendByte(code, 0x60);
+}
+
+bool AppendPopad(CodeBuffer& code)
+{
+    return AppendByte(code, 0x61);
+}
+
+bool AppendMovzxEaxCx(CodeBuffer& code)
+{
+    return AppendByte(code, 0x0F) && AppendByte(code, 0xB7) && AppendByte(code, 0xC1);
+}
+
+bool AppendOriginalFunctionPrologue(CodeBuffer& code)
+{
+    return AppendByte(code, 0x55) &&
+        AppendByte(code, 0x8B) && AppendByte(code, 0xEC) &&
+        AppendByte(code, 0x6A) && AppendByte(code, 0xFF);
+}
+
 bool AppendRel32Instruction(CodeBuffer& code, BYTE opcode, uintptr_t destination)
 {
     if (!CanWrite(code, 5)) {
@@ -193,16 +240,15 @@ PatchResult ApplyPatch(uintptr_t base, const MemoryPatch& patch)
 
 JumpPatchResult ApplyJumpPatch(uintptr_t base, const JumpPatch& patch)
 {
-    constexpr size_t kCodeCapacity = 128;
-    void* codeMemory = VirtualAlloc(nullptr, kCodeCapacity, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     void* hookAddress = reinterpret_cast<void*>(base + patch.hookOffset);
+    void* codeMemory = VirtualAlloc(nullptr, patch.codeCapacity, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!codeMemory) {
         return { &patch, hookAddress, nullptr, 0, false };
     }
 
     CodeBuffer code{
         static_cast<BYTE*>(codeMemory),
-        kCodeCapacity,
+        patch.codeCapacity,
         0,
         reinterpret_cast<uintptr_t>(codeMemory),
     };
@@ -222,6 +268,154 @@ JumpPatchResult ApplyJumpPatch(uintptr_t base, const JumpPatch& patch)
     return { &patch, hookAddress, codeMemory, code.size, true };
 }
 
+uint32_t ReadU32Unaligned(const BYTE* address)
+{
+    uint32_t value = 0;
+    std::memcpy(&value, address, sizeof(value));
+    return value;
+}
+
+uint32_t ReadGameU32(uintptr_t address)
+{
+    return *reinterpret_cast<volatile uint32_t*>(address);
+}
+
+DWORD GetGameTick()
+{
+    using GetTickFn = DWORD(__stdcall*)();
+    GetTickFn tick = *reinterpret_cast<GetTickFn*>(g_mainBase + 0x1C43DC);
+    return tick ? tick() : 0;
+}
+
+void SendDailySignPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket = reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(opcode, payload, payloadLength);
+}
+
+void WriteDailySignLog(const wchar_t* text)
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
+    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
+
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
+
+    printLog(g_mainBase + 0x230504, kDailySignLogFormat, text);
+    if (refreshLog) {
+        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
+    }
+}
+
+uint32_t BuildDailySignBonusPayload(uint32_t index)
+{
+    using BonusPayloadFn = uint32_t(__stdcall*)(uint32_t);
+    BonusPayloadFn buildPayload = *reinterpret_cast<BonusPayloadFn*>(g_mainBase + 0x1C4930);
+    return buildPayload ? buildPayload(index) : 0;
+}
+
+void SendDailySignQuery(bool updateTick)
+{
+    if (updateTick) {
+        InterlockedExchange(&g_dailySignLastQuery, static_cast<LONG>(GetGameTick()));
+    }
+    SendDailySignPacket(0x4EFF, nullptr, 0);
+}
+
+void SendDailySignNow()
+{
+    SendDailySignPacket(0x4F03, nullptr, 0);
+    WriteDailySignLog(kDailySignLogDaily);
+}
+
+void SendDailySignBonus(uint32_t index)
+{
+    g_dailySignBonusPayload = BuildDailySignBonusPayload(index);
+    SendDailySignPacket(0x4F02, &g_dailySignBonusPayload, sizeof(g_dailySignBonusPayload));
+    WriteDailySignLog(kDailySignLogBonus);
+}
+
+void ParseDailySignPayload(const BYTE* payload)
+{
+    if (!payload) {
+        return;
+    }
+
+    if (payload[12] == 1) {
+        InterlockedExchange(&g_dailySignNeedSign, 1);
+    }
+
+    LONG bonusBits = 0;
+    const uint32_t thresholds[] = {
+        0x02000000,
+        0x05000000,
+        0x08000000,
+        0x0C000000,
+        0x10000000,
+        0x14000000,
+        0x1A000000,
+    };
+
+    for (uint32_t day = 1; day <= 7; ++day) {
+        const uint32_t dayValue = day << 24;
+        for (size_t offset = 0; offset < 0x900; ++offset) {
+            const BYTE* cursor = payload + offset;
+            if (ReadU32Unaligned(cursor) == dayValue &&
+                ReadU32Unaligned(cursor + 4) == thresholds[day - 1] &&
+                ReadU32Unaligned(cursor + 8) == 0x02000000) {
+                bonusBits |= 1 << (day - 1);
+                break;
+            }
+        }
+    }
+
+    InterlockedExchange(&g_dailySignBonusBits, bonusBits);
+}
+
+__declspec(noinline) void __stdcall DailySignDispatchHook(uint32_t opcode, const BYTE* payload)
+{
+    if ((opcode & 0xFFFF) != 0x4F05) {
+        return;
+    }
+
+    ParseDailySignPayload(payload);
+    InterlockedExchange(&g_dailySignLastQuery, static_cast<LONG>(GetGameTick()));
+}
+
+__declspec(noinline) void __stdcall DailySignSendHook()
+{
+    if (ReadGameU32(g_mainBase + 0x230314) == 0) {
+        return;
+    }
+
+    const DWORD now = GetGameTick();
+    const DWORD lastQuery = static_cast<DWORD>(g_dailySignLastQuery);
+    if (lastQuery == 0 || now - lastQuery > 0x00200B20) {
+        InterlockedExchange(&g_dailySignLastQuery, static_cast<LONG>(now));
+        SendDailySignQuery(false);
+    }
+
+    if (InterlockedCompareExchange(&g_dailySignNeedSign, 0, 1) == 1) {
+        SendDailySignNow();
+    }
+
+    LONG bits = g_dailySignBonusBits;
+    for (uint32_t day = 1; day <= 7; ++day) {
+        const LONG mask = 1 << (day - 1);
+        if ((bits & mask) == 0) {
+            continue;
+        }
+
+        SendDailySignBonus(day);
+        LONG current = 0;
+        do {
+            current = g_dailySignBonusBits;
+        } while (InterlockedCompareExchange(&g_dailySignBonusBits, current & ~mask, current) != current);
+        bits &= ~mask;
+    }
+}
+
 bool BuildSend37A4Code(uintptr_t base, CodeBuffer& code)
 {
     return AppendPushImm32(code, static_cast<uint32_t>(base + 0x2304BC)) &&
@@ -231,6 +425,26 @@ bool BuildSend37A4Code(uintptr_t base, CodeBuffer& code)
         AppendPushImm32(code, 0x37A4) &&
         AppendRel32Instruction(code, 0xE8, base + 0x4A360) &&
         AppendRel32Instruction(code, 0xE9, base + 0x4A790);
+}
+
+bool BuildDailySignSendCode(uintptr_t, CodeBuffer& code)
+{
+    return AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&DailySignSendHook)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0xC3);
+}
+
+bool BuildDailySignDispatchCode(uintptr_t base, CodeBuffer& code)
+{
+    return AppendPushad(code) &&
+        AppendPushEdx(code) &&
+        AppendMovzxEaxCx(code) &&
+        AppendPushEax(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&DailySignDispatchHook)) &&
+        AppendPopad(code) &&
+        AppendOriginalFunctionPrologue(code) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x42AD5);
 }
 
 size_t AppendMessage(char* buffer, size_t capacity, size_t used, const char* text)
@@ -299,6 +513,7 @@ DWORD WINAPI MainThread(LPVOID)
 {
     HMODULE mainModule = GetModuleHandleA(nullptr);
     uintptr_t base = reinterpret_cast<uintptr_t>(mainModule);
+    g_mainBase = base;
     PatchResult results[kPatchCount]{};
     JumpPatchResult jumpResults[kJumpPatchCount]{};
 
@@ -319,7 +534,7 @@ DWORD WINAPI MainThread(LPVOID)
     }
 
     const DWORD pid = GetCurrentProcessId();
-    char message[1024]{};
+    char message[2048]{};
     const int headerLength = std::snprintf(
         message,
         sizeof(message),
