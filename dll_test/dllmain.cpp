@@ -342,7 +342,7 @@ void ParseDailySignPayload(const BYTE* payload)
         return;
     }
 
-    if (payload[12] == 1) {
+    if (payload[0x12] == 1) {
         InterlockedExchange(&g_dailySignNeedSign, 1);
     }
 
@@ -396,8 +396,9 @@ __declspec(noinline) void __stdcall DailySignSendHook()
         SendDailySignQuery(false);
     }
 
-    if (InterlockedCompareExchange(&g_dailySignNeedSign, 0, 1) == 1) {
+    if (g_dailySignNeedSign == 1) {
         SendDailySignNow();
+        InterlockedExchange(&g_dailySignNeedSign, 0);
     }
 
     LONG bits = g_dailySignBonusBits;
