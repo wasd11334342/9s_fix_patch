@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 
 namespace
 {
@@ -64,6 +65,20 @@ uint32_t g_dailySignBonusPayload = 0;
 const wchar_t kDailySignLogFormat[] = L"%s";
 const wchar_t kDailySignLogDaily[] = L"\x6BCF\x65E5\x7C3D\x5230";
 const wchar_t kDailySignLogBonus[] = L"\x7D2F\x7A4D\x7C3D\x5230";
+}
+
+namespace PrizePool
+{
+volatile LONG g_id = 0;
+volatile LONG g_count = 0;
+volatile LONG g_state = 0;
+volatile LONG g_lastQuery = 0;
+uint32_t g_now = 0;
+uint32_t g_payload[2]{};
+
+const BYTE kQueryPayload[] = { 0x00, 0x00, 0x4E, 0x49, 0x14, 0x1B, 0x9E, 0x38 };
+const wchar_t kLogFormat[] = L"%s";
+const wchar_t kLogCase[] = { 0x734E, 0x6C60, 0x653E, 0x9001, 0x0000 };
 }
 
 // Dragon vein fix
@@ -155,7 +170,19 @@ bool BuildSend37A4Code(uintptr_t base, CodeBuffer& code);
 namespace DailySign
 {
 bool BuildSendCode(uintptr_t base, CodeBuffer& code);
-bool BuildDispatchCode(uintptr_t base, CodeBuffer& code);
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload);
+}
+
+namespace PrizePool
+{
+bool BuildSendCode(uintptr_t base, CodeBuffer& code);
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload);
+}
+
+namespace SharedRecvRouter
+{
+volatile LONG g_clearStackArg = 0;
+bool BuildCode(uintptr_t base, CodeBuffer& code);
 }
 
 namespace LgfGuard
@@ -167,8 +194,9 @@ bool Build3970Code(uintptr_t base, CodeBuffer& code);
 
 const JumpPatch kJumpPatches[] = {
     { "Fast Daily Battle", 0x4A785, 11, 128, FastDailyBattle::BuildSend37A4Code },
+    { "Shared recv router", 0x42AD0, 5, 128, SharedRecvRouter::BuildCode },
     { "Daily Sign send tick", 0x38F90, 5, 128, DailySign::BuildSendCode },
-    { "Daily Sign recv dispatch", 0x42AD0, 5, 128, DailySign::BuildDispatchCode },
+    { "Prize Pool sender", 0x364C0, 5, 128, PrizePool::BuildSendCode },
     { "LGF status log", 0x37150, 7, 128, LgfGuard::BuildMainCode },
     { "LGF 396D guard", 0x4AC30, 6, 128, LgfGuard::Build396DCode },
     { "LGF 3970 guard", 0x4AC90, 6, 128, LgfGuard::Build3970Code },
@@ -282,6 +310,23 @@ bool AppendMovDwordPtrEspOffsetEax(CodeBuffer& code, BYTE offset)
         AppendByte(code, offset);
 }
 
+bool AppendMovDwordAbsImm32(CodeBuffer& code, uint32_t address, uint32_t value)
+{
+    return AppendByte(code, 0xC7) &&
+        AppendByte(code, 0x05) &&
+        AppendU32(code, address) &&
+        AppendU32(code, value);
+}
+
+bool AppendMovDwordPtrEspOffsetImm32(CodeBuffer& code, BYTE offset, uint32_t value)
+{
+    return AppendByte(code, 0xC7) &&
+        AppendByte(code, 0x44) &&
+        AppendByte(code, 0x24) &&
+        AppendByte(code, offset) &&
+        AppendU32(code, value);
+}
+
 bool AppendOriginalFunctionPrologue(CodeBuffer& code)
 {
     return AppendByte(code, 0x55) &&
@@ -307,6 +352,11 @@ bool AppendCmpDwordAbsImm8(CodeBuffer& code, uint32_t address, BYTE value)
 bool AppendJneShort(CodeBuffer& code, BYTE displacement)
 {
     return AppendByte(code, 0x75) && AppendByte(code, displacement);
+}
+
+bool AppendJeShort(CodeBuffer& code, BYTE displacement)
+{
+    return AppendByte(code, 0x74) && AppendByte(code, displacement);
 }
 
 bool AppendRetImm16(CodeBuffer& code, uint16_t bytes)
@@ -763,7 +813,7 @@ void ParseDailySignPayload(const BYTE* payload)
     InterlockedExchange(&g_dailySignBonusBits, bonusBits);
 }
 
-__declspec(noinline) void __stdcall DailySignDispatchHook(uint32_t opcode, const BYTE* payload)
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload)
 {
     if ((opcode & 0xFFFF) != 0x4F05) {
         return;
@@ -809,6 +859,108 @@ __declspec(noinline) void __stdcall DailySignSendHook()
 
 }
 
+namespace PrizePool
+{
+
+uint32_t BuildPayload(uint32_t value)
+{
+    using BuildPayloadFn = uint32_t(__stdcall*)(uint32_t);
+    BuildPayloadFn buildPayload = *reinterpret_cast<BuildPayloadFn*>(g_mainBase + 0x1C4930);
+    return buildPayload ? buildPayload(value) : 0;
+}
+
+void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket = reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(opcode, payload, payloadLength);
+}
+
+void WriteLog(const wchar_t* text)
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
+    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
+
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
+
+    printLog(g_mainBase + 0x230504, kLogFormat, text);
+    if (refreshLog) {
+        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
+    }
+}
+
+void SendAction(BYTE action)
+{
+    g_payload[0] = BuildPayload(static_cast<uint32_t>(g_id));
+    g_payload[1] = 0;
+    reinterpret_cast<BYTE*>(g_payload)[4] = action;
+    SendPacket(0x3EA5, g_payload, 5);
+}
+
+void SendQuery()
+{
+    SendPacket(0x25EE, kQueryPayload, sizeof(kQueryPayload));
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload)
+{
+    if ((opcode & 0xFFFF) != 0x3EA4 || !payload) {
+        return;
+    }
+
+    InterlockedExchange(&g_id, static_cast<LONG>(BuildPayload(ReadU32Unaligned(payload))));
+    InterlockedExchange(&g_count, static_cast<LONG>(payload[0x215]));
+    InterlockedExchange(&g_state, static_cast<LONG>(payload[0x21A]));
+    InterlockedExchange(&SharedRecvRouter::g_clearStackArg, 1);
+}
+
+__declspec(noinline) void __stdcall SendHook()
+{
+    if (ReadGameU32(g_mainBase + 0x230388) == 0) {
+        return;
+    }
+
+    const DWORD now = GetGameTick();
+    g_now = now;
+
+    const DWORD lastQuery = static_cast<DWORD>(g_lastQuery);
+    if (lastQuery == 0 || now - lastQuery > 0x00200B20) {
+        InterlockedExchange(&g_lastQuery, static_cast<LONG>(now));
+        SendQuery();
+        return;
+    }
+
+    if (g_id == 0) {
+        return;
+    }
+
+    if ((static_cast<BYTE>(g_state) == 0xFF)) {
+        if (g_count == 0) {
+            return;
+        }
+
+        SendAction(1);
+        SendAction(2);
+        InterlockedExchange(&g_count, 0);
+        WriteLog(kLogCase);
+        return;
+    }
+
+    SendAction(2);
+    WriteLog(kLogCase);
+}
+
+bool BuildSendCode(uintptr_t, CodeBuffer& code)
+{
+    return AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&SendHook)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0xC3);
+}
+
+}
+
 namespace FastDailyBattle
 {
 
@@ -836,13 +988,31 @@ bool BuildSendCode(uintptr_t, CodeBuffer& code)
         AppendByte(code, 0xC3);
 }
 
-bool BuildDispatchCode(uintptr_t base, CodeBuffer& code)
+}
+
+namespace SharedRecvRouter
 {
+
+__declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* payload)
+{
+    InterlockedExchange(&g_clearStackArg, 0);
+    DailySign::HandleRecvPacket(opcode, payload);
+    PrizePool::HandleRecvPacket(opcode, payload);
+}
+
+bool BuildCode(uintptr_t base, CodeBuffer& code)
+{
+    const uint32_t clearStackArg = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_clearStackArg));
+
     return AppendPushad(code) &&
+        AppendMovDwordAbsImm32(code, clearStackArg, 0) &&
         AppendPushEdx(code) &&
         AppendMovzxEaxCx(code) &&
         AppendPushEax(code) &&
-        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&DailySignDispatchHook)) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&DispatchHook)) &&
+        AppendCmpDwordAbsImm8(code, clearStackArg, 0) &&
+        AppendJeShort(code, 0x08) &&
+        AppendMovDwordPtrEspOffsetImm32(code, 0x24, 0) &&
         AppendPopad(code) &&
         AppendOriginalFunctionPrologue(code) &&
         AppendRel32Instruction(code, 0xE9, base + 0x42AD5);
@@ -857,6 +1027,21 @@ size_t AppendMessage(char* buffer, size_t capacity, size_t used, const char* tex
     }
 
     const int written = std::snprintf(buffer + used, capacity - used, "%s", text);
+    if (written <= 0) {
+        return used;
+    }
+
+    const size_t added = static_cast<size_t>(written);
+    return used + (added < capacity - used ? added : capacity - used - 1);
+}
+
+size_t AppendWideMessage(wchar_t* buffer, size_t capacity, size_t used, const wchar_t* text)
+{
+    if (used >= capacity) {
+        return used;
+    }
+
+    const int written = std::swprintf(buffer + used, capacity - used, L"%s", text);
     if (written <= 0) {
         return used;
     }
@@ -910,6 +1095,35 @@ LRESULT CALLBACK MessageBoxHook(int code, WPARAM wParam, LPARAM lParam)
 
     return CallNextHookEx(currentHook, code, wParam, lParam);
 }
+
+bool IsPatchApplied(const PatchResult* results, size_t count, const char* name)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (results[i].patch && std::strcmp(results[i].patch->name, name) == 0) {
+            return results[i].applied;
+        }
+    }
+
+    return false;
+}
+
+bool IsJumpPatchApplied(const JumpPatchResult* results, size_t count, const char* name)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (results[i].patch && std::strcmp(results[i].patch->name, name) == 0) {
+            return results[i].applied;
+        }
+    }
+
+    return false;
+}
+
+void AppendFeatureStatus(wchar_t* message, size_t capacity, size_t& used, const wchar_t* name, bool ok)
+{
+    wchar_t line[128]{};
+    std::swprintf(line, sizeof(line) / sizeof(line[0]), L"%s %s\n", name, ok ? L"OK" : L"FAILED");
+    used = AppendWideMessage(message, capacity, used, line);
+}
 }
 
 DWORD WINAPI MainThread(LPVOID)
@@ -937,11 +1151,11 @@ DWORD WINAPI MainThread(LPVOID)
     }
 
     const DWORD pid = GetCurrentProcessId();
-    char message[2048]{};
-    const int headerLength = std::snprintf(
+    wchar_t message[2048]{};
+    const int headerLength = std::swprintf(
         message,
-        sizeof(message),
-        "PID: %lu\nPID hex: 0x%lX\nBase: %p\nByte patches: %zu/%zu applied\nJump patches: %zu/%zu applied\n",
+        sizeof(message) / sizeof(message[0]),
+        L"PID: %lu\nPID hex: 0x%lX\nBase: %p\nByte patches: %zu/%zu applied\nJump patches: %zu/%zu applied\n\n",
         pid,
         pid,
         reinterpret_cast<void*>(base),
@@ -951,36 +1165,30 @@ DWORD WINAPI MainThread(LPVOID)
         kJumpPatchCount);
     size_t used = headerLength > 0 ? static_cast<size_t>(headerLength) : 0;
 
-    for (const PatchResult& result : results) {
-        char line[192]{};
-        std::snprintf(
-            line,
-            sizeof(line),
-            "%s @ +0x%lX -> %p (%zu bytes): %s\n",
-            result.patch->name,
-            static_cast<unsigned long>(result.patch->offset),
-            result.address,
-            result.patch->size,
-            result.applied ? "OK" : "FAILED");
-        used = AppendMessage(message, sizeof(message), used, line);
-    }
+    const bool sharedRouterOk = IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Shared recv router");
+    const bool dragonVeinOk = IsPatchApplied(results, kPatchCount, "Dragon vein fix");
+    const bool breakEggOk = IsPatchApplied(results, kPatchCount, "Break egg fix");
+    const bool dailySignOk = sharedRouterOk &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Daily Sign send tick");
+    const bool prizePoolOk = sharedRouterOk &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Prize Pool sender");
+    const bool lgfOk = IsPatchApplied(results, kPatchCount, "LGF refresh interval") &&
+        IsPatchApplied(results, kPatchCount, "LGF suppress action log") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF status log") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF 396D guard") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF 3970 guard");
+    const bool fastDailyBattleOk = IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Fast Daily Battle");
 
-    for (const JumpPatchResult& result : jumpResults) {
-        char line[224]{};
-        std::snprintf(
-            line,
-            sizeof(line),
-            "%s @ +0x%lX -> %p (%zu bytes): %s\n",
-            result.patch->name,
-            static_cast<unsigned long>(result.patch->hookOffset),
-            result.codeAddress,
-            result.codeSize,
-            result.applied ? "OK" : "FAILED");
-        used = AppendMessage(message, sizeof(message), used, line);
-    }
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5171\x7528\x6536\x5305Router", sharedRouterOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x9F8D\x8108", dragonVeinOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7838\x86CB", breakEggOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x6BCF\x65E5\x7C3D\x5230", dailySignOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x734E\x6C60\x653E\x9001", prizePoolOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7DF4\x529F\x623F", lgfOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5FEB\x901F\x6BCF\x65E5\x6230\x9B25", fastDailyBattleOk);
 
     g_msgBoxHook = SetWindowsHookExA(WH_CBT, MessageBoxHook, nullptr, GetCurrentThreadId());
-    MessageBoxA(nullptr, message, "MyPatch", MB_OK);
+    MessageBoxW(nullptr, message, L"MyPatch", MB_OK);
     if (g_msgBoxHook) {
         UnhookWindowsHookEx(g_msgBoxHook);
         g_msgBoxHook = nullptr;
