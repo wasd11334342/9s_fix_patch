@@ -1,0 +1,388 @@
+[ENABLE]
+// Codex split shared recv router
+// Enable once before Daily Sign / Prize Pool / Weekly Task scripts.
+
+define(shared_dispatch,Online.exe+42AD0)
+
+alloc(shared_dispatch_hook,4096)
+
+alloc(daysign_need_sign,4)
+alloc(daysign_bonus_bits,4)
+alloc(daysign_last_query,4)
+
+alloc(xycj_id,4)
+alloc(xycj_count,4)
+alloc(xycj_state,4)
+
+alloc(weekly_activity,4)
+alloc(weekly_next_data,4)
+alloc(weekly_pending_next,4)
+alloc(weekly_cmd_send_next,4)
+alloc(weekly_last_sent_data,4)
+alloc(weekly_recv_len,4)
+alloc(weekly_packet_dump,2048)
+
+alloc(router_log_weekly_recv,128)
+
+registersymbol(daysign_need_sign)
+registersymbol(daysign_bonus_bits)
+registersymbol(daysign_last_query)
+registersymbol(xycj_id)
+registersymbol(xycj_count)
+registersymbol(xycj_state)
+registersymbol(weekly_activity)
+registersymbol(weekly_next_data)
+registersymbol(weekly_pending_next)
+registersymbol(weekly_cmd_send_next)
+registersymbol(weekly_last_sent_data)
+registersymbol(weekly_recv_len)
+registersymbol(weekly_packet_dump)
+
+label(dispatch_return)
+label(dispatch_done)
+label(handle_daysign_4f05)
+label(handle_xycj_3ea4)
+label(handle_weekly_4bb0)
+label(weekly_new_pair)
+label(weekly_find_next_pattern)
+label(weekly_find_next_loop)
+label(weekly_find_next_found)
+label(weekly_find_next_done)
+label(parse_payload)
+label(scan_b1)
+label(scan_b2)
+label(scan_b3)
+label(scan_b4)
+label(scan_b5)
+label(scan_b6)
+label(scan_b7)
+label(next_b2)
+label(next_b3)
+label(next_b4)
+label(next_b5)
+label(next_b6)
+label(next_b7)
+
+daysign_need_sign:
+  dd 0
+daysign_bonus_bits:
+  dd 0
+daysign_last_query:
+  dd 0
+
+xycj_id:
+  dd 0
+xycj_count:
+  dd 0
+xycj_state:
+  dd 0
+weekly_activity:
+  dd 0
+weekly_next_data:
+  dd 0
+weekly_pending_next:
+  dd 0
+weekly_cmd_send_next:
+  dd 0
+weekly_last_sent_data:
+  dd FFFFFFFF
+weekly_recv_len:
+  dd 0
+weekly_packet_dump:
+  db 00 00 00 00
+
+// L"周常任務 積分 %i"
+router_log_weekly_recv:
+  db 68 54 38 5E FB 4E D9 52 20 00 4D 7A 06 52 20 00 25 00 69 00 00 00
+
+shared_dispatch:
+  jmp shared_dispatch_hook
+dispatch_return:
+
+shared_dispatch_hook:
+  pushad
+
+  cmp cx,4F05
+  je handle_daysign_4f05
+
+  cmp cx,3EA4
+  je handle_xycj_3ea4
+
+  cmp cx,4BB0
+  je handle_weekly_4bb0
+
+  jmp dispatch_done
+
+handle_daysign_4f05:
+  mov esi,edx
+  call parse_payload
+
+  call dword ptr [Online.exe+1C43DC]
+  mov [daysign_last_query],eax
+  jmp dispatch_done
+
+handle_xycj_3ea4:
+  mov esi,edx
+
+  push dword ptr [esi]
+  call dword ptr [Online.exe+1C4930]
+  mov [xycj_id],eax
+
+  movzx eax,byte ptr [esi+215]
+  mov [xycj_count],eax
+
+  movzx eax,byte ptr [esi+21A]
+  mov [xycj_state],eax
+
+  mov dword ptr [esp+24],00
+  jmp dispatch_done
+
+handle_weekly_4bb0:
+  mov esi,edx
+
+  mov eax,[esp+24]
+  mov [weekly_recv_len],eax
+
+  // Reconstructed packet bytes:
+  // [0..1] = payload_len + 4, [2..3] = 4B B0, [4..] = payload.
+  // The original trailing checksum is not available at this dispatch layer.
+  mov ebx,eax
+  add ebx,04
+  mov byte ptr [weekly_packet_dump],bh
+  mov byte ptr [weekly_packet_dump+1],bl
+  mov byte ptr [weekly_packet_dump+2],4B
+  mov byte ptr [weekly_packet_dump+3],B0
+
+  mov ecx,eax
+  cmp ecx,07FC
+  jbe @f
+  mov ecx,07FC
+@@:
+  lea edi,[weekly_packet_dump+4]
+  mov ebx,esi
+  test ecx,ecx
+  je @f
+@@:
+  mov al,[ebx]
+  mov [edi],al
+  inc ebx
+  inc edi
+  loop @b
+@@:
+
+  movzx eax,byte ptr [esi+2]
+  shl eax,08
+  movzx ebx,byte ptr [esi+3]
+  add eax,ebx
+  mov [weekly_activity],eax
+
+  push eax
+  push router_log_weekly_recv
+  push Online.exe+230504
+  call Online.exe+2EF0
+  add esp,0C
+
+  push 00
+  push 00
+  push dword ptr [Online.exe+2304D8]
+  push dword ptr [Online.exe+2300A4]
+  call dword ptr [Online.exe+1C46B0]
+
+  call weekly_find_next_pattern
+  cmp dword ptr [weekly_next_data],FFFFFFFF
+  je dispatch_done
+
+  mov eax,[weekly_next_data]
+  cmp eax,[weekly_last_sent_data]
+  jne weekly_new_pair
+  jmp dispatch_done
+
+weekly_new_pair:
+  mov dword ptr [weekly_pending_next],01
+  mov dword ptr [weekly_cmd_send_next],01
+
+  jmp dispatch_done
+
+weekly_find_next_pattern:
+  mov dword ptr [weekly_next_data],FFFFFFFF
+
+  mov edi,esi
+  mov ecx,[weekly_recv_len]
+  cmp ecx,08
+  jb weekly_find_next_done
+  sub ecx,07
+
+weekly_find_next_loop:
+  cmp dword ptr [edi],09007D7B
+  je weekly_find_next_found
+  inc edi
+  loop weekly_find_next_loop
+  jmp weekly_find_next_done
+
+weekly_find_next_found:
+  mov eax,[edi+4]
+  mov [weekly_next_data],eax
+
+weekly_find_next_done:
+  ret
+
+dispatch_done:
+  popad
+
+  push ebp
+  mov ebp,esp
+  push FF
+  push 005B4A58
+  jmp dispatch_return
+
+parse_payload:
+  cmp byte ptr [esi+12],01
+  jne @f
+  mov dword ptr [daysign_need_sign],01
+@@:
+
+  mov dword ptr [daysign_bonus_bits],00
+
+  mov edi,esi
+  mov ecx,900
+scan_b1:
+  cmp dword ptr [edi],01000000
+  jne @f
+  cmp dword ptr [edi+4],02000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],01
+  jmp next_b2
+@@:
+  inc edi
+  loop scan_b1
+
+next_b2:
+  mov edi,esi
+  mov ecx,900
+scan_b2:
+  cmp dword ptr [edi],02000000
+  jne @f
+  cmp dword ptr [edi+4],05000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],02
+  jmp next_b3
+@@:
+  inc edi
+  loop scan_b2
+
+next_b3:
+  mov edi,esi
+  mov ecx,900
+scan_b3:
+  cmp dword ptr [edi],03000000
+  jne @f
+  cmp dword ptr [edi+4],08000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],04
+  jmp next_b4
+@@:
+  inc edi
+  loop scan_b3
+
+next_b4:
+  mov edi,esi
+  mov ecx,900
+scan_b4:
+  cmp dword ptr [edi],04000000
+  jne @f
+  cmp dword ptr [edi+4],0C000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],08
+  jmp next_b5
+@@:
+  inc edi
+  loop scan_b4
+
+next_b5:
+  mov edi,esi
+  mov ecx,900
+scan_b5:
+  cmp dword ptr [edi],05000000
+  jne @f
+  cmp dword ptr [edi+4],10000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],10
+  jmp next_b6
+@@:
+  inc edi
+  loop scan_b5
+
+next_b6:
+  mov edi,esi
+  mov ecx,900
+scan_b6:
+  cmp dword ptr [edi],06000000
+  jne @f
+  cmp dword ptr [edi+4],14000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],20
+  jmp next_b7
+@@:
+  inc edi
+  loop scan_b6
+
+next_b7:
+  mov edi,esi
+  mov ecx,900
+scan_b7:
+  cmp dword ptr [edi],07000000
+  jne @f
+  cmp dword ptr [edi+4],1A000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],40
+@@:
+  ret
+
+[DISABLE]
+
+shared_dispatch:
+  db 55 8B EC 6A FF
+
+unregistersymbol(xycj_state)
+unregistersymbol(xycj_count)
+unregistersymbol(xycj_id)
+unregistersymbol(weekly_last_sent_data)
+unregistersymbol(weekly_cmd_send_next)
+unregistersymbol(weekly_pending_next)
+unregistersymbol(weekly_recv_len)
+unregistersymbol(weekly_packet_dump)
+unregistersymbol(weekly_next_data)
+unregistersymbol(weekly_activity)
+unregistersymbol(daysign_last_query)
+unregistersymbol(daysign_bonus_bits)
+unregistersymbol(daysign_need_sign)
+
+dealloc(router_log_weekly_recv)
+dealloc(weekly_last_sent_data)
+dealloc(weekly_cmd_send_next)
+dealloc(weekly_pending_next)
+dealloc(weekly_recv_len)
+dealloc(weekly_packet_dump)
+dealloc(weekly_next_data)
+dealloc(weekly_activity)
+dealloc(xycj_state)
+dealloc(xycj_count)
+dealloc(xycj_id)
+dealloc(daysign_last_query)
+dealloc(daysign_bonus_bits)
+dealloc(daysign_need_sign)
+dealloc(shared_dispatch_hook)

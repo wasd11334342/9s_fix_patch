@@ -1,0 +1,332 @@
+[ENABLE]
+// XWDB -> weekly task sender
+// Switch: ONLINE.EXE+2303B0
+// Original function: ONLINE.EXE+35CE0 / sub_435CE0
+// Router stores weekly_next_data from the 4 bytes after 7B 7D 00 09.
+// Router sets weekly_cmd_send_next=1 only when the data differs from last sent.
+//
+// Main-loop mode:
+//   No extra thread.
+//   First run or 21 minutes after the last query sends 4BAF.
+//   If weekly_cmd_send_next=1, sends 4BB1 from the original XWDB entry.
+//   When router sees a repeated pair, weekly_cmd_send_next stays 0 until next query.
+
+define(xwdb_func,ONLINE.EXE+35CE0)
+define(weekly_query_interval,00133AE0)
+
+alloc(xwdb_send_hook,1024,xwdb_func)
+alloc(xwdb_last_query_tick,4)
+alloc(xwdb_next_payload,4)
+alloc(xwdb_reward_payload,4)
+alloc(xwdb_log_send_reward,80)
+alloc(weekly_reward_cmd_send,4)
+alloc(weekly_reward_next_id,4)
+alloc(weekly_reward_next_index,4)
+alloc(weekly_reward_last_sent_id,4)
+alloc(weekly_reward_count,4)
+alloc(weekly_reward_candidate_count,4)
+alloc(weekly_reward_state1,4)
+alloc(weekly_reward_state2,4)
+alloc(weekly_reward_state3,4)
+alloc(weekly_reward_state4,4)
+alloc(weekly_reward_state5,4)
+alloc(weekly_reward_state6,4)
+alloc(weekly_reward_state7,4)
+
+registersymbol(xwdb_last_query_tick)
+registersymbol(weekly_reward_cmd_send)
+registersymbol(weekly_reward_next_id)
+registersymbol(weekly_reward_next_index)
+registersymbol(weekly_reward_last_sent_id)
+registersymbol(weekly_reward_count)
+registersymbol(weekly_reward_candidate_count)
+registersymbol(weekly_reward_state1)
+registersymbol(weekly_reward_state2)
+registersymbol(weekly_reward_state3)
+registersymbol(weekly_reward_state4)
+registersymbol(weekly_reward_state5)
+registersymbol(weekly_reward_state6)
+registersymbol(weekly_reward_state7)
+
+label(xwdb_send_done)
+label(xwdb_on)
+label(xwdb_check_query_time)
+label(xwdb_send_query)
+label(xwdb_send_next)
+label(xwdb_send_reward)
+label(xwdb_scan_rewards)
+label(xwdb_reward_scan_loop)
+label(xwdb_reward_next_byte)
+label(xwdb_reward_valid_state)
+label(xwdb_reward_check_claim)
+label(xwdb_reward_store_state)
+label(xwdb_reward_scan_done)
+label(xwdb_reward_state_table)
+label(xwdb_write_reward_log)
+
+xwdb_last_query_tick:
+  dd 0
+xwdb_next_payload:
+  dd 0
+xwdb_reward_payload:
+  dd 0
+weekly_reward_cmd_send:
+  dd 0
+weekly_reward_next_id:
+  dd 0
+weekly_reward_next_index:
+  dd 0
+weekly_reward_last_sent_id:
+  dd FFFFFFFF
+weekly_reward_count:
+  dd 0
+weekly_reward_candidate_count:
+  dd 0
+weekly_reward_state1:
+  dd 0
+weekly_reward_state2:
+  dd 0
+weekly_reward_state3:
+  dd 0
+weekly_reward_state4:
+  dd 0
+weekly_reward_state5:
+  dd 0
+weekly_reward_state6:
+  dd 0
+weekly_reward_state7:
+  dd 0
+
+xwdb_reward_state_table:
+  dd weekly_reward_state1
+  dd weekly_reward_state2
+  dd weekly_reward_state3
+  dd weekly_reward_state4
+  dd weekly_reward_state5
+  dd weekly_reward_state6
+  dd weekly_reward_state7
+// L"周常獎勵 第%i個累積獎勵"
+xwdb_log_send_reward:
+  db 68 54 38 5E 4E 73 F5 52 20 00 2C 7B 25 00 69 00 0B 50 2F 7D 4D 7A 4E 73 F5 52 00 00
+
+xwdb_func:
+  jmp xwdb_send_hook
+
+xwdb_send_hook:
+  cmp dword ptr [ONLINE.EXE+2303B0],00
+  jne xwdb_on
+
+  mov dword ptr [xwdb_last_query_tick],00
+  mov dword ptr [weekly_cmd_send_next],00
+  mov dword ptr [weekly_pending_next],00
+  mov dword ptr [weekly_reward_cmd_send],00
+  jmp xwdb_send_done
+
+xwdb_on:
+  pushad
+  call xwdb_scan_rewards
+  popad
+
+  cmp dword ptr [weekly_reward_cmd_send],01
+  je xwdb_send_reward
+
+  cmp dword ptr [weekly_cmd_send_next],01
+  je xwdb_send_next
+
+xwdb_check_query_time:
+  call dword ptr [ONLINE.EXE+1C43DC]
+  mov ebx,eax
+
+  cmp dword ptr [xwdb_last_query_tick],00
+  je xwdb_send_query
+
+  mov ecx,ebx
+  sub ecx,[xwdb_last_query_tick]
+  cmp ecx,weekly_query_interval
+  jae xwdb_send_query
+
+  jmp xwdb_send_done
+
+xwdb_send_query:
+  mov [xwdb_last_query_tick],ebx
+  mov dword ptr [weekly_cmd_send_next],00
+  mov dword ptr [weekly_pending_next],00
+  mov dword ptr [weekly_last_sent_data],FFFFFFFF
+  mov dword ptr [weekly_reward_last_sent_id],FFFFFFFF
+
+  push 00
+  push 00
+  push 00004BAF
+  call ONLINE.EXE+4A360
+
+  jmp xwdb_send_done
+
+xwdb_send_next:
+  mov dword ptr [weekly_cmd_send_next],00
+  mov dword ptr [weekly_pending_next],00
+
+  mov eax,[weekly_next_data]
+  mov [xwdb_next_payload],eax
+
+  push 04
+  push xwdb_next_payload
+  push 00004BB1
+  call ONLINE.EXE+4A360
+
+  mov eax,[weekly_next_data]
+  mov [weekly_last_sent_data],eax
+
+  jmp xwdb_send_done
+
+xwdb_send_reward:
+  mov dword ptr [weekly_reward_cmd_send],00
+
+  mov dword ptr [xwdb_reward_payload],00
+  mov eax,[weekly_reward_next_id]
+  mov byte ptr [xwdb_reward_payload+3],al
+
+  push 04
+  push xwdb_reward_payload
+  push 00004BB2
+  call ONLINE.EXE+4A360
+
+  mov eax,[weekly_reward_next_id]
+  mov [weekly_reward_last_sent_id],eax
+
+  call xwdb_write_reward_log
+  jmp xwdb_send_done
+
+xwdb_send_done:
+  ret
+
+xwdb_scan_rewards:
+  mov dword ptr [weekly_reward_cmd_send],00
+  mov dword ptr [weekly_reward_count],00
+  mov dword ptr [weekly_reward_candidate_count],00
+  mov dword ptr [weekly_reward_state1],00
+  mov dword ptr [weekly_reward_state2],00
+  mov dword ptr [weekly_reward_state3],00
+  mov dword ptr [weekly_reward_state4],00
+  mov dword ptr [weekly_reward_state5],00
+  mov dword ptr [weekly_reward_state6],00
+  mov dword ptr [weekly_reward_state7],00
+
+  cmp byte ptr [weekly_packet_dump+2],4B
+  jne xwdb_reward_scan_done
+  cmp byte ptr [weekly_packet_dump+3],B0
+  jne xwdb_reward_scan_done
+
+  mov ecx,[weekly_recv_len]
+  cmp ecx,05
+  jb xwdb_reward_scan_done
+  sub ecx,04
+  lea edi,[weekly_packet_dump+4]
+
+xwdb_reward_scan_loop:
+  cmp dword ptr [edi],0000007D
+  jne xwdb_reward_next_byte
+
+  movzx eax,byte ptr [edi+4]
+  cmp eax,01
+  jb xwdb_reward_next_byte
+  cmp eax,03
+  ja xwdb_reward_next_byte
+  jmp xwdb_reward_valid_state
+
+xwdb_reward_next_byte:
+  inc edi
+  loop xwdb_reward_scan_loop
+  jmp xwdb_reward_scan_done
+
+xwdb_reward_valid_state:
+  cmp dword ptr [weekly_reward_count],07
+  jae xwdb_reward_scan_done
+  mov ebx,[weekly_reward_count]
+  mov edx,[xwdb_reward_state_table+ebx*4]
+  mov [edx],eax
+  cmp eax,02
+  je xwdb_reward_check_claim
+
+xwdb_reward_store_state:
+  inc dword ptr [weekly_reward_count]
+  inc dword ptr [weekly_reward_candidate_count]
+
+  inc edi
+  loop xwdb_reward_scan_loop
+  jmp xwdb_reward_scan_done
+
+xwdb_reward_check_claim:
+  cmp dword ptr [weekly_reward_cmd_send],01
+  je xwdb_reward_store_state
+
+  mov eax,ebx
+  inc eax
+  mov [weekly_reward_next_index],eax
+
+  // weekly_packet_dump includes 4 reconstructed header bytes.
+  // payload byte 15 is one-based, so payload+0E lives at weekly_packet_dump+12.
+  movzx eax,byte ptr [weekly_packet_dump+12]
+  add eax,ebx
+  cmp eax,[weekly_reward_last_sent_id]
+  je xwdb_reward_store_state
+
+  mov [weekly_reward_next_id],eax
+  mov dword ptr [weekly_reward_cmd_send],01
+  jmp xwdb_reward_store_state
+
+xwdb_reward_scan_done:
+  ret
+
+xwdb_write_reward_log:
+  mov eax,[weekly_reward_next_index]
+  push eax
+  push xwdb_log_send_reward
+  push ONLINE.EXE+230504
+  call ONLINE.EXE+2EF0
+  add esp,0C
+
+  push 00
+  push 00
+  push dword ptr [ONLINE.EXE+2304D8]
+  push dword ptr [ONLINE.EXE+2300A4]
+  call dword ptr [ONLINE.EXE+1C46B0]
+  ret
+
+[DISABLE]
+
+xwdb_func:
+  db 55 8B EC 83 EC
+
+unregistersymbol(weekly_reward_state7)
+unregistersymbol(weekly_reward_state6)
+unregistersymbol(weekly_reward_state5)
+unregistersymbol(weekly_reward_state4)
+unregistersymbol(weekly_reward_state3)
+unregistersymbol(weekly_reward_state2)
+unregistersymbol(weekly_reward_state1)
+unregistersymbol(weekly_reward_candidate_count)
+unregistersymbol(weekly_reward_count)
+unregistersymbol(weekly_reward_last_sent_id)
+unregistersymbol(weekly_reward_next_index)
+unregistersymbol(weekly_reward_next_id)
+unregistersymbol(weekly_reward_cmd_send)
+unregistersymbol(xwdb_last_query_tick)
+
+dealloc(weekly_reward_state7)
+dealloc(weekly_reward_state6)
+dealloc(weekly_reward_state5)
+dealloc(weekly_reward_state4)
+dealloc(weekly_reward_state3)
+dealloc(weekly_reward_state2)
+dealloc(weekly_reward_state1)
+dealloc(weekly_reward_candidate_count)
+dealloc(weekly_reward_count)
+dealloc(weekly_reward_last_sent_id)
+dealloc(weekly_reward_next_index)
+dealloc(weekly_reward_next_id)
+dealloc(weekly_reward_cmd_send)
+dealloc(xwdb_log_send_reward)
+dealloc(xwdb_reward_payload)
+dealloc(xwdb_next_payload)
+dealloc(xwdb_last_query_tick)
+dealloc(xwdb_send_hook)

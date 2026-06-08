@@ -81,6 +81,38 @@ const wchar_t kLogFormat[] = L"%s";
 const wchar_t kLogCase[] = { 0x734E, 0x6C60, 0x653E, 0x9001, 0x0000 };
 }
 
+namespace WeeklyReward
+{
+constexpr DWORD kQueryInterval = 0x00133AE0;
+volatile LONG g_activity = 0;
+volatile LONG g_nextData = -1;
+volatile LONG g_pendingNext = 0;
+volatile LONG g_cmdSendNext = 0;
+volatile LONG g_lastSentData = -1;
+volatile LONG g_recvLen = 0;
+volatile LONG g_lastQueryTick = 0;
+volatile LONG g_rewardCmdSend = 0;
+volatile LONG g_rewardNextId = 0;
+volatile LONG g_rewardNextIndex = 0;
+volatile LONG g_rewardLastSentId = -1;
+volatile LONG g_rewardCount = 0;
+volatile LONG g_rewardCandidateCount = 0;
+volatile LONG g_rewardStates[7]{};
+BYTE g_packetDump[2048]{};
+uint32_t g_nextPayload = 0;
+uint32_t g_rewardPayload = 0;
+
+const wchar_t kLogFormat[] = L"%s";
+const wchar_t kRecvLogFormat[] = {
+    0x5468, 0x5E38, 0x4EFB, 0x52D9, 0x0020, 0x7A4D, 0x5206, 0x0020,
+    0x0025, 0x0069, 0x0000
+};
+const wchar_t kRewardLogFormat[] = {
+    0x5468, 0x5E38, 0x734E, 0x52F5, 0x0020, 0x7B2C, 0x0025, 0x0069,
+    0x500B, 0x7D2F, 0x7A4D, 0x734E, 0x52F5, 0x0000
+};
+}
+
 // Dragon vein fix
 const BYTE kDragonVeinPatchBytes[] = {
     0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0xC7, 0x45,
@@ -179,6 +211,12 @@ bool BuildSendCode(uintptr_t base, CodeBuffer& code);
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload);
 }
 
+namespace WeeklyReward
+{
+bool BuildSendCode(uintptr_t base, CodeBuffer& code);
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+}
+
 namespace SharedRecvRouter
 {
 volatile LONG g_clearStackArg = 0;
@@ -197,6 +235,7 @@ const JumpPatch kJumpPatches[] = {
     { "Shared recv router", 0x42AD0, 5, 128, SharedRecvRouter::BuildCode },
     { "Daily Sign send tick", 0x38F90, 5, 128, DailySign::BuildSendCode },
     { "Prize Pool sender", 0x364C0, 5, 128, PrizePool::BuildSendCode },
+    { "Weekly Reward sender", 0x35CE0, 5, 128, WeeklyReward::BuildSendCode },
     { "LGF status log", 0x37150, 7, 128, LgfGuard::BuildMainCode },
     { "LGF 396D guard", 0x4AC30, 6, 128, LgfGuard::Build396DCode },
     { "LGF 3970 guard", 0x4AC90, 6, 128, LgfGuard::Build3970Code },
@@ -961,6 +1000,215 @@ bool BuildSendCode(uintptr_t, CodeBuffer& code)
 
 }
 
+namespace WeeklyReward
+{
+
+void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket = reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(opcode, payload, payloadLength);
+}
+
+void RefreshLog()
+{
+    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
+    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
+    if (refreshLog) {
+        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
+    }
+}
+
+void WriteRecvLog()
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, uint32_t);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, kRecvLogFormat, static_cast<uint32_t>(g_activity));
+    RefreshLog();
+}
+
+void WriteRewardLog()
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, uint32_t);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, kRewardLogFormat, static_cast<uint32_t>(g_rewardNextIndex));
+    RefreshLog();
+}
+
+void FindNextPattern(const BYTE* payload, uint32_t payloadLength)
+{
+    InterlockedExchange(&g_nextData, -1);
+    if (!payload || payloadLength < 8) {
+        return;
+    }
+
+    for (uint32_t offset = 0; offset <= payloadLength - 8; ++offset) {
+        if (ReadU32Unaligned(payload + offset) == 0x09007D7B) {
+            InterlockedExchange(&g_nextData, static_cast<LONG>(ReadU32Unaligned(payload + offset + 4)));
+            return;
+        }
+    }
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    if ((opcode & 0xFFFF) != 0x4BB0 || !payload) {
+        return;
+    }
+
+    InterlockedExchange(&g_recvLen, static_cast<LONG>(payloadLength));
+    std::memset(g_packetDump, 0, sizeof(g_packetDump));
+
+    const uint32_t packetLength = payloadLength + 4;
+    g_packetDump[0] = static_cast<BYTE>((packetLength >> 8) & 0xFF);
+    g_packetDump[1] = static_cast<BYTE>(packetLength & 0xFF);
+    g_packetDump[2] = 0x4B;
+    g_packetDump[3] = 0xB0;
+
+    const uint32_t copyLength = payloadLength < 0x7FC ? payloadLength : 0x7FC;
+    if (copyLength != 0) {
+        std::memcpy(g_packetDump + 4, payload, copyLength);
+    }
+
+    if (payloadLength >= 4) {
+        const uint32_t activity = (static_cast<uint32_t>(payload[2]) << 8) + payload[3];
+        InterlockedExchange(&g_activity, static_cast<LONG>(activity));
+        WriteRecvLog();
+    }
+
+    FindNextPattern(payload, payloadLength);
+    if (g_nextData == -1 || g_nextData == g_lastSentData) {
+        return;
+    }
+
+    InterlockedExchange(&g_pendingNext, 1);
+    InterlockedExchange(&g_cmdSendNext, 1);
+}
+
+void ResetRewardScanState()
+{
+    InterlockedExchange(&g_rewardCmdSend, 0);
+    InterlockedExchange(&g_rewardCount, 0);
+    InterlockedExchange(&g_rewardCandidateCount, 0);
+    for (size_t i = 0; i < sizeof(g_rewardStates) / sizeof(g_rewardStates[0]); ++i) {
+        InterlockedExchange(&g_rewardStates[i], 0);
+    }
+}
+
+void ScanRewards()
+{
+    ResetRewardScanState();
+    if (g_packetDump[2] != 0x4B || g_packetDump[3] != 0xB0) {
+        return;
+    }
+
+    const uint32_t recvLen = static_cast<uint32_t>(g_recvLen);
+    if (recvLen < 5) {
+        return;
+    }
+
+    uint32_t scanLength = recvLen - 4;
+    if (scanLength > 0x7FC) {
+        scanLength = 0x7FC;
+    }
+    BYTE* cursor = g_packetDump + 4;
+    for (uint32_t remaining = scanLength; remaining != 0; --remaining, ++cursor) {
+        if (ReadU32Unaligned(cursor) != 0x0000007D) {
+            continue;
+        }
+
+        const uint32_t state = cursor[4];
+        if (state < 1 || state > 3 || g_rewardCount >= 7) {
+            continue;
+        }
+
+        const LONG rewardIndex = g_rewardCount;
+        InterlockedExchange(&g_rewardStates[rewardIndex], static_cast<LONG>(state));
+        if (state == 2 && g_rewardCmdSend != 1) {
+            const LONG oneBasedIndex = rewardIndex + 1;
+            // CE [weekly_packet_dump+12] uses hex notation: +0x12.
+            const LONG rewardId = static_cast<LONG>(g_packetDump[0x12]) + rewardIndex;
+            InterlockedExchange(&g_rewardNextIndex, oneBasedIndex);
+            if (rewardId != g_rewardLastSentId) {
+                InterlockedExchange(&g_rewardNextId, rewardId);
+                InterlockedExchange(&g_rewardCmdSend, 1);
+            }
+        }
+
+        InterlockedIncrement(&g_rewardCount);
+        InterlockedIncrement(&g_rewardCandidateCount);
+    }
+}
+
+void SendQuery()
+{
+    InterlockedExchange(&g_lastQueryTick, static_cast<LONG>(GetGameTick()));
+    InterlockedExchange(&g_cmdSendNext, 0);
+    InterlockedExchange(&g_pendingNext, 0);
+    InterlockedExchange(&g_lastSentData, -1);
+    InterlockedExchange(&g_rewardLastSentId, -1);
+    SendPacket(0x4BAF, nullptr, 0);
+}
+
+void SendNext()
+{
+    InterlockedExchange(&g_cmdSendNext, 0);
+    InterlockedExchange(&g_pendingNext, 0);
+    g_nextPayload = static_cast<uint32_t>(g_nextData);
+    SendPacket(0x4BB1, &g_nextPayload, sizeof(g_nextPayload));
+    InterlockedExchange(&g_lastSentData, static_cast<LONG>(g_nextPayload));
+}
+
+void SendReward()
+{
+    InterlockedExchange(&g_rewardCmdSend, 0);
+    g_rewardPayload = 0;
+    reinterpret_cast<BYTE*>(&g_rewardPayload)[3] = static_cast<BYTE>(g_rewardNextId);
+    SendPacket(0x4BB2, &g_rewardPayload, sizeof(g_rewardPayload));
+    g_packetDump[2] = 0;
+    g_packetDump[3] = 0;
+    InterlockedExchange(&g_rewardLastSentId, g_rewardNextId);
+    WriteRewardLog();
+}
+
+__declspec(noinline) void __stdcall SendHook()
+{
+    if (ReadGameU32(g_mainBase + 0x2303B0) == 0) {
+        InterlockedExchange(&g_lastQueryTick, 0);
+        InterlockedExchange(&g_cmdSendNext, 0);
+        InterlockedExchange(&g_pendingNext, 0);
+        InterlockedExchange(&g_rewardCmdSend, 0);
+        return;
+    }
+
+    ScanRewards();
+    if (g_rewardCmdSend == 1) {
+        SendReward();
+        return;
+    }
+
+    if (g_cmdSendNext == 1) {
+        SendNext();
+        return;
+    }
+
+    const DWORD now = GetGameTick();
+    const DWORD lastQuery = static_cast<DWORD>(g_lastQueryTick);
+    if (lastQuery == 0 || now - lastQuery >= kQueryInterval) {
+        SendQuery();
+    }
+}
+
+bool BuildSendCode(uintptr_t, CodeBuffer& code)
+{
+    return AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&SendHook)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0xC3);
+}
+
+}
+
 namespace FastDailyBattle
 {
 
@@ -993,11 +1241,12 @@ bool BuildSendCode(uintptr_t, CodeBuffer& code)
 namespace SharedRecvRouter
 {
 
-__declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* payload)
+__declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
 {
     InterlockedExchange(&g_clearStackArg, 0);
     DailySign::HandleRecvPacket(opcode, payload);
     PrizePool::HandleRecvPacket(opcode, payload);
+    WeeklyReward::HandleRecvPacket(opcode, payload, payloadLength);
 }
 
 bool BuildCode(uintptr_t base, CodeBuffer& code)
@@ -1006,6 +1255,7 @@ bool BuildCode(uintptr_t base, CodeBuffer& code)
 
     return AppendPushad(code) &&
         AppendMovDwordAbsImm32(code, clearStackArg, 0) &&
+        AppendPushDwordPtrEspOffset(code, 0x24) &&
         AppendPushEdx(code) &&
         AppendMovzxEaxCx(code) &&
         AppendPushEax(code) &&
@@ -1172,6 +1422,8 @@ DWORD WINAPI MainThread(LPVOID)
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Daily Sign send tick");
     const bool prizePoolOk = sharedRouterOk &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Prize Pool sender");
+    const bool weeklyRewardOk = sharedRouterOk &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Weekly Reward sender");
     const bool lgfOk = IsPatchApplied(results, kPatchCount, "LGF refresh interval") &&
         IsPatchApplied(results, kPatchCount, "LGF suppress action log") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF status log") &&
@@ -1184,6 +1436,7 @@ DWORD WINAPI MainThread(LPVOID)
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7838\x86CB", breakEggOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x6BCF\x65E5\x7C3D\x5230", dailySignOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x734E\x6C60\x653E\x9001", prizePoolOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5468\x5E38\x4EFB\x52D9", weeklyRewardOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7DF4\x529F\x623F", lgfOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5FEB\x901F\x6BCF\x65E5\x6230\x9B25", fastDailyBattleOk);
 
