@@ -116,9 +116,11 @@ const wchar_t kRewardLogFormat[] = {
 namespace AutoLureDash
 {
 constexpr DWORD kPhaseGapMs = 100;
+constexpr DWORD kFallbackCheckMs = 500;
 constexpr size_t kMaxGroups = 8;
-constexpr size_t kMaxPayloadsPerGroup = 8;
-constexpr size_t kGroupStride = 0x40;
+constexpr size_t kMaxPayloadsPerGroup = 5;
+constexpr size_t kGroupStride = 0x80;
+constexpr size_t kEntryArrayOffset = 0x40;
 
 volatile LONG g_phase = 0;
 volatile LONG g_nextTick = 0;
@@ -126,12 +128,43 @@ volatile LONG g_groupCount = 0;
 volatile LONG g_groupIndex = 0;
 volatile LONG g_action = 1;
 uint32_t g_targetTmp = 0;
-BYTE g_groups[512]{};
+BYTE g_groups[kMaxGroups * kGroupStride]{};
 BYTE g_dashBuffer[256]{};
+volatile LONG g_lureSwitch = 0;
+volatile LONG g_fallbackSwitch = 0;
+volatile LONG g_showFlag = 0;
+volatile LONG g_configReadHits = 0;
+volatile LONG g_configLastStrike = 0;
+volatile LONG g_configLastLure = 0;
+volatile LONG g_configLastFallback = 0;
+
+const wchar_t kConfigSection[] = L"WorldWar";
+const wchar_t kLureKey[] = L"bLure";
+const wchar_t kFallbackKey[] = L"bFallback";
+const wchar_t kLogFormat[] = L"%s";
+const wchar_t kLogLureOffFallbackOff[] = {
+    0x51FA, 0x64CA, 0x8A98, 0x6575, 0x0020, 0x7A81, 0x9032, 0x003D,
+    0x95DC, 0x0020, 0x64A4, 0x9000, 0x003D, 0x95DC, 0x0000
+};
+const wchar_t kLogLureOffFallbackOn[] = {
+    0x51FA, 0x64CA, 0x8A98, 0x6575, 0x0020, 0x7A81, 0x9032, 0x003D,
+    0x95DC, 0x0020, 0x64A4, 0x9000, 0x003D, 0x958B, 0x0000
+};
+const wchar_t kLogLureOnFallbackOff[] = {
+    0x51FA, 0x64CA, 0x8A98, 0x6575, 0x0020, 0x7A81, 0x9032, 0x003D,
+    0x958B, 0x0020, 0x64A4, 0x9000, 0x003D, 0x95DC, 0x0000
+};
+const wchar_t kLogLureOnFallbackOn[] = {
+    0x51FA, 0x64CA, 0x8A98, 0x6575, 0x0020, 0x7A81, 0x9032, 0x003D,
+    0x958B, 0x0020, 0x64A4, 0x9000, 0x003D, 0x958B, 0x0000
+};
 
 bool BuildMainCode(uintptr_t base, CodeBuffer& code);
 bool BuildGuardCode(uintptr_t base, CodeBuffer& code);
 bool BuildTimerCode(uintptr_t base, CodeBuffer& code);
+bool BuildConfigCode(uintptr_t base, CodeBuffer& code);
+bool BuildTotalOnCode(uintptr_t base, CodeBuffer& code);
+bool BuildResumeCode(uintptr_t base, CodeBuffer& code);
 }
 
 // Dragon vein fix
@@ -263,6 +296,9 @@ const JumpPatch kJumpPatches[] = {
     { "AutoLure dash main", 0x351F0, 6, 128, AutoLureDash::BuildMainCode },
     { "AutoLure dash guard", 0x3B7A0, 6, 128, AutoLureDash::BuildGuardCode },
     { "AutoLure dash timer", 0x403A3, 12, 128, AutoLureDash::BuildTimerCode },
+    { "AutoLure dash config", 0x4B79B, 7, 160, AutoLureDash::BuildConfigCode },
+    { "AutoLure dash total on", 0x401E0, 5, 64, AutoLureDash::BuildTotalOnCode },
+    { "AutoLure dash resume", 0x412F0, 5, 64, AutoLureDash::BuildResumeCode },
 };
 constexpr size_t kJumpPatchCount = sizeof(kJumpPatches) / sizeof(kJumpPatches[0]);
 
@@ -365,12 +401,47 @@ bool AppendMovEaxDwordPtrAbs(CodeBuffer& code, uint32_t address)
     return AppendByte(code, 0xA1) && AppendU32(code, address);
 }
 
+bool AppendMovDwordPtrAbsEax(CodeBuffer& code, uint32_t address)
+{
+    return AppendByte(code, 0xA3) && AppendU32(code, address);
+}
+
+bool AppendIncDwordPtrAbs(CodeBuffer& code, uint32_t address)
+{
+    return AppendByte(code, 0xFF) && AppendByte(code, 0x05) && AppendU32(code, address);
+}
+
+bool AppendMovDwordPtrEbxOffsetEax(CodeBuffer& code, BYTE offset)
+{
+    return AppendByte(code, 0x89) && AppendByte(code, 0x43) && AppendByte(code, offset);
+}
+
 bool AppendMovDwordPtrEspOffsetEax(CodeBuffer& code, BYTE offset)
 {
     return AppendByte(code, 0x89) &&
         AppendByte(code, 0x44) &&
         AppendByte(code, 0x24) &&
         AppendByte(code, offset);
+}
+
+bool AppendPushEdi(CodeBuffer& code)
+{
+    return AppendByte(code, 0x57);
+}
+
+bool AppendPopEdi(CodeBuffer& code)
+{
+    return AppendByte(code, 0x5F);
+}
+
+bool AppendPopEsi(CodeBuffer& code)
+{
+    return AppendByte(code, 0x5E);
+}
+
+bool AppendMovEdiEcx(CodeBuffer& code)
+{
+    return AppendByte(code, 0x8B) && AppendByte(code, 0xF9);
 }
 
 bool AppendMovDwordAbsImm32(CodeBuffer& code, uint32_t address, uint32_t value)
@@ -535,6 +606,13 @@ BYTE* GroupPtr(size_t index)
     return g_groups + index * kGroupStride;
 }
 
+void ResetDashState()
+{
+    InterlockedExchange(&g_phase, 0);
+    InterlockedExchange(&g_groupCount, 0);
+    InterlockedExchange(&g_groupIndex, 0);
+}
+
 uint32_t ReadGroupU32(BYTE* group, size_t offset)
 {
     return ReadU32Unaligned(group + offset);
@@ -555,6 +633,38 @@ void SendPacketWithEcx(uint32_t ecxValue, uint32_t opcode, const void* payload, 
         push opcode
         call sendAddress
     }
+}
+
+void RefreshLog()
+{
+    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
+    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
+    if (refreshLog) {
+        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
+    }
+}
+
+void WriteDashLog(const wchar_t* text)
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, kLogFormat, text);
+    RefreshLog();
+}
+
+void ShowOptions()
+{
+    using ShowOptionsFn = void(__stdcall*)();
+    ShowOptionsFn showOptions = reinterpret_cast<ShowOptionsFn>(g_mainBase + 0x4D810);
+    showOptions();
+
+    InterlockedExchange(&g_showFlag, 1);
+    if (g_lureSwitch != 0) {
+        WriteDashLog(g_fallbackSwitch != 0 ? kLogLureOnFallbackOn : kLogLureOnFallbackOff);
+        return;
+    }
+
+    WriteDashLog(g_fallbackSwitch != 0 ? kLogLureOffFallbackOn : kLogLureOffFallbackOff);
 }
 
 bool GetTarget(uintptr_t entry, uint32_t& current, uint32_t& target)
@@ -652,6 +762,7 @@ void AddPayload(BYTE* group, uintptr_t entry)
     const uint32_t second = ReadGameU32(entry + 0x04);
     std::memcpy(payload, &first, sizeof(first));
     std::memcpy(payload + 4, &second, sizeof(second));
+    WriteGroupU32(group, kEntryArrayOffset + count * sizeof(uint32_t), static_cast<uint32_t>(entry));
     ++count;
     WriteGroupU32(group, 0x08, count);
 }
@@ -712,9 +823,7 @@ void SetNextPhase(LONG phase)
 
 void FinishAll()
 {
-    InterlockedExchange(&g_phase, 0);
-    InterlockedExchange(&g_groupCount, 0);
-    InterlockedExchange(&g_groupIndex, 0);
+    ResetDashState();
     InterlockedExchange(&g_action, 1);
 }
 
@@ -744,6 +853,34 @@ void Send1483(BYTE* group)
 
     const uint32_t payloadLength = count * 8 + 10;
     SendPacketWithEcx(ReadGroupU32(group, 0x0C), 0x1483, g_dashBuffer, payloadLength);
+
+    InterlockedExchange(&g_nextTick, static_cast<LONG>(GetTickCount() + kFallbackCheckMs));
+    InterlockedExchange(&g_phase, 6);
+}
+
+void Check1482(BYTE* group)
+{
+    uint32_t count = ReadGroupU32(group, 0x08);
+    if (count > kMaxPayloadsPerGroup) {
+        count = static_cast<uint32_t>(kMaxPayloadsPerGroup);
+    }
+
+    if (g_fallbackSwitch != 0 && count != 0) {
+        const uint32_t current = ReadGroupU32(group, 0x00);
+        bool allEntriesStillCurrent = true;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t entry = ReadGroupU32(group, kEntryArrayOffset + i * sizeof(uint32_t));
+            if (entry == 0 || ReadGameU16(entry + 0x30) != static_cast<uint16_t>(current)) {
+                allEntriesStillCurrent = false;
+                break;
+            }
+        }
+
+        const uint32_t ecxValue = ReadGroupU32(group, 0x0C);
+        if (allEntriesStillCurrent && ecxValue != 0) {
+            SendPacketWithEcx(ecxValue, 0x1482, g_dashBuffer, count * 8 + 10);
+        }
+    }
 
     LONG nextIndex = g_groupIndex + 1;
     InterlockedExchange(&g_groupIndex, nextIndex);
@@ -789,6 +926,9 @@ void SendCurrentPhase()
     case 5:
         InterlockedExchange(&g_phase, 1);
         break;
+    case 6:
+        Check1482(group);
+        break;
     default:
         InterlockedExchange(&g_phase, 0);
         InterlockedExchange(&g_action, 1);
@@ -799,6 +939,23 @@ void SendCurrentPhase()
 __declspec(noinline) void __stdcall DashTick()
 {
     InterlockedExchange(&g_action, 0);
+    if (ReadGameU32(g_mainBase + 0x230284) == 0) {
+        InterlockedExchange(&g_showFlag, 0);
+        ResetDashState();
+        InterlockedExchange(&g_action, 1);
+        return;
+    }
+
+    if (g_showFlag == 0) {
+        ShowOptions();
+    }
+
+    if (ReadGameU32(g_mainBase + 0x23040C) == 0 || g_lureSwitch == 0) {
+        ResetDashState();
+        InterlockedExchange(&g_action, 1);
+        return;
+    }
+
     if (g_phase == 0) {
         BuildGroups();
         if (g_groupCount == 0) {
@@ -850,6 +1007,59 @@ bool BuildTimerCode(uintptr_t base, CodeBuffer& code)
         AppendRel32Instruction(code, 0xE9, base + 0x403AF) &&
         AppendPushImm32(code, kPhaseGapMs) &&
         AppendRel32Instruction(code, 0xE9, base + 0x403AF);
+}
+
+bool BuildConfigCode(uintptr_t base, CodeBuffer& code)
+{
+    const uint32_t readHits = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_configReadHits));
+    const uint32_t lastStrike = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_configLastStrike));
+    const uint32_t lureSwitch = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_lureSwitch));
+    const uint32_t lastLure = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_configLastLure));
+    const uint32_t fallbackSwitch = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_fallbackSwitch));
+    const uint32_t lastFallback = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_configLastFallback));
+
+    return AppendByte(code, 0xFF) && AppendByte(code, 0xD6) &&
+        AppendIncDwordPtrAbs(code, readHits) &&
+        AppendMovDwordPtrAbsEax(code, lastStrike) &&
+        AppendMovDwordPtrEbxOffsetEax(code, 0x24) &&
+        AppendPushEdi(code) &&
+        AppendByte(code, 0x6A) && AppendByte(code, 0x00) &&
+        AppendPushImm32(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(kLureKey))) &&
+        AppendPushImm32(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(kConfigSection))) &&
+        AppendByte(code, 0xFF) && AppendByte(code, 0xD6) &&
+        AppendMovDwordPtrAbsEax(code, lureSwitch) &&
+        AppendMovDwordPtrAbsEax(code, lastLure) &&
+        AppendPushEdi(code) &&
+        AppendByte(code, 0x6A) && AppendByte(code, 0x00) &&
+        AppendPushImm32(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(kFallbackKey))) &&
+        AppendPushImm32(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(kConfigSection))) &&
+        AppendByte(code, 0xFF) && AppendByte(code, 0xD6) &&
+        AppendMovDwordPtrAbsEax(code, fallbackSwitch) &&
+        AppendMovDwordPtrAbsEax(code, lastFallback) &&
+        AppendMovEaxDwordPtrAbs(code, lastStrike) &&
+        AppendPopEdi(code) &&
+        AppendPopEsi(code) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x4B7A2);
+}
+
+bool BuildTotalOnCode(uintptr_t base, CodeBuffer& code)
+{
+    const uint32_t showFlag = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_showFlag));
+    return AppendMovDwordAbsImm32(code, showFlag, 0) &&
+        AppendPushEdi(code) &&
+        AppendMovEdiEcx(code) &&
+        AppendByte(code, 0x6A) && AppendByte(code, 0x00) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x401E5);
+}
+
+bool BuildResumeCode(uintptr_t base, CodeBuffer& code)
+{
+    const uint32_t showFlag = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_showFlag));
+    return AppendMovDwordAbsImm32(code, showFlag, 0) &&
+        AppendPushEdi(code) &&
+        AppendByte(code, 0x6A) && AppendByte(code, 0x04) &&
+        AppendMovEdiEcx(code) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x412F5);
 }
 
 }
@@ -1788,7 +1998,10 @@ DWORD WINAPI MainThread(LPVOID)
     const bool fastDailyBattleOk = IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Fast Daily Battle");
     const bool autoLureDashOk = IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash main") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash guard") &&
-        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash timer");
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash timer") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash config") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash total on") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash resume");
 
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5171\x7528\x6536\x5305Router", sharedRouterOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x9F8D\x8108", dragonVeinOk);
