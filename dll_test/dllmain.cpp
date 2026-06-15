@@ -113,6 +113,27 @@ const wchar_t kRewardLogFormat[] = {
 };
 }
 
+namespace AutoLureDash
+{
+constexpr DWORD kPhaseGapMs = 100;
+constexpr size_t kMaxGroups = 8;
+constexpr size_t kMaxPayloadsPerGroup = 8;
+constexpr size_t kGroupStride = 0x40;
+
+volatile LONG g_phase = 0;
+volatile LONG g_nextTick = 0;
+volatile LONG g_groupCount = 0;
+volatile LONG g_groupIndex = 0;
+volatile LONG g_action = 1;
+uint32_t g_targetTmp = 0;
+BYTE g_groups[512]{};
+BYTE g_dashBuffer[256]{};
+
+bool BuildMainCode(uintptr_t base, CodeBuffer& code);
+bool BuildGuardCode(uintptr_t base, CodeBuffer& code);
+bool BuildTimerCode(uintptr_t base, CodeBuffer& code);
+}
+
 // Dragon vein fix
 const BYTE kDragonVeinPatchBytes[] = {
     0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0xC7, 0x45,
@@ -239,6 +260,9 @@ const JumpPatch kJumpPatches[] = {
     { "LGF status log", 0x37150, 7, 128, LgfGuard::BuildMainCode },
     { "LGF 396D guard", 0x4AC30, 6, 128, LgfGuard::Build396DCode },
     { "LGF 3970 guard", 0x4AC90, 6, 128, LgfGuard::Build3970Code },
+    { "AutoLure dash main", 0x351F0, 6, 128, AutoLureDash::BuildMainCode },
+    { "AutoLure dash guard", 0x3B7A0, 6, 128, AutoLureDash::BuildGuardCode },
+    { "AutoLure dash timer", 0x403A3, 12, 128, AutoLureDash::BuildTimerCode },
 };
 constexpr size_t kJumpPatchCount = sizeof(kJumpPatches) / sizeof(kJumpPatches[0]);
 
@@ -491,11 +515,343 @@ uint32_t ReadGameU32(uintptr_t address)
     return *reinterpret_cast<volatile uint32_t*>(address);
 }
 
+uint16_t ReadGameU16(uintptr_t address)
+{
+    return *reinterpret_cast<volatile uint16_t*>(address);
+}
+
 DWORD GetGameTick()
 {
     using GetTickFn = DWORD(__stdcall*)();
     GetTickFn tick = *reinterpret_cast<GetTickFn*>(g_mainBase + 0x1C43DC);
     return tick ? tick() : 0;
+}
+
+namespace AutoLureDash
+{
+
+BYTE* GroupPtr(size_t index)
+{
+    return g_groups + index * kGroupStride;
+}
+
+uint32_t ReadGroupU32(BYTE* group, size_t offset)
+{
+    return ReadU32Unaligned(group + offset);
+}
+
+void WriteGroupU32(BYTE* group, size_t offset, uint32_t value)
+{
+    std::memcpy(group + offset, &value, sizeof(value));
+}
+
+void SendPacketWithEcx(uint32_t ecxValue, uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    const uintptr_t sendAddress = g_mainBase + 0x4A360;
+    __asm {
+        mov ecx, ecxValue
+        push payloadLength
+        push payload
+        push opcode
+        call sendAddress
+    }
+}
+
+bool GetTarget(uintptr_t entry, uint32_t& current, uint32_t& target)
+{
+    current = ReadGameU16(entry + 0x30);
+
+    const uint32_t activeIndex = ReadGameU32(g_mainBase + 0x2303EC);
+    const uint32_t activeCount = ReadGameU32(g_mainBase + 0x2306C4);
+    if (activeIndex >= activeCount) {
+        return false;
+    }
+
+    uintptr_t containerList = ReadGameU32(g_mainBase + 0x2306C0);
+    if (containerList == 0) {
+        return false;
+    }
+
+    uintptr_t container = ReadGameU32(containerList + static_cast<uintptr_t>(activeIndex) * sizeof(uint32_t));
+    if (container == 0) {
+        return false;
+    }
+
+    const int32_t count = static_cast<int32_t>(ReadGameU32(container + 0x0C));
+    if (count <= 0) {
+        return false;
+    }
+
+    uintptr_t entries = ReadGameU32(container + 0x08);
+    if (entries == 0) {
+        return false;
+    }
+
+    for (int32_t i = 0; i < count; ++i) {
+        uintptr_t node = ReadGameU32(entries + static_cast<uintptr_t>(i) * sizeof(uint32_t));
+        if (node == 0 || ReadGameU16(node) != static_cast<uint16_t>(current)) {
+            continue;
+        }
+
+        ++i;
+        if (i >= count) {
+            return false;
+        }
+
+        node = ReadGameU32(entries + static_cast<uintptr_t>(i) * sizeof(uint32_t));
+        if (node == 0) {
+            return false;
+        }
+
+        target = ReadGameU16(node);
+        g_targetTmp = target;
+        return true;
+    }
+
+    return false;
+}
+
+BYTE* FindGroup(uint32_t current)
+{
+    const LONG count = g_groupCount;
+    for (LONG i = 0; i < count; ++i) {
+        BYTE* group = GroupPtr(static_cast<size_t>(i));
+        if (ReadGroupU32(group, 0x00) == current) {
+            return group;
+        }
+    }
+
+    return nullptr;
+}
+
+BYTE* CreateGroup(uintptr_t entry, uint32_t current, uint32_t target)
+{
+    LONG count = g_groupCount;
+    if (count >= static_cast<LONG>(kMaxGroups)) {
+        return nullptr;
+    }
+
+    BYTE* group = GroupPtr(static_cast<size_t>(count));
+    WriteGroupU32(group, 0x00, current);
+    WriteGroupU32(group, 0x04, target);
+    WriteGroupU32(group, 0x08, 0);
+    WriteGroupU32(group, 0x0C, static_cast<uint32_t>(entry));
+    InterlockedExchange(&g_groupCount, count + 1);
+    return group;
+}
+
+void AddPayload(BYTE* group, uintptr_t entry)
+{
+    uint32_t count = ReadGroupU32(group, 0x08);
+    if (count >= kMaxPayloadsPerGroup) {
+        return;
+    }
+
+    BYTE* payload = group + 0x10 + count * 8;
+    const uint32_t first = ReadGameU32(entry);
+    const uint32_t second = ReadGameU32(entry + 0x04);
+    std::memcpy(payload, &first, sizeof(first));
+    std::memcpy(payload + 4, &second, sizeof(second));
+    ++count;
+    WriteGroupU32(group, 0x08, count);
+}
+
+void BuildGroups()
+{
+    InterlockedExchange(&g_groupCount, 0);
+    InterlockedExchange(&g_groupIndex, 0);
+    std::memset(g_groups, 0, sizeof(g_groups));
+
+    uintptr_t list = ReadGameU32(g_mainBase + 0x230644);
+    if (list == 0) {
+        return;
+    }
+
+    int32_t count = static_cast<int32_t>(ReadGameU32(g_mainBase + 0x230648));
+    if (count <= 0) {
+        return;
+    }
+    if (count > 20) {
+        count = 20;
+    }
+
+    for (int32_t i = 0; i < count; ++i) {
+        uintptr_t entry = ReadGameU32(list + static_cast<uintptr_t>(i) * sizeof(uint32_t));
+        if (entry == 0 ||
+            ReadGameU32(entry + 0x1C) != 2 ||
+            ReadGameU32(entry + 0x20) != 3) {
+            continue;
+        }
+
+        uint32_t current = 0;
+        uint32_t target = 0;
+        if (!GetTarget(entry, current, target)) {
+            continue;
+        }
+
+        BYTE* group = FindGroup(current);
+        if (!group) {
+            group = CreateGroup(entry, current, target);
+        }
+        if (group) {
+            AddPayload(group, entry);
+        }
+    }
+
+    if (g_groupCount != 0) {
+        InterlockedExchange(&g_phase, 1);
+        InterlockedExchange(&g_nextTick, 0);
+    }
+}
+
+void SetNextPhase(LONG phase)
+{
+    InterlockedExchange(&g_nextTick, static_cast<LONG>(GetTickCount() + kPhaseGapMs));
+    InterlockedExchange(&g_phase, phase);
+}
+
+void FinishAll()
+{
+    InterlockedExchange(&g_phase, 0);
+    InterlockedExchange(&g_groupCount, 0);
+    InterlockedExchange(&g_groupIndex, 0);
+    InterlockedExchange(&g_action, 1);
+}
+
+void Send1483(BYTE* group)
+{
+    std::memset(g_dashBuffer, 0, sizeof(g_dashBuffer));
+    g_dashBuffer[3] = static_cast<BYTE>(ReadGroupU32(group, 0x00));
+    g_dashBuffer[4] = 0;
+
+    uint32_t count = ReadGroupU32(group, 0x08);
+    if (count > kMaxPayloadsPerGroup) {
+        count = static_cast<uint32_t>(kMaxPayloadsPerGroup);
+    }
+    g_dashBuffer[5] = static_cast<BYTE>(count);
+
+    const BYTE* source = group + 0x10;
+    BYTE* destination = g_dashBuffer + 0x06;
+    for (uint32_t i = 0; i < count; ++i) {
+        std::memcpy(destination, source, 8);
+        source += 8;
+        destination += 8;
+    }
+
+    uint32_t targetBlock = 0;
+    std::memcpy(destination, &targetBlock, sizeof(targetBlock));
+    destination[3] = static_cast<BYTE>(ReadGroupU32(group, 0x04));
+
+    const uint32_t payloadLength = count * 8 + 10;
+    SendPacketWithEcx(ReadGroupU32(group, 0x0C), 0x1483, g_dashBuffer, payloadLength);
+
+    LONG nextIndex = g_groupIndex + 1;
+    InterlockedExchange(&g_groupIndex, nextIndex);
+    if (nextIndex >= g_groupCount) {
+        FinishAll();
+        return;
+    }
+
+    SetNextPhase(5);
+}
+
+void SendCurrentPhase()
+{
+    const DWORD now = GetTickCount();
+    if (now < static_cast<DWORD>(g_nextTick)) {
+        return;
+    }
+
+    const LONG groupIndex = g_groupIndex;
+    if (groupIndex >= g_groupCount) {
+        FinishAll();
+        return;
+    }
+
+    BYTE* group = GroupPtr(static_cast<size_t>(groupIndex));
+    const uint32_t ecxValue = ReadGroupU32(group, 0x0C);
+    switch (g_phase) {
+    case 1:
+        SendPacketWithEcx(ecxValue, 0x1467, nullptr, 0);
+        SetNextPhase(2);
+        break;
+    case 2:
+        SendPacketWithEcx(ecxValue, 0x373F, nullptr, 0);
+        SetNextPhase(3);
+        break;
+    case 3:
+        SendPacketWithEcx(ecxValue, 0x31E6, nullptr, 0);
+        SetNextPhase(4);
+        break;
+    case 4:
+        Send1483(group);
+        break;
+    case 5:
+        InterlockedExchange(&g_phase, 1);
+        break;
+    default:
+        InterlockedExchange(&g_phase, 0);
+        InterlockedExchange(&g_action, 1);
+        break;
+    }
+}
+
+__declspec(noinline) void __stdcall DashTick()
+{
+    InterlockedExchange(&g_action, 0);
+    if (g_phase == 0) {
+        BuildGroups();
+        if (g_groupCount == 0) {
+            InterlockedExchange(&g_action, 1);
+            return;
+        }
+    }
+
+    SendCurrentPhase();
+}
+
+bool BuildMainCode(uintptr_t base, CodeBuffer& code)
+{
+    const uint32_t action = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_action));
+    return AppendByte(code, 0x9C) &&
+        AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&DashTick)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&
+        AppendCmpDwordAbsImm8(code, action, 1) &&
+        AppendJeShort(code, 0x01) &&
+        AppendByte(code, 0xC3) &&
+        AppendByte(code, 0x56) &&
+        AppendRel32Instruction(code, 0xE8, base + 0x38B90) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x351F6);
+}
+
+bool BuildGuardCode(uintptr_t base, CodeBuffer& code)
+{
+    const uint32_t action = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_action));
+    return AppendCmpDwordAbsImm8(code, action, 1) &&
+        AppendJeShort(code, 0x01) &&
+        AppendByte(code, 0xC3) &&
+        AppendFunctionPrologueWithStack(code, 0x0C) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x3B7A6);
+}
+
+bool BuildTimerCode(uintptr_t base, CodeBuffer& code)
+{
+    const uint32_t phase = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_phase));
+    const uint32_t action = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_action));
+    return AppendRel32Instruction(code, 0xE8, base + 0x351F0) &&
+        AppendByte(code, 0x6A) && AppendByte(code, 0x00) &&
+        AppendCmpDwordAbsImm8(code, phase, 0) &&
+        AppendJneShort(code, 0x13) &&
+        AppendCmpDwordAbsImm8(code, action, 0) &&
+        AppendJeShort(code, 0x0A) &&
+        AppendPushImm32(code, 0x4E20) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x403AF) &&
+        AppendPushImm32(code, kPhaseGapMs) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x403AF);
+}
+
 }
 
 namespace LgfGuard
@@ -1430,6 +1786,9 @@ DWORD WINAPI MainThread(LPVOID)
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF 396D guard") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF 3970 guard");
     const bool fastDailyBattleOk = IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Fast Daily Battle");
+    const bool autoLureDashOk = IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash main") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash guard") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash timer");
 
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5171\x7528\x6536\x5305Router", sharedRouterOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x9F8D\x8108", dragonVeinOk);
@@ -1439,6 +1798,7 @@ DWORD WINAPI MainThread(LPVOID)
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5468\x5E38\x4EFB\x52D9", weeklyRewardOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7DF4\x529F\x623F", lgfOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5FEB\x901F\x6BCF\x65E5\x6230\x9B25", fastDailyBattleOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x81EA\x52D5\x7A81\x9032", autoLureDashOk);
 
     g_msgBoxHook = SetWindowsHookExA(WH_CBT, MessageBoxHook, nullptr, GetCurrentThreadId());
     MessageBoxW(nullptr, message, L"MyPatch", MB_OK);
