@@ -1,0 +1,303 @@
+[ENABLE]
+// XYFP / 秘境戰魂 test flow.
+// Switch: Online.exe+230370.
+// Query: send 4C83 once while switch is on.
+// Recv 4C84:
+//   day     = payload[4]  => [payload+03]
+//   stamina = payload[15] => [payload+0E]
+//   scan five 2E 30 00 00 27 patterns
+//   after5 = [pattern+09]
+// If any after5 == 00 and stamina != 0: choose first such stage, send 4C86 then 145A.
+// If all five after5 == 01 and stamina != 0: sweep stage 5, count = stamina, send 4C87.
+
+alloc(xyfp_mem,8192,Online.exe+36690)
+label(xyfp_send_hook)
+label(xyfp_send_done)
+label(xyfp_send_reset)
+label(xyfp_payload4c83)
+label(xyfp_payload4c86)
+label(xyfp_payload145a)
+label(xyfp_payload4c87)
+label(xyfp_sent_flag)
+label(xyfp_payload_ptr)
+label(xyfp_payload_len)
+label(xyfp_day)
+label(xyfp_stamina)
+label(xyfp_pattern_count)
+label(xyfp_payload8_count)
+label(xyfp_candidate_stage)
+label(xyfp_clear_count)
+label(xyfp_payload8s)
+label(xyfp_recv_hook)
+label(xyfp_recv_parse)
+label(xyfp_recv_continue)
+label(xyfp_parse)
+label(xyfp_scan_loop)
+label(xyfp_scan_next)
+label(xyfp_scan_found)
+label(xyfp_not_clear)
+label(xyfp_have_candidate)
+label(xyfp_after_scan)
+label(xyfp_do_sweep)
+label(xyfp_do_battle)
+label(xyfp_done)
+label(xyfp_log_battle)
+label(xyfp_log_sweep)
+label(xyfp_refresh_log)
+label(xyfp_fmt_battle)
+label(xyfp_fmt_sweep)
+
+xyfp_mem:
+xyfp_send_hook:
+  cmp dword ptr [Online.exe+230370],00
+  je xyfp_send_done
+  push 04
+  push xyfp_payload4c83
+  push 00004C83
+  call Online.exe+4A360
+
+xyfp_send_reset:
+xyfp_send_done:
+  ret
+
+xyfp_payload4c83:
+  dd 00000000
+xyfp_payload4c86:
+  db 00 00 00 00 00 00 00 00
+xyfp_payload145a:
+  db 00 00 00 00 24 00 05
+  db 00 00 00 00 00 00 00 00
+  db 00 00 00 00 00 00 00 00
+  db 00 00 00 00 00 00 00 00
+  db 00 00 00 00 00 00 00 00
+  db 00 00 00 00 00 00 00 00
+xyfp_payload4c87:
+  db 00 00 00 00 00 00 00 05 00 00 00 01
+xyfp_sent_flag:
+  dd 00000000
+xyfp_payload_ptr:
+  dd 00000000
+xyfp_payload_len:
+  dd 00000000
+xyfp_day:
+  dd 00000000
+xyfp_stamina:
+  dd 00000000
+xyfp_pattern_count:
+  dd 00000000
+xyfp_payload8_count:
+  dd 00000000
+xyfp_candidate_stage:
+  dd 00000000
+xyfp_clear_count:
+  dd 00000000
+xyfp_payload8s:
+  db 00 00 00 00 00 00 00 00
+  db 00 00 00 00 00 00 00 00
+  db 00 00 00 00 00 00 00 00
+  db 00 00 00 00 00 00 00 00
+  db 00 00 00 00 00 00 00 00
+
+xyfp_recv_hook:
+  cmp cx,4C84
+  je xyfp_recv_parse
+  cmp cx,844C
+  je xyfp_recv_parse
+  jmp xyfp_recv_continue
+
+xyfp_recv_parse:
+  mov [xyfp_payload_ptr],edx
+  mov eax,[esp+0C]
+  mov [xyfp_payload_len],eax
+  pushad
+  call xyfp_parse
+  popad
+
+xyfp_recv_continue:
+  push 009803A0
+  jmp Online.exe+42ADA
+
+xyfp_parse:
+  mov esi,[xyfp_payload_ptr]
+  test esi,esi
+  je xyfp_done
+  cmp dword ptr [xyfp_payload_len],#15
+  jb xyfp_done
+
+  movzx eax,byte ptr [esi+03]
+  mov [xyfp_day],eax
+  movzx eax,byte ptr [esi+0E]
+  mov [xyfp_stamina],eax
+
+  mov dword ptr [xyfp_pattern_count],00
+  mov dword ptr [xyfp_payload8_count],00
+  mov dword ptr [xyfp_candidate_stage],00
+  mov dword ptr [xyfp_clear_count],00
+
+  mov edx,[xyfp_payload_len]
+  cmp edx,#14
+  jb xyfp_after_scan
+  sub edx,#14
+  xor eax,eax
+  xor ebx,ebx
+
+xyfp_scan_loop:
+  cmp eax,edx
+  ja xyfp_after_scan
+  lea edi,[esi+eax]
+  cmp dword ptr [edi],0000302E
+  jne xyfp_scan_next
+  cmp byte ptr [edi+04],27
+  jne xyfp_scan_next
+
+xyfp_scan_found:
+  inc ebx
+  mov [xyfp_pattern_count],ebx
+
+  mov ecx,ebx
+  dec ecx
+  shl ecx,3
+  mov edx,[edi]
+  mov [xyfp_payload8s+ecx],edx
+  mov edx,[edi+04]
+  mov [xyfp_payload8s+ecx+04],edx
+  inc dword ptr [xyfp_payload8_count]
+
+  movzx ecx,byte ptr [edi+09]
+  cmp ecx,01
+  jne xyfp_not_clear
+  inc dword ptr [xyfp_clear_count]
+xyfp_not_clear:
+  cmp dword ptr [xyfp_candidate_stage],00
+  jne xyfp_have_candidate
+  cmp ecx,00
+  jne xyfp_have_candidate
+  mov [xyfp_candidate_stage],ebx
+xyfp_have_candidate:
+  cmp ebx,5
+  jae xyfp_after_scan
+  add eax,5
+  mov edx,[xyfp_payload_len]
+  sub edx,#14
+  jmp xyfp_scan_loop
+
+xyfp_scan_next:
+  inc eax
+  jmp xyfp_scan_loop
+
+xyfp_after_scan:
+  cmp dword ptr [xyfp_stamina],00
+  je xyfp_done
+  cmp dword ptr [xyfp_pattern_count],05
+  jb xyfp_done
+  cmp dword ptr [xyfp_clear_count],05
+  je xyfp_do_sweep
+  cmp dword ptr [xyfp_payload8_count],05
+  jb xyfp_done
+  cmp dword ptr [xyfp_candidate_stage],00
+  je xyfp_done
+  jmp xyfp_do_battle
+
+xyfp_do_sweep:
+  mov eax,[xyfp_day]
+  mov [xyfp_payload4c87+03],al
+  mov byte ptr [xyfp_payload4c87+07],05
+  mov byte ptr [xyfp_payload4c87+0B],01
+  call xyfp_log_sweep
+  push 0C
+  push xyfp_payload4c87
+  push 00004C87
+  call Online.exe+4A360
+  jmp xyfp_done
+
+xyfp_do_battle:
+  mov eax,[xyfp_day]
+  mov [xyfp_payload4c86+03],al
+  mov [xyfp_payload145a+02],al
+  mov eax,[xyfp_candidate_stage]
+  mov [xyfp_payload4c86+07],al
+  mov [xyfp_payload145a+03],al
+
+  mov eax,[xyfp_payload8s+00]
+  mov [xyfp_payload145a+07],eax
+  mov eax,[xyfp_payload8s+04]
+  mov [xyfp_payload145a+0B],eax
+  mov eax,[xyfp_payload8s+08]
+  mov [xyfp_payload145a+0F],eax
+  mov eax,[xyfp_payload8s+0C]
+  mov [xyfp_payload145a+13],eax
+  mov eax,[xyfp_payload8s+10]
+  mov [xyfp_payload145a+17],eax
+  mov eax,[xyfp_payload8s+14]
+  mov [xyfp_payload145a+1B],eax
+  mov eax,[xyfp_payload8s+18]
+  mov [xyfp_payload145a+1F],eax
+  mov eax,[xyfp_payload8s+1C]
+  mov [xyfp_payload145a+23],eax
+  mov eax,[xyfp_payload8s+20]
+  mov [xyfp_payload145a+27],eax
+  mov eax,[xyfp_payload8s+24]
+  mov [xyfp_payload145a+2B],eax
+
+  call xyfp_log_battle
+  push 08
+  push xyfp_payload4c86
+  push 00004C86
+  call Online.exe+4A360
+
+  push 2F
+  push xyfp_payload145a
+  push 0000145A
+  call Online.exe+4A360
+
+xyfp_done:
+  ret
+
+xyfp_log_battle:
+  push [xyfp_candidate_stage]
+  push xyfp_fmt_battle
+  push Online.exe+230504
+  call Online.exe+2EF0
+  add esp,0C
+  call xyfp_refresh_log
+  ret
+
+xyfp_log_sweep:
+  push 01
+  push xyfp_fmt_sweep
+  push Online.exe+230504
+  call Online.exe+2EF0
+  add esp,0C
+  call xyfp_refresh_log
+  ret
+
+xyfp_refresh_log:
+  push 00
+  push 00
+  push [Online.exe+2304D8]
+  push [Online.exe+2300A4]
+  call dword ptr [Online.exe+1C46B0]
+  ret
+
+// L"秘境戰魂 %d"
+xyfp_fmt_battle:
+  db D8 79 83 58 30 62 42 9B 20 00 25 00 64 00 00 00
+// L"戰魂秘境 掃蕩 %d"
+xyfp_fmt_sweep:
+  db 30 62 42 9B D8 79 83 58 20 00 83 63 69 85 20 00 25 00 64 00 00 00
+
+Online.exe+36690:
+  jmp xyfp_send_hook
+  nop
+
+Online.exe+42AD5:
+  jmp xyfp_recv_hook
+
+[DISABLE]
+Online.exe+36690:
+  db 55 8B EC 83 EC 10
+
+Online.exe+42AD5:
+  db 68 A0 03 98 00
+
+dealloc(xyfp_mem)

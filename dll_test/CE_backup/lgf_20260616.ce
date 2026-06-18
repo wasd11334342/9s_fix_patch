@@ -1,0 +1,515 @@
+[ENABLE]
+// LGF level guard + log
+// 37150: status log, 48578: 396F fast enter with open guard, 4AC30: 396D guard, 4AC90: 3970 guard.
+// Room level: 1=90, 2=110, 3=130, 4=140, 5=150, 6=160.
+
+define(lgf_main_check,ONLINE.EXE+37150)
+define(lgf_recv_396f_slot,ONLINE.EXE+48578)
+define(lgf_send_396d,ONLINE.EXE+4AC30)
+define(lgf_send_3970,ONLINE.EXE+4AC90)
+define(lgf_original_action_log,ONLINE.EXE+37385)
+define(lgf_refresh_interval,ONLINE.EXE+3719C)
+
+alloc(lgf_main_hook,4096)
+alloc(lgf_396f_slot_hook,2048)
+alloc(lgf_396d_hook,2048)
+alloc(lgf_3970_hook,2048)
+
+alloc(lgf_enabled,4)
+alloc(lgf_level,4)
+alloc(lgf_allowed_room,4)
+alloc(lgf_max_room,4)
+alloc(lgf_block_room,4)
+alloc(lgf_block_slot,4)
+alloc(lgf_fast_room,4)
+alloc(lgf_fast_slot,4)
+alloc(lgf_fast_sent,4)
+alloc(lgf_last_current,4)
+alloc(lgf_last_max,4)
+alloc(lgf_last_allowed,4)
+
+alloc(lgf_log_fmt,128)
+alloc(lgf_log_full_fmt,128)
+alloc(lgf_log_at_max,64)
+alloc(lgf_log_at_best,64)
+alloc(lgf_log_go_max,64)
+alloc(lgf_log_full_go,64)
+alloc(lgf_log_action_fmt,64)
+
+label(lgf_main_return)
+label(lgf_396f_slot_return)
+label(lgf_396d_return)
+label(lgf_3970_return)
+
+label(calc_level_max)
+label(find_prop_loop)
+label(find_prop_done)
+label(max_done)
+
+label(write_status_log)
+label(write_action_log)
+
+label(block_396d)
+label(block_3970)
+
+lgf_enabled:
+  dd 1
+lgf_level:
+  dd 0
+lgf_allowed_room:
+  dd 0
+lgf_max_room:
+  dd 0
+lgf_block_room:
+  dd 0
+lgf_block_slot:
+  dd 0
+lgf_fast_room:
+  dd 0
+lgf_fast_slot:
+  dd 0
+lgf_fast_sent:
+  dd 0
+lgf_last_current:
+  dd FFFFFFFF
+lgf_last_max:
+  dd FFFFFFFF
+lgf_last_allowed:
+  dd FFFFFFFF
+
+// L"練功房 等級%i 目前%i 最高%i 目標%i %s"
+lgf_log_fmt:
+  db F4 7D 9F 52 3F 62 20 00 49 7B 1A 7D 25 00 69 00 20 00 EE 76 4D 52 25 00 69 00 20 00 00 67 D8 9A 25 00 69 00 20 00 EE 76 19 6A 25 00 69 00 20 00 25 00 73 00 00 00
+
+// L"練功房 等級%i 目前%i 最高%i 目標%i 房間%i到%i已滿 %s"
+lgf_log_full_fmt:
+  db F4 7D 9F 52 3F 62 20 00 49 7B 1A 7D 25 00 69 00 20 00 EE 76 4D 52 25 00 69 00 20 00 00 67 D8 9A 25 00 69 00 20 00 EE 76 19 6A 25 00 69 00 20 00 3F 62 93 95 25 00 69 00 30 52 25 00 69 00 F2 5D FF 6E 20 00 25 00 73 00 00 00
+
+// L"已在目標房間"
+lgf_log_at_max:
+  db F2 5D 28 57 EE 76 19 6A 3F 62 93 95 00 00
+
+// L"已在最高房"
+lgf_log_at_best:
+  db F2 5D 28 57 00 67 D8 9A 3F 62 00 00
+
+// L"前往目標房間"
+lgf_log_go_max:
+  db 4D 52 80 5F EE 76 19 6A 3F 62 93 95 00 00
+
+// L"最高房已滿 前往目標房間"
+lgf_log_full_go:
+  db 00 67 D8 9A 3F 62 F2 5D FF 6E 20 00 4D 52 80 5F EE 76 19 6A 3F 62 93 95 00 00
+
+// L"練功房 %i %i"
+lgf_log_action_fmt:
+  db F4 7D 9F 52 3F 62 20 00 25 00 69 00 20 00 25 00 69 00 00 00
+
+// Refresh interval: original 960000 ms / 16 min.
+// Patch to 1920000 ms / 32 min.
+lgf_refresh_interval:
+  db 00 4C 1D 00
+
+
+// Suppress original LGF action log; status log below is clearer.
+lgf_original_action_log:
+  db 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90
+  db 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90 90
+
+
+lgf_main_check:
+  jmp lgf_main_hook
+  nop
+  nop
+lgf_main_return:
+
+lgf_main_hook:
+  pushad
+
+  cmp dword ptr [lgf_enabled],0
+  je @skip_status
+
+  cmp dword ptr [ONLINE.EXE+23033C],0
+  je @skip_status
+
+  call calc_level_max
+  cmp dword ptr [lgf_fast_sent],0
+  je @fast_reset_done
+  mov eax,[ONLINE.EXE+230970]
+  cmp eax,[lgf_fast_room]
+  jl @fast_reset_done
+  mov dword ptr [lgf_fast_sent],0
+  mov dword ptr [lgf_fast_room],0
+  mov dword ptr [lgf_fast_slot],0
+
+@fast_reset_done:
+
+  mov eax,[ONLINE.EXE+230970]
+  mov ebx,[lgf_max_room]
+  mov ecx,[lgf_allowed_room]
+
+  cmp eax,[lgf_last_current]
+  jne @do_status
+  cmp ebx,[lgf_last_max]
+  jne @do_status
+  cmp ecx,[lgf_last_allowed]
+  je @skip_status
+
+@do_status:
+  mov [lgf_last_current],eax
+  mov [lgf_last_max],ebx
+  mov [lgf_last_allowed],ecx
+  call write_status_log
+
+@skip_status:
+  popad
+
+  cmp dword ptr [ONLINE.EXE+23033C],00
+  jmp lgf_main_return
+
+
+lgf_recv_396f_slot:
+  jmp lgf_396f_slot_hook
+  nop
+  nop
+  nop
+  nop
+lgf_396f_slot_return:
+
+lgf_396f_slot_hook:
+  cmp byte ptr [esi+04],01
+  jne @slot_done
+
+  // Original 396F code: when status == 1, save the parsed slot into room_entry+18.
+  mov [ebx+18],eax
+
+  mov [lgf_fast_slot],eax
+  mov edx,[ebx+04]
+  mov [lgf_fast_room],edx
+
+  cmp dword ptr [lgf_enabled],0
+  je @slot_done
+  cmp dword ptr [ONLINE.EXE+23033C],0
+  je @slot_done
+
+  cmp dword ptr [lgf_fast_sent],0
+  jne @consume_pending_slot
+
+  pushad
+  call calc_level_max
+  mov eax,[lgf_fast_room]
+  cmp eax,[lgf_max_room]
+  ja @fast_send_done
+
+  mov dword ptr [lgf_fast_sent],1
+  push dword ptr [lgf_fast_slot]
+  push dword ptr [lgf_fast_room]
+  call lgf_send_3970
+
+@fast_send_done:
+  popad
+
+@consume_pending_slot:
+  cmp dword ptr [lgf_fast_sent],0
+  je @slot_done
+  mov dword ptr [ebx+18],0
+  mov dword ptr [ebx],1
+
+@slot_done:
+  jmp lgf_396f_slot_return
+
+
+lgf_send_396d:
+  jmp lgf_396d_hook
+  nop
+lgf_396d_return:
+
+lgf_396d_hook:
+  mov eax,[esp+04]
+  mov [lgf_block_room],eax
+
+  cmp dword ptr [lgf_enabled],0
+  je @allow_396d
+
+  pushad
+  call calc_level_max
+  mov eax,[lgf_block_room]
+  cmp eax,[lgf_max_room]
+  ja block_396d
+  popad
+
+@allow_396d:
+  push ebp
+  mov ebp,esp
+  sub esp,0C
+  jmp lgf_396d_return
+
+block_396d:
+  popad
+  ret 08
+
+
+lgf_send_3970:
+  jmp lgf_3970_hook
+  nop
+lgf_3970_return:
+
+lgf_3970_hook:
+  mov eax,[esp+04]
+  mov [lgf_block_room],eax
+  mov eax,[esp+08]
+  mov [lgf_block_slot],eax
+
+  cmp dword ptr [lgf_enabled],0
+  je @allow_3970
+
+  pushad
+  call calc_level_max
+  mov eax,[lgf_block_room]
+  cmp eax,[lgf_max_room]
+  ja block_3970
+  call write_action_log
+  popad
+
+@allow_3970:
+  push ebp
+  mov ebp,esp
+  sub esp,10
+  jmp lgf_3970_return
+
+block_3970:
+  popad
+  ret 08
+
+
+calc_level_max:
+  pushad
+
+  mov dword ptr [lgf_level],0
+  mov dword ptr [lgf_allowed_room],0
+  mov dword ptr [lgf_max_room],0
+
+  mov esi,[ONLINE.EXE+230520]
+  mov ecx,[ONLINE.EXE+230524]
+  test esi,esi
+  je find_prop_done
+  test ecx,ecx
+  jle find_prop_done
+
+find_prop_loop:
+  mov edi,[esi]
+  test edi,edi
+  je @next_prop
+
+  cmp dword ptr [edi],00000194
+  jne @next_prop
+
+  mov eax,[edi+04]
+  mov [lgf_level],eax
+  jmp find_prop_done
+
+@next_prop:
+  add esi,4
+  loop find_prop_loop
+
+find_prop_done:
+  mov eax,[lgf_level]
+
+  cmp eax,#160
+  jl @lt160
+  mov dword ptr [lgf_allowed_room],6
+  jmp max_done
+
+@lt160:
+  cmp eax,#150
+  jl @lt150
+  mov dword ptr [lgf_allowed_room],5
+  jmp max_done
+
+@lt150:
+  cmp eax,#140
+  jl @lt140
+  mov dword ptr [lgf_allowed_room],4
+  jmp max_done
+
+@lt140:
+  cmp eax,#130
+  jl @lt130
+  mov dword ptr [lgf_allowed_room],3
+  jmp max_done
+
+@lt130:
+  cmp eax,#110
+  jl @lt110
+  mov dword ptr [lgf_allowed_room],2
+  jmp max_done
+
+@lt110:
+  cmp eax,#90
+  jl max_done
+  mov dword ptr [lgf_allowed_room],1
+
+max_done:
+  call calc_available_room
+  popad
+  ret
+
+
+calc_available_room:
+  pushad
+
+  mov eax,[lgf_allowed_room]
+  mov [lgf_max_room],eax
+  test eax,eax
+  jle @done
+
+@room_loop:
+  push eax
+  call find_room_ptr
+  mov edi,eax
+  pop eax
+
+  test edi,edi
+  je @use_prev
+
+  cmp dword ptr [edi+0C],0
+  je @use_room
+
+  mov ebx,[edi+08]
+  cmp ebx,[edi+0C]
+  jl @use_room
+
+@use_prev:
+  dec eax
+  cmp eax,0
+  jg @room_loop
+  xor eax,eax
+
+@use_room:
+  mov [lgf_max_room],eax
+
+@done:
+  popad
+  ret
+
+
+find_room_ptr:
+  push ebx
+  push ecx
+  push edx
+  push esi
+
+  mov edx,eax
+  mov esi,[ONLINE.EXE+23097C]
+  mov ecx,[ONLINE.EXE+230980]
+  xor eax,eax
+  test esi,esi
+  je @find_done
+  test ecx,ecx
+  jle @find_done
+
+@find_loop:
+  mov ebx,[esi]
+  test ebx,ebx
+  je @find_next
+  cmp [ebx+04],edx
+  jne @find_next
+  mov eax,ebx
+  jmp @find_done
+
+@find_next:
+  add esi,4
+  loop @find_loop
+
+@find_done:
+  pop esi
+  pop edx
+  pop ecx
+  pop ebx
+  ret
+
+
+write_status_log:
+  pushad
+
+  mov ecx,[ONLINE.EXE+230970]
+
+  mov edx,[lgf_allowed_room]
+  cmp edx,[lgf_max_room]
+  je @check_current
+
+  mov eax,[lgf_max_room]
+  inc eax
+  mov ebx,lgf_log_full_go
+  mov ecx,[ONLINE.EXE+230970]
+  cmp ecx,[lgf_max_room]
+  jl @full_msg_ready
+  mov ebx,lgf_log_at_best
+
+@full_msg_ready:
+  push ebx
+  push dword ptr [lgf_allowed_room]
+  push eax
+  push dword ptr [lgf_max_room]
+  push dword ptr [lgf_allowed_room]
+  push dword ptr [ONLINE.EXE+230970]
+  push dword ptr [lgf_level]
+  push lgf_log_full_fmt
+  push ONLINE.EXE+230504
+  call ONLINE.EXE+2EF0
+  add esp,24
+  jmp @flush_log
+
+@check_current:
+  mov eax,lgf_log_go_max
+  cmp ecx,[lgf_max_room]
+  jl @msg_ready
+  mov eax,lgf_log_at_max
+
+@msg_ready:
+  push eax
+  push dword ptr [lgf_max_room]
+  push dword ptr [lgf_allowed_room]
+  push dword ptr [ONLINE.EXE+230970]
+  push dword ptr [lgf_level]
+  push lgf_log_fmt
+  push ONLINE.EXE+230504
+  call ONLINE.EXE+2EF0
+  add esp,1C
+
+@flush_log:
+  push 00
+  push 00
+  push dword ptr [ONLINE.EXE+2304D8]
+  push dword ptr [ONLINE.EXE+2300A4]
+  call dword ptr [ONLINE.EXE+1C46B0]
+
+  popad
+  ret
+
+
+write_action_log:
+  pushad
+
+  push dword ptr [lgf_block_slot]
+  push dword ptr [lgf_block_room]
+  push lgf_log_action_fmt
+  push ONLINE.EXE+230504
+  call ONLINE.EXE+2EF0
+  add esp,10
+
+  push 00
+  push 00
+  push dword ptr [ONLINE.EXE+2304D8]
+  push dword ptr [ONLINE.EXE+2300A4]
+  call dword ptr [ONLINE.EXE+1C46B0]
+
+  popad
+  ret
+
+
+[DISABLE]
+
+// Safe soft-disable: do not restore bytes while game threads may be executing them.
+lgf_enabled:
+  dd 0

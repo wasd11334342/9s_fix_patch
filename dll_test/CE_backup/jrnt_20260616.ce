@@ -1,0 +1,170 @@
+[ENABLE]
+// Codex JRNT / festival drop sender.
+// Requires shared recv router with the 4F35 branch enabled.
+// This script only hooks Online.exe+36A90.
+
+define(jrnt_entry,Online.exe+36A90)
+alloc(jrnt_entry_newmem,2048,jrnt_entry)
+alloc(jrnt_sender_data,512)
+
+label(jrnt_entry_on)
+label(jrnt_entry_done)
+label(jrnt_tick)
+label(jrnt_handle_open)
+label(jrnt_handle_claims)
+label(jrnt_tick_claim_1)
+label(jrnt_tick_claim_2)
+label(jrnt_claim_done)
+label(jrnt_send_query)
+label(jrnt_send_4f37)
+label(jrnt_send_4f36)
+label(jrnt_log_text)
+label(jrnt_refresh_log)
+label(jrnt_this)
+label(jrnt_did_work)
+label(jrnt_payload_zero)
+label(jrnt_payload_4f37)
+label(jrnt_payload_4f36)
+label(jrnt_fmt_open)
+label(jrnt_fmt_claim)
+
+jrnt_entry_newmem:
+  mov [jrnt_this],ecx
+  pushad
+  cmp dword ptr [Online.exe+230358],00
+  jne jrnt_entry_on
+  mov dword ptr [jrnt_pending_open],00
+  mov byte ptr [jrnt_claim_pending],00
+  mov byte ptr [jrnt_claim_pending+1],00
+  mov byte ptr [jrnt_claim_pending+2],00
+  popad
+  ret
+
+jrnt_entry_on:
+  call jrnt_tick
+  cmp dword ptr [jrnt_did_work],01
+  je jrnt_entry_done
+  call jrnt_send_query
+
+jrnt_entry_done:
+  popad
+  ret
+
+jrnt_tick:
+  mov dword ptr [jrnt_did_work],00
+
+jrnt_handle_open:
+  cmp dword ptr [jrnt_pending_open],01
+  jne jrnt_handle_claims
+  mov eax,jrnt_fmt_open
+  call jrnt_log_text
+  call jrnt_send_4f37
+  mov dword ptr [jrnt_pending_open],00
+  mov dword ptr [jrnt_did_work],01
+
+jrnt_handle_claims:
+  cmp byte ptr [jrnt_claim_pending],01
+  jne jrnt_tick_claim_1
+  mov eax,jrnt_fmt_claim
+  call jrnt_log_text
+  movzx eax,byte ptr [jrnt_ids]
+  call jrnt_send_4f36
+  mov byte ptr [jrnt_claim_pending],00
+  mov dword ptr [jrnt_did_work],01
+
+jrnt_tick_claim_1:
+  cmp byte ptr [jrnt_claim_pending+1],01
+  jne jrnt_tick_claim_2
+  mov eax,jrnt_fmt_claim
+  call jrnt_log_text
+  movzx eax,byte ptr [jrnt_ids+1]
+  call jrnt_send_4f36
+  mov byte ptr [jrnt_claim_pending+1],00
+  mov dword ptr [jrnt_did_work],01
+
+jrnt_tick_claim_2:
+  cmp byte ptr [jrnt_claim_pending+2],01
+  jne jrnt_claim_done
+  mov eax,jrnt_fmt_claim
+  call jrnt_log_text
+  movzx eax,byte ptr [jrnt_ids+2]
+  call jrnt_send_4f36
+  mov byte ptr [jrnt_claim_pending+2],00
+  mov dword ptr [jrnt_did_work],01
+
+jrnt_claim_done:
+  ret
+
+jrnt_send_query:
+  mov ecx,[jrnt_this]
+  push 00
+  push jrnt_payload_zero
+  push 4F34
+  call Online.exe+4A360
+  ret
+
+jrnt_send_4f37:
+  mov ecx,[jrnt_this]
+  push 01
+  push jrnt_payload_4f37
+  push 4F37
+  call Online.exe+4A360
+  ret
+
+jrnt_send_4f36:
+  mov byte ptr [jrnt_payload_4f36+3],al
+  mov ecx,[jrnt_this]
+  push 04
+  push jrnt_payload_4f36
+  push 4F36
+  call Online.exe+4A360
+  ret
+
+jrnt_log_text:
+  push eax
+  push Online.exe+1FE56C
+  push Online.exe+230504
+  call Online.exe+2EF0
+  add esp,0C
+  call jrnt_refresh_log
+  ret
+
+jrnt_refresh_log:
+  push 00
+  push 00
+  push [Online.exe+2304D8]
+  push [Online.exe+2300A4]
+  call dword ptr [Online.exe+1C46B0]
+  ret
+
+jrnt_sender_data:
+jrnt_this:
+  dd 0
+jrnt_did_work:
+  dd 0
+jrnt_payload_zero:
+  db 00
+jrnt_payload_4f37:
+  db 00
+jrnt_payload_4f36:
+  db 00 00 00 00
+jrnt_fmt_open:
+  dw 570B,5BB6,52D5,54E1,0020,958B,555F,5BF6,7BB1,0000
+jrnt_fmt_claim:
+  dw 570B,5BB6,52D5,54E1,0020,9818,53D6,5BF6,7BB1,0000
+
+jrnt_entry:
+  jmp jrnt_entry_newmem
+  nop
+  nop
+  nop
+  nop
+  nop
+  nop
+
+[DISABLE]
+jrnt_entry:
+  db 55 8B EC 51 83 3D 58 03 63 00 00
+
+dealloc(jrnt_sender_data)
+dealloc(jrnt_entry_newmem)

@@ -73,6 +73,10 @@ volatile LONG g_id = 0;
 volatile LONG g_count = 0;
 volatile LONG g_state = 0;
 volatile LONG g_lastQuery = 0;
+volatile LONG g_pending = 0;
+volatile LONG g_router3Ea4Hits = 0;
+volatile LONG g_routerSwitchSeen = 0;
+volatile LONG g_routerPendingSets = 0;
 uint32_t g_now = 0;
 uint32_t g_payload[2]{};
 
@@ -110,6 +114,53 @@ const wchar_t kRecvLogFormat[] = {
 const wchar_t kRewardLogFormat[] = {
     0x5468, 0x5E38, 0x734E, 0x52F5, 0x0020, 0x7B2C, 0x0025, 0x0069,
     0x500B, 0x7D2F, 0x7A4D, 0x734E, 0x52F5, 0x0000
+};
+}
+
+namespace Jrnt
+{
+volatile LONG g_this = 0;
+volatile LONG g_didWork = 0;
+volatile LONG g_pendingOpen = 0;
+BYTE g_ids[4] = { 0xFF, 0xFF, 0xFF, 0x00 };
+BYTE g_claimPending[4]{};
+BYTE g_payloadZero = 0;
+BYTE g_payload4F37 = 0;
+uint32_t g_payload4F36 = 0;
+
+const wchar_t kLogOpen[] = {
+    0x570B, 0x5BB6, 0x52D5, 0x54E1, 0x0020, 0x958B, 0x555F, 0x5BF6, 0x7BB1, 0x0000
+};
+const wchar_t kLogClaim[] = {
+    0x570B, 0x5BB6, 0x52D5, 0x54E1, 0x0020, 0x9818, 0x53D6, 0x5BF6, 0x7BB1, 0x0000
+};
+}
+
+namespace Xyfp
+{
+constexpr size_t kMaxPatterns = 5;
+
+uint32_t g_payload4C83 = 0;
+BYTE g_payload4C86[8]{};
+BYTE g_payload145A[0x2F] = {
+    0x00, 0x00, 0x00, 0x00, 0x24, 0x00, 0x05
+};
+BYTE g_payload4C87[0x0C] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x01
+};
+volatile LONG g_day = 0;
+volatile LONG g_stamina = 0;
+volatile LONG g_patternCount = 0;
+volatile LONG g_payload8Count = 0;
+volatile LONG g_candidateStage = 0;
+volatile LONG g_clearCount = 0;
+BYTE g_payload8s[kMaxPatterns * 8]{};
+
+const wchar_t kLogBattleFormat[] = {
+    0x79D8, 0x5883, 0x6230, 0x9B42, 0x0020, 0x0025, 0x0064, 0x0000
+};
+const wchar_t kLogSweepFormat[] = {
+    0x6230, 0x9B42, 0x79D8, 0x5883, 0x0020, 0x6383, 0x8569, 0x0020, 0x0025, 0x0064, 0x0000
 };
 }
 
@@ -197,13 +248,13 @@ volatile LONG g_allowedRoom = 0;
 volatile LONG g_maxRoom = 0;
 volatile LONG g_blockRoom = 0;
 volatile LONG g_blockSlot = 0;
-volatile LONG g_targetRoom = 0;
+volatile LONG g_fastRoom = 0;
+volatile LONG g_fastSlot = 0;
+volatile LONG g_fastSent = 0;
 volatile LONG g_lastCurrent = -1;
 volatile LONG g_lastMax = -1;
 volatile LONG g_lastAllowed = -1;
 volatile LONG g_shouldBlock = 0;
-volatile LONG g_openState = 0;
-volatile LONG g_lastOpenState = -1;
 
 const wchar_t kLogFormat[] = {
     0x7DF4, 0x529F, 0x623F, 0x0020, 0x7B49, 0x7D1A, 0x0025, 0x0069,
@@ -271,6 +322,18 @@ bool BuildSendCode(uintptr_t base, CodeBuffer& code);
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
 }
 
+namespace Jrnt
+{
+bool BuildSendCode(uintptr_t base, CodeBuffer& code);
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+}
+
+namespace Xyfp
+{
+bool BuildSendCode(uintptr_t base, CodeBuffer& code);
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+}
+
 namespace SharedRecvRouter
 {
 volatile LONG g_clearStackArg = 0;
@@ -280,6 +343,7 @@ bool BuildCode(uintptr_t base, CodeBuffer& code);
 namespace LgfGuard
 {
 bool BuildMainCode(uintptr_t base, CodeBuffer& code);
+bool Build396FSlotCode(uintptr_t base, CodeBuffer& code);
 bool Build396DCode(uintptr_t base, CodeBuffer& code);
 bool Build3970Code(uintptr_t base, CodeBuffer& code);
 }
@@ -290,7 +354,10 @@ const JumpPatch kJumpPatches[] = {
     { "Daily Sign send tick", 0x38F90, 5, 128, DailySign::BuildSendCode },
     { "Prize Pool sender", 0x364C0, 5, 128, PrizePool::BuildSendCode },
     { "Weekly Reward sender", 0x35CE0, 5, 128, WeeklyReward::BuildSendCode },
+    { "JRNT sender", 0x36A90, 11, 128, Jrnt::BuildSendCode },
+    { "XYFP sender", 0x36690, 6, 128, Xyfp::BuildSendCode },
     { "LGF status log", 0x37150, 7, 128, LgfGuard::BuildMainCode },
+    { "LGF 396F fast slot", 0x48578, 9, 128, LgfGuard::Build396FSlotCode },
     { "LGF 396D guard", 0x4AC30, 6, 128, LgfGuard::Build396DCode },
     { "LGF 3970 guard", 0x4AC90, 6, 128, LgfGuard::Build3970Code },
     { "AutoLure dash main", 0x351F0, 6, 128, AutoLureDash::BuildMainCode },
@@ -373,6 +440,16 @@ bool AppendPushEax(CodeBuffer& code)
     return AppendByte(code, 0x50);
 }
 
+bool AppendPushEbx(CodeBuffer& code)
+{
+    return AppendByte(code, 0x53);
+}
+
+bool AppendPushEsi(CodeBuffer& code)
+{
+    return AppendByte(code, 0x56);
+}
+
 bool AppendPushDwordPtrEspOffset(CodeBuffer& code, BYTE offset)
 {
     return AppendByte(code, 0xFF) &&
@@ -404,6 +481,11 @@ bool AppendMovEaxDwordPtrAbs(CodeBuffer& code, uint32_t address)
 bool AppendMovDwordPtrAbsEax(CodeBuffer& code, uint32_t address)
 {
     return AppendByte(code, 0xA3) && AppendU32(code, address);
+}
+
+bool AppendMovDwordPtrAbsEcx(CodeBuffer& code, uint32_t address)
+{
+    return AppendByte(code, 0x89) && AppendByte(code, 0x0D) && AppendU32(code, address);
 }
 
 bool AppendIncDwordPtrAbs(CodeBuffer& code, uint32_t address)
@@ -1184,44 +1266,22 @@ void WriteActionLog()
     RefreshLog();
 }
 
-void UpdateOpenState()
-{
-    SYSTEMTIME time{};
-    GetLocalTime(&time);
-    g_openState = time.wHour >= 10 ? 1 : 0;
-}
-
-void WriteClosedLog()
-{
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, ...);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, kLogClosed);
-    RefreshLog();
-}
-
 __declspec(noinline) void __stdcall MainHook()
 {
     if (g_enabled == 0 || ReadGameU32(g_mainBase + 0x23033C) == 0) {
         return;
     }
 
-    UpdateOpenState();
-    if (g_openState == 0) {
-        if (g_lastOpenState == 0) {
-            return;
-        }
-
-        g_lastOpenState = 0;
-        WriteClosedLog();
-        return;
-    }
-
-    if (g_lastOpenState != 1) {
-        g_lastOpenState = 1;
-        g_lastCurrent = -1;
-    }
-
     CalcLevelMax();
+    if (g_fastSent != 0) {
+        const LONG currentRoom = static_cast<LONG>(ReadGameU32(g_mainBase + 0x230970));
+        if (currentRoom >= g_fastRoom) {
+            InterlockedExchange(&g_fastSent, 0);
+            InterlockedExchange(&g_fastRoom, 0);
+            InterlockedExchange(&g_fastSlot, 0);
+        }
+    }
+
     const LONG current = static_cast<LONG>(ReadGameU32(g_mainBase + 0x230970));
     const LONG maxRoom = g_maxRoom;
     const LONG allowed = g_allowedRoom;
@@ -1235,55 +1295,71 @@ __declspec(noinline) void __stdcall MainHook()
     WriteStatusLog();
 }
 
+void Send3970(uint32_t room, uint32_t slot)
+{
+    using Send3970Fn = void(__stdcall*)(uint32_t, uint32_t);
+    Send3970Fn send3970 = reinterpret_cast<Send3970Fn>(g_mainBase + 0x4AC90);
+    send3970(room, slot);
+}
+
+__declspec(noinline) void __stdcall Slot396FHook(uint32_t slot, uintptr_t roomEntry, const BYTE* payload)
+{
+    if (!payload || roomEntry == 0 || payload[4] != 1) {
+        return;
+    }
+
+    *reinterpret_cast<volatile uint32_t*>(roomEntry + 0x18) = slot;
+    const uint32_t room = ReadGameU32(roomEntry + 0x04);
+    InterlockedExchange(&g_fastSlot, static_cast<LONG>(slot));
+    InterlockedExchange(&g_fastRoom, static_cast<LONG>(room));
+
+    if (g_enabled == 0 || ReadGameU32(g_mainBase + 0x23033C) == 0) {
+        return;
+    }
+
+    if (g_fastSent == 0) {
+        CalcLevelMax();
+        if (static_cast<LONG>(room) <= g_maxRoom) {
+            InterlockedExchange(&g_fastSent, 1);
+            Send3970(room, slot);
+        }
+    }
+
+    if (g_fastSent != 0) {
+        *reinterpret_cast<volatile uint32_t*>(roomEntry + 0x18) = 0;
+        *reinterpret_cast<volatile uint32_t*>(roomEntry) = 1;
+    }
+}
+
 __declspec(noinline) void __stdcall Guard396DHook(uint32_t room)
 {
     g_blockRoom = static_cast<LONG>(room);
-    g_targetRoom = static_cast<LONG>(room);
     g_shouldBlock = 0;
     if (g_enabled == 0) {
         return;
     }
 
-    UpdateOpenState();
-    if (g_openState == 0) {
-        g_shouldBlock = 1;
-        return;
-    }
-
     CalcLevelMax();
-    if (g_maxRoom <= 0) {
+    if (static_cast<LONG>(room) > g_maxRoom) {
         g_shouldBlock = 1;
-        return;
     }
-
-    g_targetRoom = g_maxRoom;
-    g_blockRoom = g_targetRoom;
 }
 
 __declspec(noinline) void __stdcall Guard3970Hook(uint32_t room, uint32_t slot)
 {
     g_blockRoom = static_cast<LONG>(room);
     g_blockSlot = static_cast<LONG>(slot);
-    g_targetRoom = static_cast<LONG>(room);
     g_shouldBlock = 0;
     if (g_enabled == 0) {
         return;
     }
 
-    UpdateOpenState();
-    if (g_openState == 0) {
-        g_shouldBlock = 1;
-        return;
-    }
-
     CalcLevelMax();
-    if (g_maxRoom <= 0) {
+    if (static_cast<LONG>(room) > g_maxRoom) {
         g_shouldBlock = 1;
         return;
     }
 
-    g_targetRoom = g_maxRoom;
-    g_blockRoom = g_targetRoom;
     WriteActionLog();
 }
 
@@ -1296,6 +1372,17 @@ bool BuildMainCode(uintptr_t base, CodeBuffer& code)
         AppendRel32Instruction(code, 0xE9, base + 0x37157);
 }
 
+bool Build396FSlotCode(uintptr_t base, CodeBuffer& code)
+{
+    return AppendPushad(code) &&
+        AppendPushEsi(code) &&
+        AppendPushEbx(code) &&
+        AppendPushEax(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&Slot396FHook)) &&
+        AppendPopad(code) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x48581);
+}
+
 bool Build396DCode(uintptr_t base, CodeBuffer& code)
 {
     return AppendPushad(code) &&
@@ -1303,9 +1390,7 @@ bool Build396DCode(uintptr_t base, CodeBuffer& code)
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&Guard396DHook)) &&
         AppendPopad(code) &&
         AppendCmpDwordAbsImm8(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_shouldBlock)), 0) &&
-        AppendJneShort(code, 0x14) &&
-        AppendMovEaxDwordPtrAbs(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_targetRoom))) &&
-        AppendMovDwordPtrEspOffsetEax(code, 0x04) &&
+        AppendJneShort(code, 0x0B) &&
         AppendFunctionPrologueWithStack(code, 0x0C) &&
         AppendRel32Instruction(code, 0xE9, base + 0x4AC36) &&
         AppendRetImm16(code, 0x08);
@@ -1319,9 +1404,7 @@ bool Build3970Code(uintptr_t base, CodeBuffer& code)
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&Guard3970Hook)) &&
         AppendPopad(code) &&
         AppendCmpDwordAbsImm8(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_shouldBlock)), 0) &&
-        AppendJneShort(code, 0x14) &&
-        AppendMovEaxDwordPtrAbs(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_targetRoom))) &&
-        AppendMovDwordPtrEspOffsetEax(code, 0x04) &&
+        AppendJneShort(code, 0x0B) &&
         AppendFunctionPrologueWithStack(code, 0x10) &&
         AppendRel32Instruction(code, 0xE9, base + 0x4AC96) &&
         AppendRetImm16(code, 0x08);
@@ -1514,15 +1597,23 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload)
         return;
     }
 
+    InterlockedIncrement(&g_router3Ea4Hits);
     InterlockedExchange(&g_id, static_cast<LONG>(BuildPayload(ReadU32Unaligned(payload))));
     InterlockedExchange(&g_count, static_cast<LONG>(payload[0x215]));
     InterlockedExchange(&g_state, static_cast<LONG>(payload[0x21A]));
+    const LONG switchValue = static_cast<LONG>(ReadGameU32(g_mainBase + 0x230388));
+    InterlockedExchange(&g_routerSwitchSeen, switchValue);
+    if (switchValue != 0) {
+        InterlockedExchange(&g_pending, 1);
+        InterlockedIncrement(&g_routerPendingSets);
+    }
     InterlockedExchange(&SharedRecvRouter::g_clearStackArg, 1);
 }
 
 __declspec(noinline) void __stdcall SendHook()
 {
     if (ReadGameU32(g_mainBase + 0x230388) == 0) {
+        InterlockedExchange(&g_pending, 0);
         return;
     }
 
@@ -1540,6 +1631,10 @@ __declspec(noinline) void __stdcall SendHook()
         return;
     }
 
+    if (g_pending == 0) {
+        return;
+    }
+
     if ((static_cast<BYTE>(g_state) == 0xFF)) {
         if (g_count == 0) {
             return;
@@ -1548,11 +1643,13 @@ __declspec(noinline) void __stdcall SendHook()
         SendAction(1);
         SendAction(2);
         InterlockedExchange(&g_count, 0);
+        InterlockedExchange(&g_pending, 0);
         WriteLog(kLogCase);
         return;
     }
 
     SendAction(2);
+    InterlockedExchange(&g_pending, 0);
     WriteLog(kLogCase);
 }
 
@@ -1775,6 +1872,301 @@ bool BuildSendCode(uintptr_t, CodeBuffer& code)
 
 }
 
+namespace Jrnt
+{
+
+void SendPacketWithEcx(uint32_t ecxValue, uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    const uintptr_t sendAddress = g_mainBase + 0x4A360;
+    __asm {
+        mov ecx, ecxValue
+        push payloadLength
+        push payload
+        push opcode
+        call sendAddress
+    }
+}
+
+void RefreshLog()
+{
+    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
+    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
+    if (refreshLog) {
+        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
+    }
+}
+
+void WriteLog(const wchar_t* text)
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
+    RefreshLog();
+}
+
+void ResetState()
+{
+    InterlockedExchange(&g_pendingOpen, 0);
+    for (size_t i = 0; i < 3; ++i) {
+        g_claimPending[i] = 0;
+    }
+}
+
+void SendQuery()
+{
+    SendPacketWithEcx(static_cast<uint32_t>(g_this), 0x4F34, &g_payloadZero, 0);
+}
+
+void SendOpen()
+{
+    SendPacketWithEcx(static_cast<uint32_t>(g_this), 0x4F37, &g_payload4F37, 1);
+}
+
+void SendClaim(BYTE id)
+{
+    g_payload4F36 = 0;
+    reinterpret_cast<BYTE*>(&g_payload4F36)[3] = id;
+    SendPacketWithEcx(static_cast<uint32_t>(g_this), 0x4F36, &g_payload4F36, sizeof(g_payload4F36));
+}
+
+void Tick()
+{
+    InterlockedExchange(&g_didWork, 0);
+
+    if (g_pendingOpen == 1) {
+        WriteLog(kLogOpen);
+        SendOpen();
+        InterlockedExchange(&g_pendingOpen, 0);
+        InterlockedExchange(&g_didWork, 1);
+    }
+
+    for (size_t i = 0; i < 3; ++i) {
+        if (g_claimPending[i] != 1) {
+            continue;
+        }
+
+        WriteLog(kLogClaim);
+        SendClaim(g_ids[i]);
+        g_claimPending[i] = 0;
+        InterlockedExchange(&g_didWork, 1);
+    }
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    if ((opcode & 0xFFFF) != 0x4F35 || !payload || payloadLength < 4) {
+        return;
+    }
+
+    InterlockedExchange(&g_pendingOpen, 0);
+    g_ids[0] = 0xFF;
+    g_ids[1] = 0xFF;
+    g_ids[2] = 0xFF;
+    g_claimPending[0] = 0;
+    g_claimPending[1] = 0;
+    g_claimPending[2] = 0;
+
+    if (payload[3] != 0) {
+        InterlockedExchange(&g_pendingOpen, 1);
+        return;
+    }
+
+    size_t idIndex = 0;
+    for (uint32_t offset = 1; offset <= payloadLength - 2; ++offset) {
+        if (payload[offset] != 0 || payload[offset + 1] != 0x0C) {
+            continue;
+        }
+        if (idIndex < 3) {
+            g_ids[idIndex++] = payload[offset - 1];
+        }
+    }
+
+    size_t statusIndex = 0;
+    for (uint32_t offset = 1; offset <= payloadLength - 4; ++offset) {
+        if (payload[offset] != 0 ||
+            payload[offset + 1] != 0x02 ||
+            payload[offset + 2] != 0x7B ||
+            payload[offset + 3] != 0x7D) {
+            continue;
+        }
+
+        if (statusIndex < 3 &&
+            payload[offset - 1] == 1 &&
+            g_ids[statusIndex] != 0xFF) {
+            g_claimPending[statusIndex] = 1;
+        }
+        ++statusIndex;
+    }
+}
+
+__declspec(noinline) void __stdcall SendHook()
+{
+    if (ReadGameU32(g_mainBase + 0x230358) == 0) {
+        ResetState();
+        return;
+    }
+
+    Tick();
+    if (g_didWork == 1) {
+        return;
+    }
+
+    SendQuery();
+}
+
+bool BuildSendCode(uintptr_t, CodeBuffer& code)
+{
+    return AppendMovDwordPtrAbsEcx(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_this))) &&
+        AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&SendHook)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0xC3);
+}
+
+}
+
+namespace Xyfp
+{
+
+void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket = reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(opcode, payload, payloadLength);
+}
+
+void RefreshLog()
+{
+    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
+    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
+    if (refreshLog) {
+        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
+    }
+}
+
+void WriteBattleLog()
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, uint32_t);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, kLogBattleFormat, static_cast<uint32_t>(g_candidateStage));
+    RefreshLog();
+}
+
+void WriteSweepLog()
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, uint32_t);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, kLogSweepFormat, 1);
+    RefreshLog();
+}
+
+void SendSweep()
+{
+    g_payload4C87[3] = static_cast<BYTE>(g_day);
+    g_payload4C87[7] = 5;
+    g_payload4C87[0x0B] = 1;
+    WriteSweepLog();
+    SendPacket(0x4C87, g_payload4C87, sizeof(g_payload4C87));
+}
+
+void SendBattle()
+{
+    g_payload4C86[3] = static_cast<BYTE>(g_day);
+    g_payload4C86[7] = static_cast<BYTE>(g_candidateStage);
+    g_payload145A[2] = static_cast<BYTE>(g_day);
+    g_payload145A[3] = static_cast<BYTE>(g_candidateStage);
+    std::memcpy(g_payload145A + 7, g_payload8s, sizeof(g_payload8s));
+    WriteBattleLog();
+    SendPacket(0x4C86, g_payload4C86, sizeof(g_payload4C86));
+    SendPacket(0x145A, g_payload145A, sizeof(g_payload145A));
+}
+
+void ParsePayload(const BYTE* payload, uint32_t payloadLength)
+{
+    if (!payload || payloadLength < 15) {
+        return;
+    }
+
+    InterlockedExchange(&g_day, payload[0x03]);
+    InterlockedExchange(&g_stamina, payload[0x0E]);
+    InterlockedExchange(&g_patternCount, 0);
+    InterlockedExchange(&g_payload8Count, 0);
+    InterlockedExchange(&g_candidateStage, 0);
+    InterlockedExchange(&g_clearCount, 0);
+    std::memset(g_payload8s, 0, sizeof(g_payload8s));
+
+    const uint32_t scanLimit = payloadLength - 14;
+    for (uint32_t offset = 0; offset <= scanLimit;) {
+        const BYTE* cursor = payload + offset;
+        if (ReadU32Unaligned(cursor) != 0x0000302E || cursor[4] != 0x27) {
+            ++offset;
+            continue;
+        }
+
+        const LONG patternIndex = g_patternCount;
+        if (patternIndex >= static_cast<LONG>(kMaxPatterns)) {
+            break;
+        }
+
+        InterlockedExchange(&g_patternCount, patternIndex + 1);
+        std::memcpy(g_payload8s + patternIndex * 8, cursor, 8);
+        InterlockedIncrement(&g_payload8Count);
+
+        const BYTE after5 = cursor[9];
+        if (after5 == 1) {
+            InterlockedIncrement(&g_clearCount);
+        }
+        if (g_candidateStage == 0 && after5 == 0) {
+            InterlockedExchange(&g_candidateStage, patternIndex + 1);
+        }
+
+        if (g_patternCount >= static_cast<LONG>(kMaxPatterns)) {
+            break;
+        }
+        offset += 5;
+    }
+
+    if (g_stamina == 0 || g_patternCount < static_cast<LONG>(kMaxPatterns)) {
+        return;
+    }
+    if (g_clearCount == static_cast<LONG>(kMaxPatterns)) {
+        SendSweep();
+        return;
+    }
+    if (g_payload8Count >= static_cast<LONG>(kMaxPatterns) && g_candidateStage != 0) {
+        SendBattle();
+    }
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    const uint32_t op = opcode & 0xFFFF;
+    if (op != 0x4C84 && op != 0x844C) {
+        return;
+    }
+
+    ParsePayload(payload, payloadLength);
+}
+
+__declspec(noinline) void __stdcall SendHook()
+{
+    if (ReadGameU32(g_mainBase + 0x230370) == 0) {
+        return;
+    }
+
+    SendPacket(0x4C83, &g_payload4C83, sizeof(g_payload4C83));
+}
+
+bool BuildSendCode(uintptr_t, CodeBuffer& code)
+{
+    return AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&SendHook)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0xC3);
+}
+
+}
+
 namespace FastDailyBattle
 {
 
@@ -1813,6 +2205,8 @@ __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* pa
     DailySign::HandleRecvPacket(opcode, payload);
     PrizePool::HandleRecvPacket(opcode, payload);
     WeeklyReward::HandleRecvPacket(opcode, payload, payloadLength);
+    Jrnt::HandleRecvPacket(opcode, payload, payloadLength);
+    Xyfp::HandleRecvPacket(opcode, payload, payloadLength);
 }
 
 bool BuildCode(uintptr_t base, CodeBuffer& code)
@@ -1990,9 +2384,14 @@ DWORD WINAPI MainThread(LPVOID)
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Prize Pool sender");
     const bool weeklyRewardOk = sharedRouterOk &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Weekly Reward sender");
+    const bool jrntOk = sharedRouterOk &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "JRNT sender");
+    const bool xyfpOk = sharedRouterOk &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "XYFP sender");
     const bool lgfOk = IsPatchApplied(results, kPatchCount, "LGF refresh interval") &&
         IsPatchApplied(results, kPatchCount, "LGF suppress action log") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF status log") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF 396F fast slot") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF 396D guard") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF 3970 guard");
     const bool fastDailyBattleOk = IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Fast Daily Battle");
@@ -2009,6 +2408,8 @@ DWORD WINAPI MainThread(LPVOID)
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x6BCF\x65E5\x7C3D\x5230", dailySignOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x734E\x6C60\x653E\x9001", prizePoolOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5468\x5E38\x4EFB\x52D9", weeklyRewardOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x570B\x5BB6\x52D5\x54E1", jrntOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x79D8\x5883\x63A2\x96AA", xyfpOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7DF4\x529F\x623F", lgfOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5FEB\x901F\x6BCF\x65E5\x6230\x9B25", fastDailyBattleOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x81EA\x52D5\x7A81\x9032", autoLureDashOk);
