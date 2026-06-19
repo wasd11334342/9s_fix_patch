@@ -164,6 +164,46 @@ const wchar_t kLogSweepFormat[] = {
 };
 }
 
+namespace PersonalTask
+{
+volatile LONG g_level = 0;
+volatile LONG g_pendingPromo = 0;
+uint16_t g_rewardIds[4]{};
+BYTE g_rewardValid[4]{};
+BYTE g_claimPending[4]{};
+volatile LONG g_didWork = 0;
+BYTE g_payloadZero = 0;
+uint32_t g_payload4E62 = 0;
+
+const wchar_t kLogPromoMid[] = {
+    0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x4E2D,
+    0x7D1A, 0x6649, 0x5347, 0x734E, 0x52F5, 0x0000
+};
+const wchar_t kLogPromoHigh[] = {
+    0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x9AD8,
+    0x7D1A, 0x6649, 0x5347, 0x734E, 0x52F5, 0x0000
+};
+const wchar_t kLogPromoFinal[] = {
+    0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x7D42,
+    0x6975, 0x6649, 0x5347, 0x734E, 0x52F5, 0x0000
+};
+const wchar_t kLogSmallMid[3][20] = {
+    { 0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x7B2C, 0x0020, 0x0031, 0x0020, 0x500B, 0x0020, 0x4E2D, 0x7D1A, 0x0020, 0x734E, 0x52F5, 0x0000 },
+    { 0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x7B2C, 0x0020, 0x0032, 0x0020, 0x500B, 0x0020, 0x4E2D, 0x7D1A, 0x0020, 0x734E, 0x52F5, 0x0000 },
+    { 0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x7B2C, 0x0020, 0x0033, 0x0020, 0x500B, 0x0020, 0x4E2D, 0x7D1A, 0x0020, 0x734E, 0x52F5, 0x0000 },
+};
+const wchar_t kLogSmallHigh[3][20] = {
+    { 0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x7B2C, 0x0020, 0x0031, 0x0020, 0x500B, 0x0020, 0x9AD8, 0x7D1A, 0x0020, 0x734E, 0x52F5, 0x0000 },
+    { 0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x7B2C, 0x0020, 0x0032, 0x0020, 0x500B, 0x0020, 0x9AD8, 0x7D1A, 0x0020, 0x734E, 0x52F5, 0x0000 },
+    { 0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x7B2C, 0x0020, 0x0033, 0x0020, 0x500B, 0x0020, 0x9AD8, 0x7D1A, 0x0020, 0x734E, 0x52F5, 0x0000 },
+};
+const wchar_t kLogSmallFinal[3][20] = {
+    { 0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x7B2C, 0x0020, 0x0031, 0x0020, 0x500B, 0x0020, 0x7D42, 0x6975, 0x0020, 0x734E, 0x52F5, 0x0000 },
+    { 0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x7B2C, 0x0020, 0x0032, 0x0020, 0x500B, 0x0020, 0x7D42, 0x6975, 0x0020, 0x734E, 0x52F5, 0x0000 },
+    { 0x500B, 0x4EBA, 0x4EFB, 0x52D9, 0x0020, 0x9818, 0x53D6, 0x7B2C, 0x0020, 0x0033, 0x0020, 0x500B, 0x0020, 0x7D42, 0x6975, 0x0020, 0x734E, 0x52F5, 0x0000 },
+};
+}
+
 namespace AutoLureDash
 {
 constexpr DWORD kPhaseGapMs = 100;
@@ -334,6 +374,12 @@ bool BuildSendCode(uintptr_t base, CodeBuffer& code);
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
 }
 
+namespace PersonalTask
+{
+bool BuildSendCode(uintptr_t base, CodeBuffer& code);
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+}
+
 namespace SharedRecvRouter
 {
 volatile LONG g_clearStackArg = 0;
@@ -356,6 +402,7 @@ const JumpPatch kJumpPatches[] = {
     { "Weekly Reward sender", 0x35CE0, 5, 128, WeeklyReward::BuildSendCode },
     { "JRNT sender", 0x36A90, 11, 128, Jrnt::BuildSendCode },
     { "XYFP sender", 0x36690, 6, 128, Xyfp::BuildSendCode },
+    { "Personal Task sender", 0x3D000, 13, 128, PersonalTask::BuildSendCode },
     { "LGF status log", 0x37150, 7, 128, LgfGuard::BuildMainCode },
     { "LGF 396F fast slot", 0x48578, 9, 128, LgfGuard::Build396FSlotCode },
     { "LGF 396D guard", 0x4AC30, 6, 128, LgfGuard::Build396DCode },
@@ -2167,6 +2214,238 @@ bool BuildSendCode(uintptr_t, CodeBuffer& code)
 
 }
 
+namespace PersonalTask
+{
+
+void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket = reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(opcode, payload, payloadLength);
+}
+
+void RefreshLog()
+{
+    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
+    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
+    if (refreshLog) {
+        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
+    }
+}
+
+void WriteLog(const wchar_t* text)
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
+    RefreshLog();
+}
+
+const wchar_t* SelectPromoLog()
+{
+    if (g_level == 0x32) {
+        return kLogPromoHigh;
+    }
+    if (g_level == 0x33) {
+        return kLogPromoFinal;
+    }
+
+    return kLogPromoMid;
+}
+
+const wchar_t* SelectSmallLog(size_t index)
+{
+    if (index >= 3) {
+        index = 0;
+    }
+
+    if (g_level == 0x32) {
+        return kLogSmallHigh[index];
+    }
+    if (g_level == 0x33) {
+        return kLogSmallFinal[index];
+    }
+
+    return kLogSmallMid[index];
+}
+
+void ResetPending()
+{
+    InterlockedExchange(&g_pendingPromo, 0);
+    for (size_t i = 0; i < 3; ++i) {
+        g_claimPending[i] = 0;
+    }
+}
+
+void SendQuery()
+{
+    SendPacket(0x4E60, &g_payloadZero, 0);
+}
+
+void SendPromo()
+{
+    SendPacket(0x4E63, &g_payloadZero, 0);
+}
+
+void SendClaim(size_t index)
+{
+    if (index >= 3) {
+        return;
+    }
+
+    g_payload4E62 = static_cast<uint32_t>(g_rewardIds[index]) << 16;
+    SendPacket(0x4E62, &g_payload4E62, sizeof(g_payload4E62));
+}
+
+bool HasPendingClaim()
+{
+    return g_claimPending[0] == 1 || g_claimPending[1] == 1 || g_claimPending[2] == 1;
+}
+
+void Tick()
+{
+    InterlockedExchange(&g_didWork, 0);
+
+    if (g_pendingPromo == 1) {
+        if (g_level == 0x33) {
+            InterlockedExchange(&g_pendingPromo, 0);
+            InterlockedExchange(&g_didWork, 1);
+            return;
+        }
+
+        WriteLog(SelectPromoLog());
+        SendPromo();
+        InterlockedExchange(&g_pendingPromo, 0);
+        InterlockedExchange(&g_didWork, 1);
+        return;
+    }
+
+    for (size_t i = 0; i < 3; ++i) {
+        if (g_claimPending[i] != 1) {
+            continue;
+        }
+
+        WriteLog(SelectSmallLog(i));
+        SendClaim(i);
+        g_claimPending[i] = 0;
+        InterlockedExchange(&g_didWork, 1);
+        return;
+    }
+}
+
+uint32_t CountMatchingTail(const BYTE* payload, uint32_t payloadLength, uint16_t tail)
+{
+    uint32_t count = 0;
+    for (uint32_t offset = 2; offset <= payloadLength - 4; ++offset) {
+        if (payload[offset] != 0 || payload[offset + 1] != 0x14) {
+            continue;
+        }
+
+        uint16_t candidate = 0;
+        std::memcpy(&candidate, payload + offset + 2, sizeof(candidate));
+        if (candidate == tail) {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+void ScanRewardIds(const BYTE* payload, uint32_t payloadLength)
+{
+    size_t rewardIndex = 0;
+    for (uint32_t offset = 2; offset <= payloadLength - 4; ++offset) {
+        if (payload[offset] != 0 || payload[offset + 1] != 0x14) {
+            continue;
+        }
+        if (rewardIndex >= 3) {
+            continue;
+        }
+
+        uint16_t tail = 0;
+        std::memcpy(&tail, payload + offset + 2, sizeof(tail));
+        if (CountMatchingTail(payload, payloadLength, tail) < 3) {
+            continue;
+        }
+
+        g_rewardIds[rewardIndex] = static_cast<uint16_t>(payload[offset - 2] | (payload[offset - 1] << 8));
+        g_rewardValid[rewardIndex] = 1;
+        ++rewardIndex;
+    }
+}
+
+void ScanClaimStatus(const BYTE* payload, uint32_t payloadLength)
+{
+    size_t statusIndex = 0;
+    for (uint32_t offset = 1; offset <= payloadLength - 4; ++offset) {
+        if (payload[offset] != 0 ||
+            payload[offset + 1] != 0x03 ||
+            payload[offset + 2] != 0 ||
+            payload[offset + 3] != 0xC8) {
+            continue;
+        }
+
+        if (statusIndex < 3 &&
+            payload[offset - 1] == 2 &&
+            g_rewardValid[statusIndex] == 1) {
+            g_claimPending[statusIndex] = 1;
+        }
+        ++statusIndex;
+    }
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    if ((opcode & 0xFFFF) != 0x4E61 || !payload || payloadLength < 0x0E) {
+        return;
+    }
+
+    if (g_pendingPromo == 1 || HasPendingClaim()) {
+        return;
+    }
+
+    InterlockedExchange(&g_pendingPromo, 0);
+    for (size_t i = 0; i < 4; ++i) {
+        g_rewardIds[i] = 0;
+        g_rewardValid[i] = 0;
+        g_claimPending[i] = 0;
+    }
+
+    InterlockedExchange(&g_level, payload[3]);
+    if (payload[0x0D] == 3) {
+        InterlockedExchange(&g_pendingPromo, 1);
+        return;
+    }
+
+    ScanRewardIds(payload, payloadLength);
+    ScanClaimStatus(payload, payloadLength);
+}
+
+__declspec(noinline) void __stdcall SendHook()
+{
+    if (ReadGameU32(g_mainBase + 0x23028C) == 0) {
+        ResetPending();
+        return;
+    }
+
+    Tick();
+    if (g_didWork == 1) {
+        return;
+    }
+
+    SendQuery();
+}
+
+bool BuildSendCode(uintptr_t, CodeBuffer& code)
+{
+    return AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&SendHook)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0xC3);
+}
+
+}
+
 namespace FastDailyBattle
 {
 
@@ -2207,6 +2486,7 @@ __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* pa
     WeeklyReward::HandleRecvPacket(opcode, payload, payloadLength);
     Jrnt::HandleRecvPacket(opcode, payload, payloadLength);
     Xyfp::HandleRecvPacket(opcode, payload, payloadLength);
+    PersonalTask::HandleRecvPacket(opcode, payload, payloadLength);
 }
 
 bool BuildCode(uintptr_t base, CodeBuffer& code)
@@ -2388,6 +2668,8 @@ DWORD WINAPI MainThread(LPVOID)
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "JRNT sender");
     const bool xyfpOk = sharedRouterOk &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "XYFP sender");
+    const bool personalTaskOk = sharedRouterOk &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Personal Task sender");
     const bool lgfOk = IsPatchApplied(results, kPatchCount, "LGF refresh interval") &&
         IsPatchApplied(results, kPatchCount, "LGF suppress action log") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF status log") &&
@@ -2410,6 +2692,7 @@ DWORD WINAPI MainThread(LPVOID)
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5468\x5E38\x4EFB\x52D9", weeklyRewardOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x570B\x5BB6\x52D5\x54E1", jrntOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x79D8\x5883\x63A2\x96AA", xyfpOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x500B\x4EBA\x4EFB\x52D9", personalTaskOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7DF4\x529F\x623F", lgfOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5FEB\x901F\x6BCF\x65E5\x6230\x9B25", fastDailyBattleOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x81EA\x52D5\x7A81\x9032", autoLureDashOk);

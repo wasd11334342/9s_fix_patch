@@ -1,0 +1,280 @@
+[ENABLE]
+// Codex Personal Task sender v4.
+// Pure AA / no Lua. JRNT-style sender. Requires shared router with 4E61 branch.
+// Switch: MAIN/bStoreUpdate = Online.exe+23028C.
+
+define(ptask_entry,Online.exe+3D000)
+alloc(ptask_entry_newmem,6144)
+alloc(ptask_sender_data,2048)
+globalalloc(ptask_level,4)
+globalalloc(ptask_pending_promo,4)
+globalalloc(ptask_reward_ids,8)
+globalalloc(ptask_reward_valid,4)
+globalalloc(ptask_claim_pending,4)
+
+label(ptask_on)
+label(ptask_done)
+label(ptask_tick)
+label(ptask_handle_promo)
+label(ptask_handle_claims)
+label(ptask_claim_1)
+label(ptask_claim_2)
+label(ptask_claim_done)
+label(ptask_send_query)
+label(ptask_send_4e63)
+label(ptask_send_4e62)
+label(ptask_log_promo)
+label(ptask_log_promo_mid)
+label(ptask_log_promo_high)
+label(ptask_log_promo_final)
+label(ptask_log_small)
+label(ptask_log_small_mid2)
+label(ptask_log_small_mid3)
+label(ptask_log_small_high)
+label(ptask_log_small_high2)
+label(ptask_log_small_high3)
+label(ptask_log_small_final)
+label(ptask_log_small_final2)
+label(ptask_log_small_final3)
+label(ptask_log_text)
+label(ptask_refresh_log)
+label(ptask_payload_zero)
+label(ptask_payload_4e62)
+label(ptask_did_work)
+label(ptask_fmt_promo_mid)
+label(ptask_fmt_promo_high)
+label(ptask_fmt_promo_final)
+label(ptask_fmt_small1_mid)
+label(ptask_fmt_small2_mid)
+label(ptask_fmt_small3_mid)
+label(ptask_fmt_small1_high)
+label(ptask_fmt_small2_high)
+label(ptask_fmt_small3_high)
+label(ptask_fmt_small1_final)
+label(ptask_fmt_small2_final)
+label(ptask_fmt_small3_final)
+
+ptask_entry_newmem:
+  pushad
+  cmp dword ptr [Online.exe+23028C],00
+  jne ptask_on
+  mov dword ptr [ptask_pending_promo],00
+  mov byte ptr [ptask_claim_pending],00
+  mov byte ptr [ptask_claim_pending+1],00
+  mov byte ptr [ptask_claim_pending+2],00
+  popad
+  ret
+
+ptask_on:
+  call ptask_tick
+  cmp dword ptr [ptask_did_work],01
+  je ptask_done
+  call ptask_send_query
+
+ptask_done:
+  popad
+  ret
+
+ptask_tick:
+  mov dword ptr [ptask_did_work],00
+
+ptask_handle_promo:
+  cmp dword ptr [ptask_pending_promo],01
+  jne ptask_handle_claims
+  call ptask_log_promo
+  call ptask_send_4e63
+  mov dword ptr [ptask_pending_promo],00
+  mov dword ptr [ptask_did_work],01
+  ret
+
+ptask_handle_claims:
+  cmp byte ptr [ptask_claim_pending],01
+  jne ptask_claim_1
+  mov eax,00
+  call ptask_log_small
+  mov eax,00
+  call ptask_send_4e62
+  mov byte ptr [ptask_claim_pending],00
+  mov dword ptr [ptask_did_work],01
+  ret
+
+ptask_claim_1:
+  cmp byte ptr [ptask_claim_pending+1],01
+  jne ptask_claim_2
+  mov eax,01
+  call ptask_log_small
+  mov eax,01
+  call ptask_send_4e62
+  mov byte ptr [ptask_claim_pending+1],00
+  mov dword ptr [ptask_did_work],01
+  ret
+
+ptask_claim_2:
+  cmp byte ptr [ptask_claim_pending+2],01
+  jne ptask_claim_done
+  mov eax,02
+  call ptask_log_small
+  mov eax,02
+  call ptask_send_4e62
+  mov byte ptr [ptask_claim_pending+2],00
+  mov dword ptr [ptask_did_work],01
+
+ptask_claim_done:
+  ret
+
+ptask_send_query:
+  push 00
+  push ptask_payload_zero
+  push 4E60
+  call Online.exe+4A360
+  ret
+
+ptask_send_4e63:
+  push 00
+  push ptask_payload_zero
+  push 4E63
+  call Online.exe+4A360
+  ret
+
+ptask_send_4e62:
+  mov ebx,eax
+  mov word ptr [ptask_payload_4e62],0000
+  mov ax,[ptask_reward_ids+ebx*2]
+  mov [ptask_payload_4e62+2],ax
+  push 04
+  push ptask_payload_4e62
+  push 4E62
+  call Online.exe+4A360
+  ret
+
+ptask_log_promo:
+  mov eax,[ptask_level]
+  cmp eax,31
+  je ptask_log_promo_mid
+  cmp eax,32
+  je ptask_log_promo_high
+  cmp eax,33
+  je ptask_log_promo_final
+ptask_log_promo_mid:
+  mov eax,ptask_fmt_promo_mid
+  jmp ptask_log_text
+ptask_log_promo_high:
+  mov eax,ptask_fmt_promo_high
+  jmp ptask_log_text
+ptask_log_promo_final:
+  mov eax,ptask_fmt_promo_final
+  jmp ptask_log_text
+
+ptask_log_small:
+  mov ebx,eax
+  mov eax,[ptask_level]
+  cmp eax,32
+  je ptask_log_small_high
+  cmp eax,33
+  je ptask_log_small_final
+  cmp ebx,01
+  je ptask_log_small_mid2
+  cmp ebx,02
+  je ptask_log_small_mid3
+  mov eax,ptask_fmt_small1_mid
+  jmp ptask_log_text
+ptask_log_small_mid2:
+  mov eax,ptask_fmt_small2_mid
+  jmp ptask_log_text
+ptask_log_small_mid3:
+  mov eax,ptask_fmt_small3_mid
+  jmp ptask_log_text
+ptask_log_small_high:
+  cmp ebx,01
+  je ptask_log_small_high2
+  cmp ebx,02
+  je ptask_log_small_high3
+  mov eax,ptask_fmt_small1_high
+  jmp ptask_log_text
+ptask_log_small_high2:
+  mov eax,ptask_fmt_small2_high
+  jmp ptask_log_text
+ptask_log_small_high3:
+  mov eax,ptask_fmt_small3_high
+  jmp ptask_log_text
+ptask_log_small_final:
+  cmp ebx,01
+  je ptask_log_small_final2
+  cmp ebx,02
+  je ptask_log_small_final3
+  mov eax,ptask_fmt_small1_final
+  jmp ptask_log_text
+ptask_log_small_final2:
+  mov eax,ptask_fmt_small2_final
+  jmp ptask_log_text
+ptask_log_small_final3:
+  mov eax,ptask_fmt_small3_final
+  jmp ptask_log_text
+
+ptask_log_text:
+  push eax
+  push Online.exe+1FE56C
+  push Online.exe+230504
+  call Online.exe+2EF0
+  add esp,0C
+  call ptask_refresh_log
+  ret
+
+ptask_refresh_log:
+  push 00
+  push 00
+  push [Online.exe+2304D8]
+  push [Online.exe+2300A4]
+  call dword ptr [Online.exe+1C46B0]
+  ret
+
+ptask_sender_data:
+ptask_did_work:
+  dd 0
+ptask_payload_zero:
+  db 00
+ptask_payload_4e62:
+  db 00 00 00 00
+ptask_fmt_promo_mid:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,4E2D,7D1A,6649,5347,734E,52F5,0000
+ptask_fmt_promo_high:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,9AD8,7D1A,6649,5347,734E,52F5,0000
+ptask_fmt_promo_final:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,7D42,6975,6649,5347,734E,52F5,0000
+ptask_fmt_small1_mid:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,7B2C,0020,0031,0020,500B,0020,4E2D,7D1A,0020,734E,52F5,0000
+ptask_fmt_small2_mid:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,7B2C,0020,0032,0020,500B,0020,4E2D,7D1A,0020,734E,52F5,0000
+ptask_fmt_small3_mid:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,7B2C,0020,0033,0020,500B,0020,4E2D,7D1A,0020,734E,52F5,0000
+ptask_fmt_small1_high:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,7B2C,0020,0031,0020,500B,0020,9AD8,7D1A,0020,734E,52F5,0000
+ptask_fmt_small2_high:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,7B2C,0020,0032,0020,500B,0020,9AD8,7D1A,0020,734E,52F5,0000
+ptask_fmt_small3_high:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,7B2C,0020,0033,0020,500B,0020,9AD8,7D1A,0020,734E,52F5,0000
+ptask_fmt_small1_final:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,7B2C,0020,0031,0020,500B,0020,7D42,6975,0020,734E,52F5,0000
+ptask_fmt_small2_final:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,7B2C,0020,0032,0020,500B,0020,7D42,6975,0020,734E,52F5,0000
+ptask_fmt_small3_final:
+  dw 500B,4EBA,4EFB,52D9,0020,9818,53D6,7B2C,0020,0033,0020,500B,0020,7D42,6975,0020,734E,52F5,0000
+
+ptask_entry:
+  jmp ptask_entry_newmem
+  nop
+  nop
+  nop
+  nop
+  nop
+  nop
+  nop
+  nop
+
+[DISABLE]
+ptask_entry:
+  cmp dword ptr [Online.exe+23028C],00
+  je Online.exe+3D09F
+
+dealloc(ptask_sender_data)
+dealloc(ptask_entry_newmem)
