@@ -1,0 +1,545 @@
+[ENABLE]
+// 2026-06-18
+// Add a real new checkbox without moving existing controls.
+// Clean version: no diagnostic-only variables or text scanning.
+//
+// The script finds the 0403 and 0402 checkbox pair that share the same parent,
+// subclasses that parent, then sends a private message so CreateWindowExW runs
+// on Online.exe's UI thread.
+
+alloc(custom_checkbox_mem,4096)
+
+label(custom_checkbox_setup_thread)
+label(custom_checkbox_setup_retry)
+label(custom_checkbox_disable_thread)
+label(custom_checkbox_enum_cb)
+label(custom_checkbox_wndproc)
+label(custom_checkbox_wndproc_create)
+label(custom_checkbox_wndproc_destroy)
+label(custom_checkbox_wndproc_command)
+label(custom_checkbox_wndproc_timer)
+label(custom_checkbox_wndproc_callold)
+label(custom_checkbox_wndproc_ret1)
+label(custom_checkbox_not_weekly)
+label(custom_checkbox_enum_done)
+label(custom_checkbox_fail)
+label(custom_checkbox_sync)
+label(custom_checkbox_sync_done)
+
+label(custom_checkbox_settings_hwnd)
+label(custom_checkbox_parent_hwnd)
+label(custom_checkbox_oldproc)
+label(custom_checkbox_hwnd)
+label(custom_checkbox_weekly_hwnd)
+label(custom_checkbox_daily_hwnd)
+label(custom_checkbox_candidate_weekly_hwnd)
+label(custom_checkbox_candidate_weekly_parent)
+label(custom_checkbox_candidate_daily_hwnd)
+label(custom_checkbox_candidate_daily_parent)
+label(custom_checkbox_best_top)
+label(custom_checkbox_pair_rect)
+label(custom_checkbox_switch)
+label(custom_checkbox_last_value)
+label(custom_checkbox_hit_count)
+label(custom_checkbox_status)
+label(custom_checkbox_weekly_rect)
+label(custom_checkbox_daily_rect)
+label(custom_checkbox_point_weekly)
+label(custom_checkbox_point_daily)
+label(custom_checkbox_x)
+label(custom_checkbox_y)
+label(custom_checkbox_w)
+label(custom_checkbox_h)
+label(custom_checkbox_text)
+label(custom_checkbox_title)
+label(custom_checkbox_class)
+label(custom_checkbox_retry_count)
+
+registersymbol(custom_checkbox_hwnd)
+registersymbol(custom_checkbox_switch)
+registersymbol(custom_checkbox_sync)
+registersymbol(custom_checkbox_hit_count)
+registersymbol(custom_checkbox_status)
+registersymbol(custom_checkbox_settings_hwnd)
+registersymbol(custom_checkbox_parent_hwnd)
+registersymbol(custom_checkbox_weekly_hwnd)
+registersymbol(custom_checkbox_daily_hwnd)
+registersymbol(custom_checkbox_x)
+registersymbol(custom_checkbox_y)
+registersymbol(custom_checkbox_w)
+registersymbol(custom_checkbox_h)
+
+custom_checkbox_mem:
+custom_checkbox_setup_thread:
+  inc dword ptr [custom_checkbox_hit_count]
+  mov dword ptr [custom_checkbox_status],00000001
+  mov dword ptr [custom_checkbox_switch],00000001
+  mov dword ptr [Online.exe+2311F0],00000001
+  mov dword ptr [Online.exe+2311F4],00000001
+  mov dword ptr [custom_checkbox_last_value],00000001
+  mov dword ptr [custom_checkbox_retry_count],0000001E
+
+custom_checkbox_setup_retry:
+  mov dword ptr [custom_checkbox_settings_hwnd],00000000
+  mov dword ptr [custom_checkbox_parent_hwnd],00000000
+  mov dword ptr [custom_checkbox_weekly_hwnd],00000000
+  mov dword ptr [custom_checkbox_daily_hwnd],00000000
+  mov dword ptr [custom_checkbox_candidate_weekly_hwnd],00000000
+  mov dword ptr [custom_checkbox_candidate_weekly_parent],00000000
+  mov dword ptr [custom_checkbox_candidate_daily_hwnd],00000000
+  mov dword ptr [custom_checkbox_candidate_daily_parent],00000000
+  mov dword ptr [custom_checkbox_best_top],7FFFFFFF
+
+  push custom_checkbox_title
+  push 00000000
+  call user32.FindWindowW
+  test eax,eax
+  je custom_checkbox_wait_retry
+  mov [custom_checkbox_settings_hwnd],eax
+  mov dword ptr [custom_checkbox_status],00000002
+
+  push 00000000
+  push custom_checkbox_enum_cb
+  push eax
+  call user32.EnumChildWindows
+
+  cmp dword ptr [custom_checkbox_weekly_hwnd],00000000
+  je custom_checkbox_wait_retry
+  cmp dword ptr [custom_checkbox_daily_hwnd],00000000
+  je custom_checkbox_wait_retry
+  mov dword ptr [custom_checkbox_status],00000003
+
+  push dword ptr [custom_checkbox_weekly_hwnd]
+  call user32.GetParent
+  test eax,eax
+  je custom_checkbox_fail
+  mov [custom_checkbox_parent_hwnd],eax
+
+  push custom_checkbox_weekly_rect
+  push dword ptr [custom_checkbox_weekly_hwnd]
+  call user32.GetWindowRect
+
+  push custom_checkbox_daily_rect
+  push dword ptr [custom_checkbox_daily_hwnd]
+  call user32.GetWindowRect
+
+  mov eax,[custom_checkbox_weekly_rect]
+  mov [custom_checkbox_point_weekly],eax
+  mov eax,[custom_checkbox_weekly_rect+04]
+  mov [custom_checkbox_point_weekly+04],eax
+
+  mov eax,[custom_checkbox_daily_rect]
+  mov [custom_checkbox_point_daily],eax
+  mov eax,[custom_checkbox_daily_rect+04]
+  mov [custom_checkbox_point_daily+04],eax
+
+  push custom_checkbox_point_weekly
+  push dword ptr [custom_checkbox_parent_hwnd]
+  call user32.ScreenToClient
+
+  push custom_checkbox_point_daily
+  push dword ptr [custom_checkbox_parent_hwnd]
+  call user32.ScreenToClient
+
+  mov eax,[custom_checkbox_weekly_rect+08]
+  sub eax,[custom_checkbox_weekly_rect]
+  mov [custom_checkbox_w],eax
+
+  mov eax,[custom_checkbox_weekly_rect+0C]
+  sub eax,[custom_checkbox_weekly_rect+04]
+  mov [custom_checkbox_h],eax
+
+  mov edx,[custom_checkbox_point_weekly]
+  sub edx,[custom_checkbox_w]
+  sub edx,00000006
+  mov [custom_checkbox_x],edx
+
+  mov eax,[custom_checkbox_point_weekly+04]
+  mov [custom_checkbox_y],eax
+  mov dword ptr [custom_checkbox_status],00000004
+
+  push custom_checkbox_wndproc
+  push FFFFFFFC
+  push dword ptr [custom_checkbox_parent_hwnd]
+  call user32.SetWindowLongW
+  test eax,eax
+  je custom_checkbox_fail
+  mov [custom_checkbox_oldproc],eax
+  mov dword ptr [custom_checkbox_status],00000005
+
+  push 00000000
+  push 00000001
+  push 00008439
+  push dword ptr [custom_checkbox_parent_hwnd]
+  call user32.SendMessageW
+
+  mov dword ptr [custom_checkbox_status],00000006
+  ret
+
+custom_checkbox_disable_thread:
+  mov dword ptr [Online.exe+2311F0],00000000
+  cmp dword ptr [custom_checkbox_parent_hwnd],00000000
+  je short @f
+  push dword ptr [custom_checkbox_parent_hwnd]
+  call user32.IsWindow
+  test eax,eax
+  je short @f
+  cmp dword ptr [custom_checkbox_oldproc],00000000
+  je short @f
+
+  push 00000000
+  push 00000002
+  push 00008439
+  push dword ptr [custom_checkbox_parent_hwnd]
+  call user32.SendMessageW
+
+  push dword ptr [custom_checkbox_oldproc]
+  push FFFFFFFC
+  push dword ptr [custom_checkbox_parent_hwnd]
+  call user32.SetWindowLongW
+@@:
+  ret
+
+custom_checkbox_wait_retry:
+  dec dword ptr [custom_checkbox_retry_count]
+  jle custom_checkbox_fail
+  push 00000064
+  call kernel32.Sleep
+  jmp custom_checkbox_setup_retry
+
+custom_checkbox_fail:
+  mov dword ptr [custom_checkbox_status],FFFFFFFF
+  ret
+
+custom_checkbox_wndproc:
+  push ebp
+  mov ebp,esp
+  cmp dword ptr [ebp+0C],00000111
+  je custom_checkbox_wndproc_command
+  cmp dword ptr [ebp+0C],00000113
+  je custom_checkbox_wndproc_timer
+  cmp dword ptr [ebp+0C],00008439
+  jne custom_checkbox_wndproc_callold
+  cmp dword ptr [ebp+10],00000001
+  je custom_checkbox_wndproc_create
+  cmp dword ptr [ebp+10],00000002
+  je custom_checkbox_wndproc_destroy
+  jmp custom_checkbox_wndproc_ret1
+
+custom_checkbox_wndproc_create:
+  cmp dword ptr [custom_checkbox_hwnd],00000000
+  jne short @f
+  push 00000000
+  push 00400000
+  push 00000439
+  push dword ptr [custom_checkbox_parent_hwnd]
+  push dword ptr [custom_checkbox_h]
+  push dword ptr [custom_checkbox_w]
+  push dword ptr [custom_checkbox_y]
+  push dword ptr [custom_checkbox_x]
+  push 50018003
+  push custom_checkbox_text
+  push custom_checkbox_class
+  push 00000000
+  call user32.CreateWindowExW
+  mov [custom_checkbox_hwnd],eax
+@@:
+  cmp dword ptr [custom_checkbox_hwnd],00000000
+  je custom_checkbox_wndproc_ret1
+  push 00000000
+  push 00000000
+  push 00000031
+  push dword ptr [custom_checkbox_weekly_hwnd]
+  call user32.SendMessageW
+  test eax,eax
+  je short @f
+  push 00000001
+  push eax
+  push 00000030
+  push dword ptr [custom_checkbox_hwnd]
+  call user32.SendMessageW
+@@:
+  push 00000001
+  push dword ptr [custom_checkbox_hwnd]
+  call user32.ShowWindow
+  push 00000000
+  push 000003E8
+  push 0000843A
+  push dword ptr [custom_checkbox_parent_hwnd]
+  call user32.SetTimer
+  push 00000000
+  push dword ptr [custom_checkbox_switch]
+  push 000000F1
+  push dword ptr [custom_checkbox_hwnd]
+  call user32.SendMessageW
+  mov eax,[custom_checkbox_switch]
+  test eax,eax
+  setne al
+  movzx eax,al
+  mov [custom_checkbox_switch],eax
+  mov [Online.exe+2311F0],eax
+  cmp eax,00000000
+  je short @f
+  cmp dword ptr [custom_checkbox_last_value],00000000
+  jne short @f
+  inc dword ptr [Online.exe+2311F4]
+@@:
+  mov [custom_checkbox_last_value],eax
+  mov dword ptr [custom_checkbox_status],00000007
+  jmp custom_checkbox_wndproc_ret1
+
+custom_checkbox_wndproc_destroy:
+  push 0000843A
+  push dword ptr [custom_checkbox_parent_hwnd]
+  call user32.KillTimer
+  cmp dword ptr [custom_checkbox_hwnd],00000000
+  je short @f
+  push dword ptr [custom_checkbox_hwnd]
+  call user32.DestroyWindow
+  mov dword ptr [custom_checkbox_hwnd],00000000
+@@:
+  mov dword ptr [Online.exe+2311F0],00000000
+  mov dword ptr [custom_checkbox_status],00000008
+  jmp custom_checkbox_wndproc_ret1
+
+custom_checkbox_wndproc_command:
+  mov eax,[ebp+10]
+  and eax,0000FFFF
+  cmp eax,00000439
+  jne custom_checkbox_wndproc_callold
+  cmp dword ptr [custom_checkbox_hwnd],00000000
+  je custom_checkbox_wndproc_ret1
+  push 00000000
+  push 00000000
+  push 000000F0
+  push dword ptr [custom_checkbox_hwnd]
+  call user32.SendMessageW
+  mov [custom_checkbox_switch],eax
+  test eax,eax
+  setne al
+  movzx eax,al
+  mov [custom_checkbox_switch],eax
+  mov [Online.exe+2311F0],eax
+  cmp eax,00000000
+  je short @f
+  cmp dword ptr [custom_checkbox_last_value],00000000
+  jne short @f
+  inc dword ptr [Online.exe+2311F4]
+@@:
+  mov [custom_checkbox_last_value],eax
+  jmp custom_checkbox_wndproc_callold
+
+custom_checkbox_wndproc_timer:
+  cmp dword ptr [ebp+10],0000843A
+  jne custom_checkbox_wndproc_callold
+  call custom_checkbox_sync
+  jmp custom_checkbox_wndproc_ret1
+
+custom_checkbox_wndproc_callold:
+  push dword ptr [ebp+14]
+  push dword ptr [ebp+10]
+  push dword ptr [ebp+0C]
+  push dword ptr [ebp+08]
+  push dword ptr [custom_checkbox_oldproc]
+  call user32.CallWindowProcW
+  mov esp,ebp
+  pop ebp
+  ret 0010
+
+custom_checkbox_wndproc_ret1:
+  mov eax,00000001
+  mov esp,ebp
+  pop ebp
+  ret 0010
+
+custom_checkbox_enum_cb:
+  push ebp
+  mov ebp,esp
+  pushad
+  push dword ptr [ebp+08]
+  call user32.GetDlgCtrlID
+  and eax,0000FFFF
+
+  cmp eax,00000403
+  jne custom_checkbox_not_weekly
+  push dword ptr [ebp+08]
+  call user32.GetParent
+  test eax,eax
+  je custom_checkbox_enum_done
+  mov edx,[custom_checkbox_candidate_daily_parent]
+  cmp edx,eax
+  jne short @f
+  mov ecx,[custom_checkbox_candidate_daily_hwnd]
+  test ecx,ecx
+  je short @f
+  mov edx,[ebp+08]
+  push custom_checkbox_pair_rect
+  push edx
+  call user32.GetWindowRect
+  mov eax,[custom_checkbox_pair_rect+04]
+  cmp eax,[custom_checkbox_best_top]
+  jge custom_checkbox_enum_done
+  mov [custom_checkbox_best_top],eax
+  mov edx,[ebp+08]
+  mov [custom_checkbox_weekly_hwnd],edx
+  mov [custom_checkbox_daily_hwnd],ecx
+  jmp custom_checkbox_enum_done
+@@:
+  mov edx,[ebp+08]
+  mov [custom_checkbox_candidate_weekly_hwnd],edx
+  mov [custom_checkbox_candidate_weekly_parent],eax
+  jmp custom_checkbox_enum_done
+
+custom_checkbox_not_weekly:
+  cmp eax,00000402
+  jne custom_checkbox_enum_done
+  push dword ptr [ebp+08]
+  call user32.GetParent
+  test eax,eax
+  je custom_checkbox_enum_done
+  mov edx,[custom_checkbox_candidate_weekly_parent]
+  cmp edx,eax
+  jne short @f
+  mov ecx,[custom_checkbox_candidate_weekly_hwnd]
+  test ecx,ecx
+  je short @f
+  mov edx,[ebp+08]
+  push custom_checkbox_pair_rect
+  push ecx
+  call user32.GetWindowRect
+  mov eax,[custom_checkbox_pair_rect+04]
+  cmp eax,[custom_checkbox_best_top]
+  jge custom_checkbox_enum_done
+  mov [custom_checkbox_best_top],eax
+  mov edx,[ebp+08]
+  mov [custom_checkbox_daily_hwnd],edx
+  mov [custom_checkbox_weekly_hwnd],ecx
+  jmp custom_checkbox_enum_done
+@@:
+  mov edx,[ebp+08]
+  mov [custom_checkbox_candidate_daily_hwnd],edx
+  mov [custom_checkbox_candidate_daily_parent],eax
+
+custom_checkbox_enum_done:
+  popad
+  mov eax,00000001
+  mov esp,ebp
+  pop ebp
+  ret 0008
+
+custom_checkbox_sync:
+  pushfd
+  pushad
+  cmp dword ptr [custom_checkbox_hwnd],00000000
+  je custom_checkbox_sync_done
+  push 00000000
+  push 00000000
+  push 000000F0
+  push dword ptr [custom_checkbox_hwnd]
+  call user32.SendMessageW
+  mov [custom_checkbox_switch],eax
+  test eax,eax
+  setne al
+  movzx eax,al
+  mov [custom_checkbox_switch],eax
+  mov [Online.exe+2311F0],eax
+  cmp eax,00000000
+  je short @f
+  cmp dword ptr [custom_checkbox_last_value],00000000
+  jne short @f
+  inc dword ptr [Online.exe+2311F4]
+@@:
+  mov [custom_checkbox_last_value],eax
+custom_checkbox_sync_done:
+  popad
+  popfd
+  ret
+
+custom_checkbox_settings_hwnd:
+  dd 00000000
+custom_checkbox_parent_hwnd:
+  dd 00000000
+custom_checkbox_oldproc:
+  dd 00000000
+custom_checkbox_hwnd:
+  dd 00000000
+custom_checkbox_weekly_hwnd:
+  dd 00000000
+custom_checkbox_daily_hwnd:
+  dd 00000000
+custom_checkbox_candidate_weekly_hwnd:
+  dd 00000000
+custom_checkbox_candidate_weekly_parent:
+  dd 00000000
+custom_checkbox_candidate_daily_hwnd:
+  dd 00000000
+custom_checkbox_candidate_daily_parent:
+  dd 00000000
+custom_checkbox_best_top:
+  dd 7FFFFFFF
+custom_checkbox_pair_rect:
+  dd 00000000
+  dd 00000000
+  dd 00000000
+  dd 00000000
+custom_checkbox_switch:
+  dd 00000000
+custom_checkbox_last_value:
+  dd 00000000
+custom_checkbox_hit_count:
+  dd 00000000
+custom_checkbox_status:
+  dd 00000000
+custom_checkbox_weekly_rect:
+  dd 00000000
+  dd 00000000
+  dd 00000000
+  dd 00000000
+custom_checkbox_daily_rect:
+  dd 00000000
+  dd 00000000
+  dd 00000000
+  dd 00000000
+custom_checkbox_point_weekly:
+  dd 00000000
+  dd 00000000
+custom_checkbox_point_daily:
+  dd 00000000
+  dd 00000000
+custom_checkbox_x:
+  dd 00000000
+custom_checkbox_y:
+  dd 00000000
+custom_checkbox_w:
+  dd 00000000
+custom_checkbox_h:
+  dd 00000000
+custom_checkbox_text:
+  dw 4EFB,52D9,6D3E,9063,0000
+custom_checkbox_title:
+  dw 8A2D,7F6E,0000
+custom_checkbox_class:
+  dw 0042,0075,0074,0074,006F,006E,0000
+custom_checkbox_retry_count:
+  dd 00000000
+
+createthreadandwait(custom_checkbox_setup_thread)
+
+[DISABLE]
+createthreadandwait(custom_checkbox_disable_thread)
+
+unregistersymbol(custom_checkbox_h)
+unregistersymbol(custom_checkbox_w)
+unregistersymbol(custom_checkbox_y)
+unregistersymbol(custom_checkbox_x)
+unregistersymbol(custom_checkbox_daily_hwnd)
+unregistersymbol(custom_checkbox_weekly_hwnd)
+unregistersymbol(custom_checkbox_parent_hwnd)
+unregistersymbol(custom_checkbox_settings_hwnd)
+unregistersymbol(custom_checkbox_status)
+unregistersymbol(custom_checkbox_hit_count)
+unregistersymbol(custom_checkbox_sync)
+unregistersymbol(custom_checkbox_switch)
+unregistersymbol(custom_checkbox_hwnd)
+
+dealloc(custom_checkbox_mem)

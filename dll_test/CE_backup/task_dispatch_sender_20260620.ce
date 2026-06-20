@@ -1,0 +1,253 @@
+[ENABLE]
+// 2026-06-19
+// TaskDispatch sender. Enable only with the TaskDispatch shared router.
+// Switch: Online.exe+2311F0, owned by the custom checkbox script.
+// Game LOG only on actual claim/dispatch sends.
+
+define(td_sender_entry,Online.exe+351F0)
+define(td_switch,Online.exe+2311F0)
+
+globalalloc(td_claim_pending,4)
+globalalloc(td_claim_task_id,8)
+globalalloc(td_best_pending,4)
+globalalloc(td_best_task_id,8)
+globalalloc(td_config_ready,4)
+globalalloc(td_config_task_id,8)
+globalalloc(td_4b45_payload_len,4)
+globalalloc(td_4b45_payload,1024)
+globalalloc(td_skip_count,4)
+globalalloc(td_skip_ids,128)
+globalalloc(td_sender_tick_count,4)
+globalalloc(td_sender_send_count,4)
+globalalloc(td_sender_last_opcode,4)
+globalalloc(td_sender_last_task_id,8)
+
+alloc(td_sender_newmem,4096,td_sender_entry)
+alloc(td_sender_data,256)
+
+label(td_sender_return)
+label(td_sender_done)
+label(td_sender_tick)
+label(td_sender_switch_off)
+label(td_sender_send_claim)
+label(td_sender_send_config)
+label(td_sender_send_auto_assign)
+label(td_sender_waiting_config)
+label(td_sender_send_query)
+label(td_sender_drop_config)
+label(td_sender_add_wait_to_skip)
+label(td_sender_add_skip_done)
+label(td_sender_log_claim)
+label(td_sender_log_dispatch)
+label(td_sender_log_text)
+label(td_sender_refresh_log)
+label(td_sender_payload_4b47)
+label(td_sender_payload_4b4a)
+label(td_sender_payload_zero)
+label(td_sender_wait_config)
+label(td_sender_wait_tick)
+label(td_sender_wait_task_id)
+label(td_sender_fmt_claim)
+label(td_sender_fmt_dispatch)
+
+td_sender_newmem:
+  db 60
+  inc dword ptr [td_sender_tick_count]
+
+  cmp dword ptr [td_switch],00
+  je td_sender_switch_off
+
+  call td_sender_tick
+  jmp td_sender_done
+
+td_sender_switch_off:
+  mov dword ptr [td_sender_wait_config],00
+  mov dword ptr [td_skip_count],00
+  jmp td_sender_done
+
+td_sender_tick:
+  cmp dword ptr [td_claim_pending],01
+  je td_sender_send_claim
+
+  cmp dword ptr [td_config_ready],01
+  je td_sender_send_config
+
+  cmp dword ptr [td_sender_wait_config],01
+  je td_sender_waiting_config
+
+  cmp dword ptr [td_best_pending],01
+  je td_sender_send_auto_assign
+
+  jmp td_sender_send_query
+
+td_sender_send_claim:
+  mov eax,[td_claim_task_id]
+  mov [td_sender_payload_4b47],eax
+  mov eax,[td_claim_task_id+04]
+  mov [td_sender_payload_4b47+04],eax
+  push 08
+  push td_sender_payload_4b47
+  push 00004B47
+  call Online.exe+4A360
+  call td_sender_log_claim
+  inc dword ptr [td_sender_send_count]
+  mov dword ptr [td_sender_last_opcode],00004B47
+  mov eax,[td_sender_payload_4b47]
+  mov [td_sender_last_task_id],eax
+  mov eax,[td_sender_payload_4b47+04]
+  mov [td_sender_last_task_id+04],eax
+  mov dword ptr [td_claim_pending],00
+  mov dword ptr [td_skip_count],00
+  ret
+
+td_sender_send_config:
+  cmp dword ptr [td_sender_wait_config],01
+  jne td_sender_drop_config
+  mov eax,[td_config_task_id]
+  cmp eax,[td_sender_wait_task_id]
+  jne td_sender_drop_config
+  mov eax,[td_config_task_id+04]
+  cmp eax,[td_sender_wait_task_id+04]
+  jne td_sender_drop_config
+  mov eax,[td_4b45_payload_len]
+  cmp eax,00
+  je td_sender_drop_config
+  push eax
+  push td_4b45_payload
+  push 00004B45
+  call Online.exe+4A360
+  call td_sender_log_dispatch
+  inc dword ptr [td_sender_send_count]
+  mov dword ptr [td_sender_last_opcode],00004B45
+  mov eax,[td_4b45_payload]
+  mov [td_sender_last_task_id],eax
+  mov eax,[td_4b45_payload+04]
+  mov [td_sender_last_task_id+04],eax
+  mov dword ptr [td_config_ready],00
+  mov dword ptr [td_best_pending],00
+  mov dword ptr [td_sender_wait_config],00
+  mov dword ptr [td_skip_count],00
+  ret
+
+td_sender_drop_config:
+  mov dword ptr [td_config_ready],00
+  mov dword ptr [td_4b45_payload_len],00
+  mov dword ptr [td_sender_wait_config],00
+  mov dword ptr [td_best_pending],00
+  ret
+
+td_sender_waiting_config:
+  call dword ptr [Online.exe+1C43DC]
+  sub eax,[td_sender_wait_tick]
+  cmp eax,00002710
+  jb td_sender_done_ret
+  call td_sender_add_wait_to_skip
+  mov dword ptr [td_sender_wait_config],00
+  mov dword ptr [td_best_pending],00
+  jmp td_sender_send_query
+
+td_sender_send_auto_assign:
+  mov eax,[td_best_task_id]
+  mov [td_sender_payload_4b4a],eax
+  mov [td_sender_wait_task_id],eax
+  mov eax,[td_best_task_id+04]
+  mov [td_sender_payload_4b4a+04],eax
+  mov [td_sender_wait_task_id+04],eax
+  push 08
+  push td_sender_payload_4b4a
+  push 00004B4A
+  call Online.exe+4A360
+  inc dword ptr [td_sender_send_count]
+  mov dword ptr [td_sender_last_opcode],00004B4A
+  mov eax,[td_sender_payload_4b4a]
+  mov [td_sender_last_task_id],eax
+  mov eax,[td_sender_payload_4b4a+04]
+  mov [td_sender_last_task_id+04],eax
+  call dword ptr [Online.exe+1C43DC]
+  mov [td_sender_wait_tick],eax
+  mov dword ptr [td_sender_wait_config],01
+  ret
+
+td_sender_add_wait_to_skip:
+  mov ebx,[td_skip_count]
+  cmp ebx,10
+  jae td_sender_add_skip_done
+  mov eax,[td_sender_wait_task_id]
+  mov [td_skip_ids+ebx*8],eax
+  mov eax,[td_sender_wait_task_id+04]
+  mov [td_skip_ids+ebx*8+04],eax
+  inc ebx
+  mov [td_skip_count],ebx
+td_sender_add_skip_done:
+  ret
+
+td_sender_send_query:
+  push 00
+  push td_sender_payload_zero
+  push 00004B48
+  call Online.exe+4A360
+  inc dword ptr [td_sender_send_count]
+  mov dword ptr [td_sender_last_opcode],00004B48
+td_sender_done_ret:
+  ret
+
+td_sender_log_claim:
+  mov eax,td_sender_fmt_claim
+  jmp td_sender_log_text
+
+td_sender_log_dispatch:
+  mov eax,td_sender_fmt_dispatch
+  jmp td_sender_log_text
+
+td_sender_log_text:
+  push eax
+  push Online.exe+1FE56C
+  push Online.exe+230504
+  call Online.exe+2EF0
+  add esp,0C
+  call td_sender_refresh_log
+  ret
+
+td_sender_refresh_log:
+  push 00
+  push 00
+  push [Online.exe+2304D8]
+  push [Online.exe+2300A4]
+  call dword ptr [Online.exe+1C46B0]
+  ret
+
+td_sender_done:
+  db 61
+  db 56
+  call Online.exe+38B90
+  jmp td_sender_return
+
+td_sender_data:
+td_sender_wait_config:
+  dd 00000000
+td_sender_wait_tick:
+  dd 00000000
+td_sender_wait_task_id:
+  db 00 00 00 00 00 00 00 00
+td_sender_payload_zero:
+  dd 00000000
+td_sender_payload_4b47:
+  db 00 00 00 00 00 00 00 00
+td_sender_payload_4b4a:
+  db 00 00 00 00 00 00 00 00
+td_sender_fmt_claim:
+  dw 4EFB,52D9,6D3E,9063,0020,9818,734E,0000
+td_sender_fmt_dispatch:
+  dw 4EFB,52D9,6D3E,9063,0020,57F7,884C,0000
+
+td_sender_entry:
+  jmp td_sender_newmem
+  nop
+td_sender_return:
+
+[DISABLE]
+td_sender_entry:
+  db 56 E8 9A 39 00 00
+
+dealloc(td_sender_data)
+dealloc(td_sender_newmem)
