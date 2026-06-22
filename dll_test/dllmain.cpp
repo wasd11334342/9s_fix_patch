@@ -299,6 +299,7 @@ namespace LegionDungeon
 constexpr DWORD kActionSwitchOffset = 0x2302C0;
 constexpr DWORD kIdleIntervalMs = 0x0BB8;
 constexpr DWORD kWaitTimeoutMs = 0x2710;
+constexpr DWORD kMaxClosedWaitSeconds = 7 * 24 * 60 * 60;
 constexpr size_t kDungeonCount = 9;
 constexpr size_t kMaxTeams = 10;
 
@@ -316,6 +317,9 @@ volatile LONG g_maxSoloIndex = -1;
 volatile LONG g_pendingId = 0;
 volatile LONG g_teamId = 0;
 volatile LONG g_logIndex = 0;
+volatile LONG g_timeBlocked = 0;
+volatile LONG g_activityState = 0;
+volatile LONG g_leftTime = 0;
 volatile LONG g_nextTick = 0;
 volatile LONG g_waitTick = 0;
 volatile LONG g_teamCount = 0;
@@ -339,10 +343,37 @@ bool BuildTickCode(uintptr_t base, CodeBuffer& code);
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
 }
 
+namespace AlBattle
+{
+constexpr size_t kMaxHeroes = 32;
+
+struct HeroEntry
+{
+    uint32_t uuid0 = 0;
+    uint32_t uuid4 = 0;
+    uint32_t ready = 0;
+    uint32_t tick = 0;
+};
+
+volatile LONG g_heroCount = 0;
+HeroEntry g_heroTable[kMaxHeroes]{};
+volatile LONG g_leftCount = 0;
+volatile LONG g_rightCount = 0;
+volatile LONG g_location = 0;
+volatile LONG g_rushRatio = 0;
+volatile LONG g_lastCity = 0;
+volatile LONG g_cityAttackers = 0;
+volatile LONG g_cityDefenders = 0;
+volatile LONG g_parseError = 0;
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+bool HasRushAdvantage();
+}
+
 namespace AutoLureDash
 {
 constexpr DWORD kPhaseGapMs = 100;
 constexpr DWORD kFallbackCheckMs = 500;
+constexpr DWORD kIdleScanMs = 1000;
 constexpr size_t kMaxGroups = 8;
 constexpr size_t kMaxPayloadsPerGroup = 5;
 constexpr size_t kGroupStride = 0x80;
@@ -350,9 +381,18 @@ constexpr size_t kEntryArrayOffset = 0x40;
 
 volatile LONG g_phase = 0;
 volatile LONG g_nextTick = 0;
+volatile LONG g_scanNextTick = 0;
+volatile LONG g_originalNextTick = 0;
 volatile LONG g_groupCount = 0;
 volatile LONG g_groupIndex = 0;
 volatile LONG g_action = 1;
+volatile LONG g_hasWaiting = 0;
+volatile LONG g_hasMoveReady = 0;
+volatile LONG g_waitingNoRush = 0;
+volatile LONG g_stateFixTick = 0;
+volatile LONG g_stateFixWrite = 0;
+volatile LONG g_stateFixLastIndex = 0;
+volatile LONG g_stateFixLastEntry = 0;
 uint32_t g_targetTmp = 0;
 BYTE g_groups[kMaxGroups * kGroupStride]{};
 BYTE g_dashBuffer[256]{};
@@ -465,12 +505,15 @@ const BYTE kLgfSuppressActionLogBytes[] = {
     0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
     0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90
 };
+const BYTE kMainLoopSpeed1000MsBytes[] = { 0xE8, 0x03, 0x00, 0x00 };
 
 const MemoryPatch kPatches[] = {
     { "Dragon vein fix", 0x4AA10, kDragonVeinPatchBytes, sizeof(kDragonVeinPatchBytes) },
     { "Break egg fix", 0x36B60, kBreakEggPatchBytes, sizeof(kBreakEggPatchBytes) },
     { "LGF refresh interval", 0x3719C, kLgfRefreshIntervalBytes, sizeof(kLgfRefreshIntervalBytes) },
     { "LGF suppress action log", 0x37385, kLgfSuppressActionLogBytes, sizeof(kLgfSuppressActionLogBytes) },
+    { "Main loop speed 3AC2F", 0x3AC2F, kMainLoopSpeed1000MsBytes, sizeof(kMainLoopSpeed1000MsBytes) },
+    { "Main loop speed 403E5", 0x403E5, kMainLoopSpeed1000MsBytes, sizeof(kMainLoopSpeed1000MsBytes) },
 };
 constexpr size_t kPatchCount = sizeof(kPatches) / sizeof(kPatches[0]);
 
@@ -852,6 +895,19 @@ uint32_t ReadU32Unaligned(const BYTE* address)
     return value;
 }
 
+uint16_t ReadBe16Unaligned(const BYTE* address)
+{
+    return static_cast<uint16_t>((static_cast<uint16_t>(address[0]) << 8) | address[1]);
+}
+
+uint32_t ReadBe32Unaligned(const BYTE* address)
+{
+    return (static_cast<uint32_t>(address[0]) << 24) |
+        (static_cast<uint32_t>(address[1]) << 16) |
+        (static_cast<uint32_t>(address[2]) << 8) |
+        address[3];
+}
+
 uint32_t ReadGameU32(uintptr_t address)
 {
     return *reinterpret_cast<volatile uint32_t*>(address);
@@ -869,6 +925,264 @@ DWORD GetGameTick()
     return tick ? tick() : 0;
 }
 
+namespace AlBattle
+{
+
+struct Reader
+{
+    const BYTE* cursor = nullptr;
+    const BYTE* end = nullptr;
+
+    bool CanRead(size_t bytes) const
+    {
+        return cursor && end && cursor <= end && bytes <= static_cast<size_t>(end - cursor);
+    }
+
+    bool ReadU16(uint32_t& value)
+    {
+        if (!CanRead(2)) {
+            InterlockedExchange(&g_parseError, 1);
+            value = 0;
+            cursor = end;
+            return false;
+        }
+
+        value = ReadBe16Unaligned(cursor);
+        cursor += 2;
+        return true;
+    }
+
+    bool ReadU32(uint32_t& value)
+    {
+        if (!CanRead(4)) {
+            InterlockedExchange(&g_parseError, 1);
+            value = 0;
+            cursor = end;
+            return false;
+        }
+
+        value = ReadBe32Unaligned(cursor);
+        cursor += 4;
+        return true;
+    }
+
+    bool Skip(size_t bytes)
+    {
+        if (!CanRead(bytes)) {
+            InterlockedExchange(&g_parseError, 1);
+            cursor = end;
+            return false;
+        }
+
+        cursor += bytes;
+        return true;
+    }
+
+    bool SkipString()
+    {
+        uint32_t length = 0;
+        return ReadU16(length) && Skip(length);
+    }
+};
+
+void StoreHero(uint32_t uuid0, uint32_t uuid4)
+{
+    LONG index = g_heroCount;
+    if (index < 0 || index >= static_cast<LONG>(kMaxHeroes)) {
+        return;
+    }
+
+    HeroEntry& hero = g_heroTable[index];
+    hero.uuid0 = uuid0;
+    hero.uuid4 = uuid4;
+    hero.ready = 1;
+    hero.tick = GetTickCount();
+    InterlockedExchange(&g_heroCount, index + 1);
+}
+
+bool ParseOneHero(Reader& reader, uint32_t index)
+{
+    if (!reader.CanRead(8)) {
+        InterlockedExchange(&g_parseError, 1);
+        return false;
+    }
+
+    const uint32_t uuid0 = ReadU32Unaligned(reader.cursor);
+    const uint32_t uuid4 = ReadU32Unaligned(reader.cursor + 4);
+    reader.cursor += 8;
+
+    if (!reader.SkipString() || !reader.SkipString() || !reader.Skip(0x1A) || !reader.CanRead(4)) {
+        return false;
+    }
+
+    const BYTE state = *reader.cursor++;
+    uint32_t roleType = 0;
+    if (!reader.ReadU16(roleType) || !reader.Skip(1)) {
+        return false;
+    }
+
+    if (index < 5 && state == 1 && roleType != 4) {
+        StoreHero(uuid0, uuid4);
+    }
+
+    if (!reader.SkipString() || !reader.Skip(4)) {
+        return false;
+    }
+
+    uint32_t unusedTacticCount = 0;
+    if (!reader.ReadU16(unusedTacticCount)) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < index; ++i) {
+        if (!reader.Skip(4) || !reader.SkipString()) {
+            return false;
+        }
+    }
+
+    return reader.SkipString();
+}
+
+bool ParseHeroList(Reader& reader)
+{
+    uint32_t count = 0;
+    if (!reader.ReadU16(count)) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!ParseOneHero(reader, i)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool ParseCityTroops(Reader& reader, volatile LONG& output)
+{
+    uint32_t count = 0;
+    if (!reader.ReadU16(count)) {
+        return false;
+    }
+
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t unused = 0;
+        uint32_t troops = 0;
+        if (!reader.ReadU16(unused) || !reader.ReadU32(troops) || !reader.SkipString()) {
+            return false;
+        }
+        total += troops;
+    }
+
+    InterlockedExchange(&output, static_cast<LONG>(total));
+    return true;
+}
+
+void Handle1460(const BYTE* payload, uint32_t payloadLength)
+{
+    InterlockedExchange(&g_parseError, 0);
+    InterlockedExchange(&g_heroCount, 0);
+    std::memset(g_heroTable, 0, sizeof(g_heroTable));
+    if (!payload || payloadLength < 0x10) {
+        return;
+    }
+
+    Reader reader{ payload + 0x10, payload + payloadLength };
+    ParseHeroList(reader);
+    if (g_parseError == 0) {
+        ParseHeroList(reader);
+    }
+}
+
+void Handle146F(const BYTE* payload, uint32_t payloadLength)
+{
+    if (!payload || payloadLength < 7) {
+        return;
+    }
+
+    InterlockedExchange(&g_location, payload[0]);
+    InterlockedExchange(&g_rushRatio, 2);
+}
+
+void Handle147C(const BYTE* payload, uint32_t payloadLength)
+{
+    if (!payload || payloadLength < 3) {
+        return;
+    }
+
+    const LONG count = static_cast<LONG>(ReadBe16Unaligned(payload + 1));
+    if (payload[0] == 0) {
+        InterlockedExchange(&g_leftCount, count);
+    } else {
+        InterlockedExchange(&g_rightCount, count);
+    }
+}
+
+void Handle1B3E(const BYTE* payload, uint32_t payloadLength)
+{
+    if (!payload) {
+        return;
+    }
+
+    InterlockedExchange(&g_parseError, 0);
+    InterlockedExchange(&g_cityAttackers, 0);
+    InterlockedExchange(&g_cityDefenders, 0);
+    Reader reader{ payload, payload + payloadLength };
+    uint32_t city = 0;
+    uint32_t unused = 0;
+    if (!reader.ReadU16(city) || !reader.ReadU32(unused)) {
+        return;
+    }
+
+    InterlockedExchange(&g_lastCity, static_cast<LONG>(city));
+    ParseCityTroops(reader, g_cityAttackers);
+    if (g_parseError == 0) {
+        ParseCityTroops(reader, g_cityDefenders);
+    }
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    switch (opcode & 0xFFFF) {
+    case 0x1460:
+        Handle1460(payload, payloadLength);
+        break;
+    case 0x146F:
+        Handle146F(payload, payloadLength);
+        break;
+    case 0x147C:
+        Handle147C(payload, payloadLength);
+        break;
+    case 0x1B3E:
+        Handle1B3E(payload, payloadLength);
+        break;
+    default:
+        break;
+    }
+}
+
+bool HasRushAdvantage()
+{
+    const LONG left = g_leftCount;
+    const LONG right = g_rightCount;
+    const LONG location = g_location;
+    if (left == 0) {
+        return right > 0;
+    }
+    if (right <= 0) {
+        return true;
+    }
+    if (location == 0) {
+        return left >= right * 2;
+    }
+
+    return right >= left * 2;
+}
+
+}
+
 namespace AutoLureDash
 {
 
@@ -882,6 +1196,7 @@ void ResetDashState()
     InterlockedExchange(&g_phase, 0);
     InterlockedExchange(&g_groupCount, 0);
     InterlockedExchange(&g_groupIndex, 0);
+    InterlockedExchange(&g_scanNextTick, 0);
 }
 
 uint32_t ReadGroupU32(BYTE* group, size_t offset)
@@ -1038,10 +1353,46 @@ void AddPayload(BYTE* group, uintptr_t entry)
     WriteGroupU32(group, 0x08, count);
 }
 
+void StateFix()
+{
+    InterlockedIncrement(&g_stateFixTick);
+    if (ReadGameU32(g_mainBase + 0x2303E8) == 0) {
+        return;
+    }
+
+    uintptr_t list = ReadGameU32(g_mainBase + 0x230644);
+    if (list == 0) {
+        return;
+    }
+
+    int32_t count = static_cast<int32_t>(ReadGameU32(g_mainBase + 0x230648));
+    if (count <= 0) {
+        return;
+    }
+    if (count > 5) {
+        count = 5;
+    }
+
+    for (int32_t i = 0; i < count; ++i) {
+        uintptr_t entry = ReadGameU32(list + static_cast<uintptr_t>(i) * sizeof(uint32_t));
+        if (entry == 0 || ReadGameU32(entry + 0x1C) != 1 || ReadGameU32(entry + 0x44) != 0) {
+            continue;
+        }
+
+        InterlockedIncrement(&g_stateFixWrite);
+        InterlockedExchange(&g_stateFixLastIndex, i);
+        InterlockedExchange(&g_stateFixLastEntry, static_cast<LONG>(entry));
+        *reinterpret_cast<volatile uint32_t*>(entry + 0x1C) = 4;
+    }
+}
+
 void BuildGroups()
 {
     InterlockedExchange(&g_groupCount, 0);
     InterlockedExchange(&g_groupIndex, 0);
+    InterlockedExchange(&g_waitingNoRush, 0);
+    InterlockedExchange(&g_hasWaiting, 0);
+    InterlockedExchange(&g_hasMoveReady, 0);
     std::memset(g_groups, 0, sizeof(g_groups));
 
     uintptr_t list = ReadGameU32(g_mainBase + 0x230644);
@@ -1059,9 +1410,26 @@ void BuildGroups()
 
     for (int32_t i = 0; i < count; ++i) {
         uintptr_t entry = ReadGameU32(list + static_cast<uintptr_t>(i) * sizeof(uint32_t));
-        if (entry == 0 ||
-            ReadGameU32(entry + 0x1C) != 2 ||
-            ReadGameU32(entry + 0x20) != 3) {
+        if (entry == 0) {
+            continue;
+        }
+
+        const uint32_t state = ReadGameU32(entry + 0x1C);
+        const uint32_t subState = ReadGameU32(entry + 0x20);
+        const uint32_t flag44 = ReadGameU32(entry + 0x44);
+        if (state == 4 ||
+            state == 1 ||
+            (state == 8 && subState == 5 && flag44 == 0)) {
+            InterlockedExchange(&g_hasMoveReady, 1);
+        }
+
+        if (state != 2 || subState != 3) {
+            continue;
+        }
+
+        InterlockedExchange(&g_hasWaiting, 1);
+        if (!AlBattle::HasRushAdvantage()) {
+            InterlockedExchange(&g_waitingNoRush, 1);
             continue;
         }
 
@@ -1095,6 +1463,21 @@ void SetNextPhase(LONG phase)
 void FinishAll()
 {
     ResetDashState();
+    InterlockedExchange(&g_scanNextTick, static_cast<LONG>(GetTickCount() + kIdleScanMs));
+    *reinterpret_cast<volatile uint32_t*>(g_mainBase + 0x230FE0) = 0;
+    InterlockedExchange(&g_originalNextTick, 0);
+    InterlockedExchange(&g_action, 1);
+}
+
+void AllowOriginalThrottled()
+{
+    const DWORD now = GetTickCount();
+    if (now < static_cast<DWORD>(g_originalNextTick)) {
+        InterlockedExchange(&g_action, 0);
+        return;
+    }
+
+    InterlockedExchange(&g_originalNextTick, static_cast<LONG>(now + kIdleScanMs));
     InterlockedExchange(&g_action, 1);
 }
 
@@ -1209,10 +1592,12 @@ void SendCurrentPhase()
 
 __declspec(noinline) void __stdcall DashTick()
 {
+    StateFix();
     InterlockedExchange(&g_action, 0);
     if (ReadGameU32(g_mainBase + 0x230284) == 0) {
         InterlockedExchange(&g_showFlag, 0);
         ResetDashState();
+        InterlockedExchange(&g_originalNextTick, 0);
         InterlockedExchange(&g_action, 1);
         return;
     }
@@ -1223,14 +1608,34 @@ __declspec(noinline) void __stdcall DashTick()
 
     if (ReadGameU32(g_mainBase + 0x23040C) == 0 || g_lureSwitch == 0) {
         ResetDashState();
+        InterlockedExchange(&g_originalNextTick, 0);
         InterlockedExchange(&g_action, 1);
         return;
     }
 
     if (g_phase == 0) {
+        const DWORD now = GetTickCount();
+        if (now < static_cast<DWORD>(g_scanNextTick)) {
+            AllowOriginalThrottled();
+            return;
+        }
+
         BuildGroups();
         if (g_groupCount == 0) {
-            InterlockedExchange(&g_action, 1);
+            if (g_waitingNoRush == 1 || g_hasWaiting == 1) {
+                ResetDashState();
+                InterlockedExchange(&g_action, 1);
+                return;
+            }
+            if (g_hasMoveReady == 1) {
+                AllowOriginalThrottled();
+                return;
+            }
+            if (ReadGameU32(g_mainBase + 0x2303E8) != 0) {
+                AllowOriginalThrottled();
+                return;
+            }
+            InterlockedExchange(&g_action, 0);
             return;
         }
     }
@@ -1268,14 +1673,11 @@ bool BuildGuardCode(uintptr_t base, CodeBuffer& code)
 bool BuildTimerCode(uintptr_t base, CodeBuffer& code)
 {
     const uint32_t phase = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_phase));
-    const uint32_t action = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_action));
     return AppendRel32Instruction(code, 0xE8, base + 0x351F0) &&
         AppendByte(code, 0x6A) && AppendByte(code, 0x00) &&
         AppendCmpDwordAbsImm8(code, phase, 0) &&
-        AppendJneShort(code, 0x13) &&
-        AppendCmpDwordAbsImm8(code, action, 0) &&
-        AppendJeShort(code, 0x0A) &&
-        AppendPushImm32(code, 0x4E20) &&
+        AppendJneShort(code, 0x0A) &&
+        AppendPushImm32(code, kIdleScanMs) &&
         AppendRel32Instruction(code, 0xE9, base + 0x403AF) &&
         AppendPushImm32(code, kPhaseGapMs) &&
         AppendRel32Instruction(code, 0xE9, base + 0x403AF);
@@ -3429,6 +3831,11 @@ const wchar_t kLogUnlimit[] = {
     0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x7121, 0x9650, 0x6311,
     0x6230, 0x0000
 };
+const wchar_t kLogTimeClosedFormat[] = {
+    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x5C1A, 0x672A, 0x958B,
+    0x653E, 0x0020, 0x0025, 0x0075, 0x5929, 0x0025, 0x0075, 0x5C0F,
+    0x6642, 0x0025, 0x0075, 0x5206, 0x9418, 0x0000
+};
 
 uint16_t ReadLe16(const BYTE* data)
 {
@@ -3446,6 +3853,14 @@ uint32_t ReadLe32(const BYTE* data)
 uint16_t ReadBe16(const BYTE* data)
 {
     return static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) | data[1]);
+}
+
+uint32_t ReadBe32(const BYTE* data)
+{
+    return (static_cast<uint32_t>(data[0]) << 24) |
+        (static_cast<uint32_t>(data[1]) << 16) |
+        (static_cast<uint32_t>(data[2]) << 8) |
+        static_cast<uint32_t>(data[3]);
 }
 
 bool IsEnabled()
@@ -3494,6 +3909,19 @@ void WriteRawLog(const wchar_t* text)
     using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
     PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
     printLog(g_mainBase + 0x230504, reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
+    RefreshLog();
+}
+
+void WriteTimeClosedLog(uint32_t leftSeconds)
+{
+    const uint32_t roundedMinutes = (leftSeconds + 59) / 60;
+    const uint32_t days = roundedMinutes / 1440;
+    const uint32_t hours = (roundedMinutes % 1440) / 60;
+    const uint32_t minutes = roundedMinutes % 60;
+
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, uint32_t, uint32_t, uint32_t);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, kLogTimeClosedFormat, days, hours, minutes);
     RefreshLog();
 }
 
@@ -3618,6 +4046,9 @@ void ResetState()
     InterlockedExchange(&g_maxSoloIndex, -1);
     InterlockedExchange(&g_unlimitPassedOnce, 0);
     InterlockedExchange(&g_battleMode, 0);
+    InterlockedExchange(&g_timeBlocked, 0);
+    InterlockedExchange(&g_activityState, 0);
+    InterlockedExchange(&g_leftTime, 0);
 }
 
 void Finish()
@@ -3725,9 +4156,69 @@ bool SkipUtf(const BYTE*& cursor, const BYTE* end)
     return true;
 }
 
+bool TryApply42A1TimeBlock(const BYTE* payload, uint32_t payloadLength)
+{
+    InterlockedExchange(&g_timeBlocked, 0);
+    if (!payload || payloadLength < 0x0A) {
+        return false;
+    }
+
+    const BYTE* cursor = payload;
+    const BYTE* end = payload + payloadLength;
+    if (cursor + 2 > end) {
+        return false;
+    }
+
+    const uint16_t count = ReadBe16(cursor);
+    cursor += 2;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (i >= 0x20 || cursor + 4 > end) {
+            return false;
+        }
+
+        cursor += 4;
+        if (!SkipUtf(cursor, end) || cursor + 0x10 > end) {
+            return false;
+        }
+
+        cursor += 0x10;
+        if (!SkipUtf(cursor, end)) {
+            return false;
+        }
+    }
+
+    if (cursor + 8 > end) {
+        return false;
+    }
+
+    const uint32_t activityState = ReadBe32(cursor);
+    cursor += 4;
+    uint32_t leftSeconds = ReadBe32(cursor);
+    InterlockedExchange(&g_activityState, static_cast<LONG>(activityState));
+    InterlockedExchange(&g_leftTime, static_cast<LONG>(leftSeconds));
+    if (leftSeconds == 0) {
+        return false;
+    }
+
+    if (leftSeconds > kMaxClosedWaitSeconds) {
+        leftSeconds = kMaxClosedWaitSeconds;
+    }
+
+    const DWORD waitMs = (leftSeconds + 1) * 1000;
+    InterlockedExchange(&g_nextTick, static_cast<LONG>(GetGameTick() + waitMs));
+    InterlockedExchange(&g_state, 0);
+    InterlockedExchange(&g_timeBlocked, 1);
+    WriteTimeClosedLog(leftSeconds);
+    return true;
+}
+
 void Handle42A1(const BYTE* payload, uint32_t payloadLength)
 {
     if (g_state != 1 || payloadLength < 0x0D) {
+        return;
+    }
+
+    if (TryApply42A1TimeBlock(payload, payloadLength)) {
         return;
     }
 
@@ -4261,6 +4752,7 @@ __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* pa
     Xyfp::HandleRecvPacket(opcode, payload, payloadLength);
     PersonalTask::HandleRecvPacket(opcode, payload, payloadLength);
     TaskDispatch::HandleRecvPacket(opcode, payload, payloadLength);
+    AlBattle::HandleRecvPacket(opcode, payload, payloadLength);
     LegionDungeon::HandleRecvPacket(opcode, payload, payloadLength);
 }
 
@@ -4463,6 +4955,8 @@ DWORD WINAPI MainThread(LPVOID)
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash config") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash total on") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash resume");
+    const bool mainLoopSpeedOk = IsPatchApplied(results, kPatchCount, "Main loop speed 3AC2F") &&
+        IsPatchApplied(results, kPatchCount, "Main loop speed 403E5");
 
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5171\x7528\x6536\x5305Router", sharedRouterOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x9F8D\x8108", dragonVeinOk);
@@ -4478,6 +4972,7 @@ DWORD WINAPI MainThread(LPVOID)
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7DF4\x529F\x623F", lgfOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5FEB\x901F\x6BCF\x65E5\x6230\x9B25", fastDailyBattleOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x81EA\x52D5\x7A81\x9032", autoLureDashOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x4E3B\x5FAA\x74B0\x52A0\x901F", mainLoopSpeedOk);
 
     g_msgBoxHook = SetWindowsHookExA(WH_CBT, MessageBoxHook, nullptr, GetCurrentThreadId());
     MessageBoxW(nullptr, message, L"MyPatch", MB_OK);
