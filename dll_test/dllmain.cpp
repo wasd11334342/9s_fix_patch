@@ -294,6 +294,51 @@ const wchar_t kCheckboxText[] = L"\x4EFB\x52D9\x6D3E\x9063";
 void Start();
 }
 
+namespace LegionDungeon
+{
+constexpr DWORD kActionSwitchOffset = 0x2302C0;
+constexpr DWORD kIdleIntervalMs = 0x0BB8;
+constexpr DWORD kWaitTimeoutMs = 0x2710;
+constexpr size_t kDungeonCount = 9;
+constexpr size_t kMaxTeams = 10;
+
+volatile LONG g_state = 0;
+volatile LONG g_currentId = 0;
+volatile LONG g_verifyId = 0;
+volatile LONG g_verifyIndex = -1;
+volatile LONG g_verifyMode = 0;
+volatile LONG g_verifyFailedMask = 0;
+volatile LONG g_waitBattleResult = 0;
+volatile LONG g_armyBattleConfirmed = 0;
+volatile LONG g_expectedWinValue = 0;
+volatile LONG g_soloVerifyBlocked = 0;
+volatile LONG g_maxSoloIndex = -1;
+volatile LONG g_pendingId = 0;
+volatile LONG g_teamId = 0;
+volatile LONG g_logIndex = 0;
+volatile LONG g_nextTick = 0;
+volatile LONG g_waitTick = 0;
+volatile LONG g_teamCount = 0;
+volatile LONG g_peopleCount = 0;
+volatile LONG g_payloadTeamCount = 0;
+volatile LONG g_teamOrderSent = 0;
+volatile LONG g_unlimitPassedOnce = 0;
+volatile LONG g_battleMode = 0;
+volatile LONG g_unlimitCount = 0;
+uint32_t g_unlimitId = 0;
+uint16_t g_teamIds[kMaxTeams]{};
+uint16_t g_teamDungeonIds[kMaxTeams]{};
+BYTE g_teamPeople[kMaxTeams]{};
+uint32_t g_bufZero4 = 0;
+BYTE g_bufId4[4]{};
+BYTE g_bufId6[6]{};
+BYTE g_bufTeam4[4]{};
+BYTE g_bufOrder[128]{};
+
+bool BuildTickCode(uintptr_t base, CodeBuffer& code);
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+}
+
 namespace AutoLureDash
 {
 constexpr DWORD kPhaseGapMs = 100;
@@ -470,6 +515,12 @@ bool BuildSendCode(uintptr_t base, CodeBuffer& code);
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
 }
 
+namespace LegionDungeon
+{
+bool BuildTickCode(uintptr_t base, CodeBuffer& code);
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+}
+
 namespace SharedRecvRouter
 {
 volatile LONG g_clearStackArg = 0;
@@ -493,6 +544,7 @@ const JumpPatch kJumpPatches[] = {
     { "JRNT sender", 0x36A90, 11, 128, Jrnt::BuildSendCode },
     { "XYFP sender", 0x36690, 6, 128, Xyfp::BuildSendCode },
     { "Personal Task sender", 0x3D000, 13, 128, PersonalTask::BuildSendCode },
+    { "Legion Dungeon", 0x3B2E0, 5, 128, LegionDungeon::BuildTickCode },
     { "LGF status log", 0x37150, 7, 128, LgfGuard::BuildMainCode },
     { "LGF 396F fast slot", 0x48578, 9, 128, LgfGuard::Build396FSlotCode },
     { "LGF 396D guard", 0x4AC30, 6, 128, LgfGuard::Build396DCode },
@@ -3323,6 +3375,850 @@ void Start()
 
 }
 
+namespace LegionDungeon
+{
+
+const uint16_t kDungeonIds[kDungeonCount] = {
+    0xE903, 0xD107, 0xB90B, 0xA10F, 0x8913, 0x7117, 0x591B, 0x411F, 0x2923
+};
+
+const wchar_t kDungeonName0[] = { 0x5F35, 0x89D2, 0x0000 };
+const wchar_t kDungeonName1[] = { 0x8463, 0x5353, 0x0000 };
+const wchar_t kDungeonName2[] = { 0x8881, 0x7D39, 0x0000 };
+const wchar_t kDungeonName3[] = { 0x5B6B, 0x5805, 0x0000 };
+const wchar_t kDungeonName4[] = { 0x5442, 0x5E03, 0x0000 };
+const wchar_t kDungeonName5[] = { 0x5289, 0x5099, 0x0000 };
+const wchar_t kDungeonName6[] = { 0x66F9, 0x64CD, 0x0000 };
+const wchar_t kDungeonName7[] = { 0x5B6B, 0x6B0A, 0x0000 };
+const wchar_t kDungeonName8[] = { 0x53F8, 0x99AC, 0x708E, 0x0000 };
+
+const wchar_t* const kDungeonNames[kDungeonCount] = {
+    kDungeonName0, kDungeonName1, kDungeonName2, kDungeonName3, kDungeonName4,
+    kDungeonName5, kDungeonName6, kDungeonName7, kDungeonName8
+};
+
+const wchar_t kLogSingleFormat[] = {
+    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x55AE, 0x4EBA, 0x6311,
+    0x6230, 0x0020, 0x0025, 0x0073, 0x0000
+};
+const wchar_t kLogRewardFormat[] = {
+    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x9818, 0x53D6, 0x734E,
+    0x52F5, 0x0020, 0x0025, 0x0073, 0x0000
+};
+const wchar_t kLogCreateFormat[] = {
+    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x5EFA, 0x7ACB, 0x7D44,
+    0x968A, 0x0020, 0x0025, 0x0073, 0x0000
+};
+const wchar_t kLogGroupFormat[] = {
+    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x7D44, 0x968A, 0x6311,
+    0x6230, 0x0020, 0x0025, 0x0073, 0x0000
+};
+const wchar_t kLogMaxFormat[] = {
+    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x6700, 0x9AD8, 0x55AE,
+    0x901A, 0x0020, 0x0025, 0x0073, 0x0000
+};
+const wchar_t kLogJoin[] = {
+    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x9032, 0x5165, 0x7D44,
+    0x968A, 0x0000
+};
+const wchar_t kLogFailFormat[] = {
+    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x55AE, 0x4EBA, 0x6311,
+    0x6230, 0x0020, 0x0025, 0x0073, 0x0020, 0x5931, 0x6557, 0x0000
+};
+const wchar_t kLogUnlimit[] = {
+    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x7121, 0x9650, 0x6311,
+    0x6230, 0x0000
+};
+
+uint16_t ReadLe16(const BYTE* data)
+{
+    return static_cast<uint16_t>(data[0] | (static_cast<uint16_t>(data[1]) << 8));
+}
+
+uint32_t ReadLe32(const BYTE* data)
+{
+    return static_cast<uint32_t>(data[0]) |
+        (static_cast<uint32_t>(data[1]) << 8) |
+        (static_cast<uint32_t>(data[2]) << 16) |
+        (static_cast<uint32_t>(data[3]) << 24);
+}
+
+uint16_t ReadBe16(const BYTE* data)
+{
+    return static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) | data[1]);
+}
+
+bool IsEnabled()
+{
+    return ReadGameU32(g_mainBase + kActionSwitchOffset) != 0;
+}
+
+void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket = reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(opcode, payload, payloadLength);
+}
+
+void RefreshLog()
+{
+    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
+    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
+    if (refreshLog) {
+        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
+    }
+}
+
+void WriteDungeonLog(const wchar_t* format, LONG index)
+{
+    if (index < 0 || index >= static_cast<LONG>(kDungeonCount)) {
+        return;
+    }
+
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, format, kDungeonNames[index]);
+    RefreshLog();
+}
+
+void WriteJoinLog()
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), kLogJoin);
+    RefreshLog();
+}
+
+void WriteRawLog(const wchar_t* text)
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
+    RefreshLog();
+}
+
+void PutIdPayload(BYTE* buffer, uint16_t id)
+{
+    buffer[0] = 0;
+    buffer[1] = 0;
+    std::memcpy(buffer + 2, &id, sizeof(id));
+}
+
+void Send4293()
+{
+    SendPacket(0x4293, &g_bufZero4, sizeof(g_bufZero4));
+}
+
+void Send4294()
+{
+    SendPacket(0x4294, nullptr, 0);
+}
+
+void Send42A6()
+{
+    SendPacket(0x42A6, nullptr, 0);
+}
+
+void Send42A8()
+{
+    std::memcpy(g_bufId4, &g_unlimitId, sizeof(g_unlimitId));
+    SendPacket(0x42A8, g_bufId4, sizeof(g_bufId4));
+}
+
+void Send37A4()
+{
+    SendPacket(0x37A4, nullptr, 0);
+}
+
+void Send4297()
+{
+    PutIdPayload(g_bufId4, static_cast<uint16_t>(g_pendingId));
+    SendPacket(0x4297, g_bufId4, sizeof(g_bufId4));
+}
+
+void Send429E()
+{
+    PutIdPayload(g_bufId4, static_cast<uint16_t>(g_pendingId));
+    SendPacket(0x429E, g_bufId4, sizeof(g_bufId4));
+}
+
+void Send429EGroup()
+{
+    PutIdPayload(g_bufId6, static_cast<uint16_t>(g_pendingId));
+    g_bufId6[4] = 0;
+    g_bufId6[5] = 0x1A;
+    SendPacket(0x429E, g_bufId6, sizeof(g_bufId6));
+}
+
+void Send429F()
+{
+    PutIdPayload(g_bufId4, static_cast<uint16_t>(g_pendingId));
+    SendPacket(0x429F, g_bufId4, sizeof(g_bufId4));
+}
+
+void Send4296()
+{
+    PutIdPayload(g_bufTeam4, static_cast<uint16_t>(g_teamId));
+    SendPacket(0x4296, g_bufTeam4, sizeof(g_bufTeam4));
+}
+
+void Send429A(const BYTE* member0, uint32_t len0, const BYTE* member1, uint32_t len1, const BYTE* member2, uint32_t len2)
+{
+    std::memset(g_bufOrder, 0, sizeof(g_bufOrder));
+    g_bufOrder[0] = 0;
+    g_bufOrder[1] = 3;
+    BYTE* write = g_bufOrder + 2;
+    BYTE* end = g_bufOrder + sizeof(g_bufOrder);
+
+    const BYTE* members[] = { member2, member0, member1 };
+    const uint32_t lengths[] = { len2, len0, len1 };
+    for (size_t i = 0; i < 3; ++i) {
+        if (!members[i] || lengths[i] == 0 || write + lengths[i] > end) {
+            return;
+        }
+        std::memcpy(write, members[i], lengths[i]);
+        write += lengths[i];
+    }
+
+    SendPacket(0x429A, g_bufOrder, static_cast<uint32_t>(write - g_bufOrder));
+}
+
+int GetIndexById(uint16_t id)
+{
+    for (size_t i = 0; i < kDungeonCount; ++i) {
+        if (kDungeonIds[i] == id) {
+            return static_cast<int>(i);
+        }
+    }
+
+    return -1;
+}
+
+uint16_t GetIdByIndex(LONG index)
+{
+    if (index < 0 || index >= static_cast<LONG>(kDungeonCount)) {
+        return 0;
+    }
+
+    return kDungeonIds[index];
+}
+
+void ResetState()
+{
+    InterlockedExchange(&g_state, 0);
+    InterlockedExchange(&g_currentId, 0);
+    InterlockedExchange(&g_verifyId, 0);
+    InterlockedExchange(&g_verifyIndex, -1);
+    InterlockedExchange(&g_verifyMode, 0);
+    InterlockedExchange(&g_verifyFailedMask, 0);
+    InterlockedExchange(&g_waitBattleResult, 0);
+    InterlockedExchange(&g_armyBattleConfirmed, 0);
+    InterlockedExchange(&g_expectedWinValue, 0);
+    InterlockedExchange(&g_soloVerifyBlocked, 0);
+    InterlockedExchange(&g_maxSoloIndex, -1);
+    InterlockedExchange(&g_unlimitPassedOnce, 0);
+    InterlockedExchange(&g_battleMode, 0);
+}
+
+void Finish()
+{
+    InterlockedExchange(&g_state, 0);
+    InterlockedExchange(&g_nextTick, static_cast<LONG>(GetGameTick() + kIdleIntervalMs));
+}
+
+void UpdateMaxSolo()
+{
+    InterlockedExchange(&g_verifyId, 0);
+    InterlockedExchange(&g_currentId, 0);
+    InterlockedExchange(&g_verifyMode, 0);
+    InterlockedExchange(&g_waitBattleResult, 0);
+    InterlockedExchange(&g_armyBattleConfirmed, 0);
+    const LONG index = g_verifyIndex;
+    if (index == -1) {
+        return;
+    }
+    if (index <= g_maxSoloIndex) {
+        InterlockedExchange(&g_verifyIndex, -1);
+        return;
+    }
+
+    InterlockedExchange(&g_maxSoloIndex, index);
+    WriteDungeonLog(kLogMaxFormat, index);
+    InterlockedExchange(&g_verifyIndex, -1);
+}
+
+void StartSolo()
+{
+    InterlockedExchange(&g_battleMode, 1);
+    Send4297();
+    Send429E();
+    Send37A4();
+    InterlockedExchange(&g_currentId, g_pendingId);
+    InterlockedExchange(&g_verifyId, g_pendingId);
+    if (g_verifyMode == 1) {
+        InterlockedExchange(&g_verifyIndex, g_logIndex);
+        InterlockedExchange(&g_waitBattleResult, 1);
+        InterlockedExchange(&g_armyBattleConfirmed, 0);
+        InterlockedExchange(&g_expectedWinValue, 0);
+        InterlockedExchange(&g_state, 5);
+        InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+    }
+    WriteDungeonLog(kLogSingleFormat, g_logIndex);
+}
+
+void StartUnlimitQuery()
+{
+    if (g_unlimitPassedOnce == 1) {
+        Finish();
+        return;
+    }
+
+    Send42A6();
+    InterlockedExchange(&g_state, 6);
+    InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+}
+
+void ClearBattleAndFinish()
+{
+    InterlockedExchange(&g_waitBattleResult, 0);
+    InterlockedExchange(&g_armyBattleConfirmed, 0);
+    InterlockedExchange(&g_expectedWinValue, 0);
+    InterlockedExchange(&g_battleMode, 0);
+    Finish();
+}
+
+void StartStatus08Battle(LONG matchIndex)
+{
+    if (g_battleMode == 2 || g_battleMode == 3) {
+        Finish();
+        return;
+    }
+
+    InterlockedExchange(&g_logIndex, matchIndex);
+    InterlockedExchange(&g_pendingId, GetIdByIndex(matchIndex));
+    InterlockedExchange(&g_currentId, g_pendingId);
+    InterlockedExchange(&g_verifyId, g_pendingId);
+    InterlockedExchange(&g_verifyIndex, matchIndex);
+    InterlockedExchange(&g_verifyMode, 1);
+    InterlockedExchange(&g_waitBattleResult, 1);
+    InterlockedExchange(&g_armyBattleConfirmed, 1);
+    InterlockedExchange(&g_expectedWinValue, 0);
+    InterlockedExchange(&g_battleMode, 1);
+    InterlockedExchange(&g_state, 5);
+    Send37A4();
+    InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+}
+
+bool SkipUtf(const BYTE*& cursor, const BYTE* end)
+{
+    if (cursor + 2 > end) {
+        return false;
+    }
+
+    const uint32_t length = ReadBe16(cursor);
+    cursor += 2;
+    if (cursor + length > end) {
+        return false;
+    }
+
+    cursor += length;
+    return true;
+}
+
+void Handle42A1(const BYTE* payload, uint32_t payloadLength)
+{
+    if (g_state != 1 || payloadLength < 0x0D) {
+        return;
+    }
+
+    LONG matchIndex = 0;
+    for (uint32_t offset = 0; offset + 8 <= payloadLength; ++offset) {
+        if (ReadLe32(payload + offset) != 0x7D7B0200) {
+            continue;
+        }
+        if (matchIndex >= static_cast<LONG>(kDungeonCount)) {
+            break;
+        }
+        if (offset < 9) {
+            ++matchIndex;
+            continue;
+        }
+        if (matchIndex == 8 && ReadLe32(payload + offset + 4) != 0) {
+            Finish();
+            return;
+        }
+        if (payload[offset - 9] == 0x08) {
+            StartStatus08Battle(matchIndex);
+            return;
+        }
+        ++matchIndex;
+    }
+
+    matchIndex = 0;
+    for (uint32_t offset = 0; offset + 4 <= payloadLength; ++offset) {
+        if (ReadLe32(payload + offset) != 0x7D7B0200) {
+            continue;
+        }
+        if (matchIndex >= static_cast<LONG>(kDungeonCount)) {
+            StartUnlimitQuery();
+            return;
+        }
+        if (offset < 9) {
+            ++matchIndex;
+            continue;
+        }
+
+        const BYTE status = payload[offset - 9];
+        InterlockedExchange(&g_logIndex, matchIndex);
+        InterlockedExchange(&g_pendingId, GetIdByIndex(matchIndex));
+
+        if (status == 0x06) {
+            if (static_cast<uint16_t>(g_pendingId) == static_cast<uint16_t>(g_verifyId)) {
+                if (g_waitBattleResult == 1 || g_verifyMode == 1) {
+                    ++matchIndex;
+                    continue;
+                }
+                UpdateMaxSolo();
+                ++matchIndex;
+                continue;
+            }
+            if (g_waitBattleResult == 1 || g_soloVerifyBlocked == 1) {
+                ++matchIndex;
+                continue;
+            }
+            const LONG mask = 1 << g_logIndex;
+            if ((g_verifyFailedMask & mask) != 0) {
+                ++matchIndex;
+                continue;
+            }
+            if (g_logIndex <= g_maxSoloIndex) {
+                ++matchIndex;
+                continue;
+            }
+            InterlockedExchange(&g_verifyMode, 1);
+            StartSolo();
+            return;
+        }
+
+        if (status == 0x03) {
+            if (g_waitBattleResult == 1) {
+                ++matchIndex;
+                continue;
+            }
+            if (g_soloVerifyBlocked == 1) {
+                InterlockedExchange(&g_currentId, g_pendingId);
+                Send4294();
+                InterlockedExchange(&g_state, 3);
+                InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+                return;
+            }
+            const LONG mask = 1 << g_logIndex;
+            if ((g_verifyFailedMask & mask) != 0) {
+                ++matchIndex;
+                continue;
+            }
+            if (static_cast<uint16_t>(g_pendingId) == static_cast<uint16_t>(g_currentId)) {
+                if (g_verifyMode == 1) {
+                    ++matchIndex;
+                    continue;
+                }
+                Send4294();
+                InterlockedExchange(&g_state, 3);
+                InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+                return;
+            }
+            InterlockedExchange(&g_verifyMode, 1);
+            StartSolo();
+            return;
+        }
+
+        if (status == 0x04) {
+            Send4294();
+            InterlockedExchange(&g_state, 2);
+            InterlockedExchange(&g_teamOrderSent, 0);
+            InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+            return;
+        }
+
+        if (status == 0x05) {
+            if (static_cast<uint16_t>(g_pendingId) == static_cast<uint16_t>(g_verifyId)) {
+                UpdateMaxSolo();
+            }
+            InterlockedExchange(&g_battleMode, 0);
+            Send429F();
+            WriteDungeonLog(kLogRewardFormat, g_logIndex);
+            Finish();
+            return;
+        }
+
+        if (status == 0x01) {
+            if (g_unlimitPassedOnce != 1) {
+                ++matchIndex;
+                continue;
+            }
+            if (g_maxSoloIndex < 0) {
+                Finish();
+                return;
+            }
+            Send4294();
+            InterlockedExchange(&g_state, 4);
+            InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+            return;
+        }
+
+        if (status == 0x02) {
+            if (g_unlimitPassedOnce == 1) {
+                if (g_maxSoloIndex < 0) {
+                    Finish();
+                    return;
+                }
+                Send4294();
+                InterlockedExchange(&g_state, 4);
+                InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+                return;
+            }
+            StartUnlimitQuery();
+            return;
+        }
+
+        if (status == 0x08) {
+            StartStatus08Battle(matchIndex);
+            return;
+        }
+
+        if (status == 0x07) {
+            Finish();
+            return;
+        }
+
+        ++matchIndex;
+    }
+
+    StartUnlimitQuery();
+}
+
+void Handle42A2(const BYTE* payload, uint32_t payloadLength)
+{
+    if (g_state != 2 || payloadLength < 0x1A) {
+        return;
+    }
+
+    const BYTE* cursor = payload + 4;
+    const BYTE* end = payload + payloadLength;
+    if (!SkipUtf(cursor, end) || cursor + 6 > end) {
+        return;
+    }
+
+    cursor += 4;
+    const uint16_t memberCount = ReadBe16(cursor);
+    cursor += 2;
+    if (memberCount != 3) {
+        return;
+    }
+
+    const BYTE* memberPtrs[3]{};
+    uint32_t memberLens[3]{};
+    for (size_t i = 0; i < 3; ++i) {
+        if (cursor + 2 > end) {
+            return;
+        }
+        memberPtrs[i] = cursor;
+        memberLens[i] = static_cast<uint32_t>(ReadBe16(cursor)) + 2;
+        cursor += memberLens[i];
+        if (cursor > end || !SkipUtf(cursor, end) || cursor + 0x0C > end) {
+            return;
+        }
+        cursor += 0x0C;
+        if (!SkipUtf(cursor, end)) {
+            return;
+        }
+    }
+
+    if (g_teamOrderSent != 1) {
+        Send429A(memberPtrs[0], memberLens[0], memberPtrs[1], memberLens[1], memberPtrs[2], memberLens[2]);
+        InterlockedExchange(&g_teamOrderSent, 1);
+        return;
+    }
+
+    InterlockedExchange(&g_battleMode, 3);
+    Send429EGroup();
+    WriteDungeonLog(kLogGroupFormat, g_logIndex);
+    Finish();
+}
+
+void ParseTeams(const BYTE* payload, uint32_t payloadLength)
+{
+    InterlockedExchange(&g_teamCount, 0);
+    InterlockedExchange(&g_peopleCount, 0);
+    std::memset(g_teamIds, 0, sizeof(g_teamIds));
+    std::memset(g_teamDungeonIds, 0, sizeof(g_teamDungeonIds));
+    std::memset(g_teamPeople, 0, sizeof(g_teamPeople));
+    if (payloadLength < 2) {
+        InterlockedExchange(&g_payloadTeamCount, 0);
+        return;
+    }
+
+    InterlockedExchange(&g_payloadTeamCount, payload[1]);
+    if (g_payloadTeamCount == 0 || payloadLength < 8) {
+        return;
+    }
+
+    for (uint32_t offset = 0; offset + 2 <= payloadLength; ++offset) {
+        if (ReadLe16(payload + offset) != 0x0C00 || offset < 6 || g_teamCount >= static_cast<LONG>(kMaxTeams)) {
+            continue;
+        }
+        const LONG index = g_teamCount;
+        g_teamIds[index] = ReadLe16(payload + offset - 6);
+        g_teamDungeonIds[index] = ReadLe16(payload + offset - 2);
+        InterlockedExchange(&g_teamCount, index + 1);
+    }
+
+    for (uint32_t offset = 0; offset + 4 <= payloadLength; ++offset) {
+        if (ReadLe32(payload + offset) != 0x7D7B0200 || offset < 5 || g_peopleCount >= static_cast<LONG>(kMaxTeams)) {
+            continue;
+        }
+        const LONG index = g_peopleCount;
+        g_teamPeople[index] = payload[offset - 5];
+        InterlockedExchange(&g_peopleCount, index + 1);
+    }
+}
+
+void Handle42A4(const BYTE* payload, uint32_t payloadLength)
+{
+    if (g_state != 3 && g_state != 4) {
+        return;
+    }
+
+    ParseTeams(payload, payloadLength);
+    if (g_state == 3) {
+        if (g_payloadTeamCount == 0) {
+            InterlockedExchange(&g_battleMode, 3);
+            Send4297();
+            WriteDungeonLog(kLogCreateFormat, g_logIndex);
+            Finish();
+            return;
+        }
+
+        const LONG count = g_teamCount < static_cast<LONG>(kMaxTeams) ? g_teamCount : static_cast<LONG>(kMaxTeams);
+        for (LONG i = 0; i < count; ++i) {
+            if (g_teamDungeonIds[i] != static_cast<uint16_t>(g_currentId) || g_teamPeople[i] != 1) {
+                continue;
+            }
+            InterlockedExchange(&g_battleMode, 3);
+            InterlockedExchange(&g_teamId, g_teamIds[i]);
+            Send4296();
+            Send4293();
+            WriteJoinLog();
+            Finish();
+            return;
+        }
+
+        InterlockedExchange(&g_battleMode, 3);
+        Send4297();
+        WriteDungeonLog(kLogCreateFormat, g_logIndex);
+        Finish();
+        return;
+    }
+
+    if (g_maxSoloIndex < 0 || g_payloadTeamCount == 0) {
+        return;
+    }
+
+    const LONG count = g_teamCount < static_cast<LONG>(kMaxTeams) ? g_teamCount : static_cast<LONG>(kMaxTeams);
+    for (LONG i = 0; i < count; ++i) {
+        const int index = GetIndexById(g_teamDungeonIds[i]);
+        if (index < 0 || index > g_maxSoloIndex || g_teamPeople[i] >= 3) {
+            continue;
+        }
+        InterlockedExchange(&g_battleMode, 3);
+        InterlockedExchange(&g_teamId, g_teamIds[i]);
+        Send4296();
+        Send4293();
+        WriteJoinLog();
+        Finish();
+        return;
+    }
+}
+
+void Handle42A7(const BYTE* payload, uint32_t payloadLength)
+{
+    if (g_state != 6 || payloadLength < 2) {
+        return;
+    }
+
+    const BYTE* cursor = payload;
+    const BYTE* end = payload + payloadLength;
+    const uint16_t count = ReadBe16(cursor);
+    InterlockedExchange(&g_unlimitCount, count);
+    cursor += 2;
+
+    for (uint16_t i = 0; i < count; ++i) {
+        if (cursor + 4 > end) {
+            return;
+        }
+        std::memcpy(&g_unlimitId, cursor, sizeof(g_unlimitId));
+        cursor += 4;
+        if (!SkipUtf(cursor, end) || cursor + 0x10 > end) {
+            return;
+        }
+        cursor += 4;
+        if (ReadLe32(cursor) == 0x04000000) {
+            Send42A8();
+            WriteRawLog(kLogUnlimit);
+            InterlockedExchange(&g_unlimitPassedOnce, 1);
+            InterlockedExchange(&g_battleMode, 0);
+            InterlockedExchange(&g_state, 0);
+            InterlockedExchange(&g_armyBattleConfirmed, 0);
+            InterlockedExchange(&g_expectedWinValue, 0);
+            InterlockedExchange(&g_nextTick, static_cast<LONG>(GetGameTick() + kIdleIntervalMs));
+            return;
+        }
+        cursor += 0x0C;
+        if (!SkipUtf(cursor, end)) {
+            return;
+        }
+    }
+}
+
+void Handle1460(const BYTE* payload, uint32_t payloadLength)
+{
+    if (g_state != 5 || payloadLength < 0x0A) {
+        return;
+    }
+
+    const BYTE marker[] = { 'a', 'r', 'm', 'y', 'R', 'a', 'i', 'd', 'F', 'B' };
+    bool foundArmyBattle = false;
+    for (uint32_t offset = 0; offset + sizeof(marker) <= payloadLength; ++offset) {
+        if (std::memcmp(payload + offset, marker, sizeof(marker)) == 0) {
+            InterlockedExchange(&g_armyBattleConfirmed, 1);
+            InterlockedExchange(&g_expectedWinValue, 0);
+            foundArmyBattle = true;
+            break;
+        }
+    }
+
+    if (!foundArmyBattle || payloadLength < 0x0F) {
+        return;
+    }
+
+    const BYTE locationMarker[] = { 'c', 'h', 'a', 'r', 'L', 'o', 'c', 'a', 't', 'i', 'o', 'n' };
+    for (uint32_t offset = 0; offset + 0x0F <= payloadLength; ++offset) {
+        if (std::memcmp(payload + offset, locationMarker, sizeof(locationMarker)) != 0) {
+            continue;
+        }
+        if (payload[offset + 0x0E] == '1') {
+            InterlockedExchange(&g_expectedWinValue, 1);
+        }
+        return;
+    }
+}
+
+void Handle1464(const BYTE* payload, uint32_t payloadLength)
+{
+    if (payloadLength == 0) {
+        return;
+    }
+
+    if (g_state != 5 || g_waitBattleResult != 1 || g_armyBattleConfirmed != 1) {
+        return;
+    }
+    if (g_verifyMode != 1) {
+        ClearBattleAndFinish();
+        return;
+    }
+
+    if (payload[0] == static_cast<BYTE>(g_expectedWinValue)) {
+        UpdateMaxSolo();
+    } else {
+        const LONG index = g_verifyIndex;
+        if (index >= 0 && index < static_cast<LONG>(kDungeonCount)) {
+            WriteDungeonLog(kLogFailFormat, index);
+            InterlockedExchange(&g_verifyFailedMask, g_verifyFailedMask | (1 << index));
+        }
+        InterlockedExchange(&g_currentId, 0);
+        InterlockedExchange(&g_verifyId, 0);
+        InterlockedExchange(&g_verifyMode, 0);
+        InterlockedExchange(&g_verifyIndex, -1);
+        InterlockedExchange(&g_soloVerifyBlocked, 1);
+    }
+
+    ClearBattleAndFinish();
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    if (!payload || !IsEnabled()) {
+        return;
+    }
+
+    switch (opcode & 0xFFFF) {
+    case 0x42A1:
+        Handle42A1(payload, payloadLength);
+        break;
+    case 0x42A2:
+        Handle42A2(payload, payloadLength);
+        break;
+    case 0x42A4:
+        Handle42A4(payload, payloadLength);
+        break;
+    case 0x42A7:
+        Handle42A7(payload, payloadLength);
+        break;
+    case 0x1460:
+        Handle1460(payload, payloadLength);
+        break;
+    case 0x1464:
+        Handle1464(payload, payloadLength);
+        break;
+    default:
+        break;
+    }
+}
+
+__declspec(noinline) void __stdcall Tick()
+{
+    if (!IsEnabled()) {
+        ResetState();
+        return;
+    }
+
+    const DWORD now = GetGameTick();
+    if (g_waitBattleResult == 1) {
+        return;
+    }
+
+    if (g_state != 0) {
+        if (g_state == 5) {
+            return;
+        }
+        if (now - static_cast<DWORD>(g_waitTick) >= kWaitTimeoutMs) {
+            InterlockedExchange(&g_state, 0);
+        }
+        return;
+    }
+
+    if (now < static_cast<DWORD>(g_nextTick)) {
+        return;
+    }
+
+    Send4293();
+    InterlockedExchange(&g_state, 1);
+    InterlockedExchange(&g_waitTick, static_cast<LONG>(now));
+    InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kIdleIntervalMs));
+}
+
+bool BuildTickCode(uintptr_t, CodeBuffer& code)
+{
+    return AppendByte(code, 0x9C) &&
+        AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&Tick)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&
+        AppendByte(code, 0xC3);
+}
+
+}
+
 namespace FastDailyBattle
 {
 
@@ -3365,6 +4261,7 @@ __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* pa
     Xyfp::HandleRecvPacket(opcode, payload, payloadLength);
     PersonalTask::HandleRecvPacket(opcode, payload, payloadLength);
     TaskDispatch::HandleRecvPacket(opcode, payload, payloadLength);
+    LegionDungeon::HandleRecvPacket(opcode, payload, payloadLength);
 }
 
 bool BuildCode(uintptr_t base, CodeBuffer& code)
@@ -3551,6 +4448,8 @@ DWORD WINAPI MainThread(LPVOID)
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Personal Task sender");
     const bool taskDispatchOk = sharedRouterOk &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash main");
+    const bool legionDungeonOk = sharedRouterOk &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Legion Dungeon");
     const bool lgfOk = IsPatchApplied(results, kPatchCount, "LGF refresh interval") &&
         IsPatchApplied(results, kPatchCount, "LGF suppress action log") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF status log") &&
@@ -3575,6 +4474,7 @@ DWORD WINAPI MainThread(LPVOID)
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x79D8\x5883\x63A2\x96AA", xyfpOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x500B\x4EBA\x4EFB\x52D9", personalTaskOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x4EFB\x52D9\x6D3E\x9063", taskDispatchOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x8ECD\x5718\x526F\x672C", legionDungeonOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7DF4\x529F\x623F", lgfOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5FEB\x901F\x6BCF\x65E5\x6230\x9B25", fastDailyBattleOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x81EA\x52D5\x7A81\x9032", autoLureDashOk);
