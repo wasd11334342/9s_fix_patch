@@ -1,0 +1,980 @@
+[ENABLE]
+// 2026-06-21 AutoLure dash 100ms LOG TEST copy.
+// AutoLure dash preflow state-machine, AA only.
+// No Lua, no timer, no Sleep.
+// Hook at sub_4351F0 entry for 100ms dash cadence, plus sub_43B7A0 guard while dash is active.
+// Dash state-machine runs before the original auto-function batch. AutoLure sub_43B7A0 is skipped only while dash_action blocks it.
+// When all groups finish, original AutoLure is allowed to continue.
+//dash_entry_is_waiting	新增判斷：entry 必須不在目前 deployed hero table 裡，才當作 waiting dash candidate	目前 DLL 沒有這段完整邏輯
+//albattle_last_city	新增記錄最後城市，用來輔助 rush 判斷	DLL 有 g_lastCity，但 AutoLure dash 還沒用在這個判斷
+//新版 rush 判斷	先算 target；如果 last_city != 0 且 target != last_city，可直接允許 dash；否則才檢查左右兵力 2 倍	目前 DLL 還是舊版，只用 AlBattle::HasRushAdvantage()
+//dash_decision_* / dash_rush_seen_*	debug/觀察用計數與最後判斷資料	DLL 沒完整搬，主要功能不一定需要
+
+alloc(newmem,8192,Online.exe+351F0)
+alloc(timerhook,512,Online.exe+403A3)
+alloc(confighook,1024,Online.exe+4B79B)
+alloc(totalonhook,512,Online.exe+401E0)
+alloc(resumehook,512,Online.exe+412F0)
+alloc(dash_groups,512,Online.exe+351F0)
+alloc(dashbuf,256,Online.exe+351F0)
+alloc(dash_phase,4)
+alloc(dash_next_tick,4)
+alloc(dash_scan_next_tick,4)
+alloc(dash_original_next_tick,4)
+alloc(dash_group_count,4)
+alloc(dash_group_index,4)
+alloc(dash_action,4)
+alloc(dash_has_waiting,4)
+alloc(dash_has_move_ready,4)
+globalalloc(dash_decision_count,4)
+globalalloc(dash_decision_code,4)
+globalalloc(dash_decision_phase,4)
+globalalloc(dash_decision_groups,4)
+globalalloc(dash_decision_hero_count,4)
+globalalloc(dash_decision_left_count,4)
+globalalloc(dash_decision_right_count,4)
+globalalloc(dash_decision_location,4)
+globalalloc(dash_statefix_tick,4)
+globalalloc(dash_statefix_write,4)
+globalalloc(dash_statefix_last_index,4)
+globalalloc(dash_statefix_last_entry,4)
+globalalloc(dash_rush_seen_left,4)
+globalalloc(dash_rush_seen_right,4)
+globalalloc(dash_rush_seen_location,4)
+globalalloc(dash_rush_seen_result,4)
+alloc(dash_waiting_no_rush,4)
+alloc(dash_target_tmp,4)
+alloc(dash_config,64)
+alloc(config_debug,32)
+globalalloc(albattle_hero_count,4)
+globalalloc(albattle_hero_table,512)
+globalalloc(albattle_left_count,4)
+globalalloc(albattle_right_count,4)
+globalalloc(albattle_location,4)
+globalalloc(albattle_rush_ratio,4)
+globalalloc(albattle_last_city,4)
+alloc(dash_log_state,128)
+label(return_main)
+label(return_guard)
+label(guardmem)
+label(return_timer)
+label(return_config)
+label(return_total_on)
+label(return_resume)
+label(run_original_batch)
+label(timer_fast)
+label(block_original)
+label(allow_original)
+label(dash_tick)
+label(dash_statefix)
+label(dash_statefix_loop)
+label(dash_statefix_next)
+label(dash_statefix_done)
+label(dash_mark_decision)
+label(dash_total_on)
+label(dash_strike_on)
+label(dash_show_options)
+label(dash_show_lure_off_fallback_off)
+label(dash_show_lure_off_fallback_on)
+label(dash_show_lure_on_fallback_off)
+label(dash_show_lure_on_fallback_on)
+label(dash_after_show_options)
+label(dash_lure_enabled)
+label(allow_original_scan_wait)
+label(allow_original_throttled)
+label(allow_original_waiting_no_rush)
+label(block_original_ret)
+label(dash_groups_ready)
+label(build_groups)
+label(dash_entry_is_waiting)
+label(dash_entry_wait_loop)
+label(dash_entry_wait_next)
+label(dash_entry_wait_match)
+label(dash_entry_wait_fail)
+label(dash_entry_wait_done)
+label(bg_done)
+label(bg_loop)
+label(bg_next)
+label(bg_count_ok)
+label(bg_rush_ok)
+label(find_group)
+label(find_group_loop)
+label(group_found)
+label(create_group)
+label(add_payload)
+label(add_payload_ok)
+label(add_payload_done)
+label(get_target)
+label(dash_rush_count_ok)
+label(dash_rush_loc_right)
+label(dash_rush_compare)
+label(dash_rush_fail)
+label(gt_loop)
+label(gt_next)
+label(gt_fail)
+label(send_current_phase)
+label(not_due)
+label(send_1467)
+label(send_373F)
+label(send_31E6)
+label(send_1483)
+label(check_1482)
+label(advance_group_after_dash)
+label(group_gap)
+label(finish_all)
+label(send_done_block)
+label(send_fail)
+label(build_1483_loop)
+label(build_1483_done)
+label(dash_log)
+label(dash_log_compare_loop)
+label(dash_log_emit)
+label(dash_log_copy_loop)
+label(dash_log_copy_done)
+label(dash_log_skip)
+label(log_lure_off_fallback_off)
+label(log_lure_off_fallback_on)
+label(log_lure_on_fallback_off)
+label(log_lure_on_fallback_on)
+label(str_worldwar)
+label(str_blure)
+label(str_bfallback)
+label(dash_lure_switch)
+label(dash_fallback_switch)
+label(dash_show_flag)
+label(config_read_hits)
+label(config_last_bstrike)
+label(config_last_lure)
+label(config_last_fallback)
+label(dash_last_log_text)
+newmem:
+  pushfd
+  pushad
+  call dash_tick
+  popad
+  popfd
+  cmp dword ptr [dash_action],1
+  je run_original_batch
+  ret
+run_original_batch:
+  push esi
+  call Online.exe+38B90
+  jmp return_main
+
+guardmem:
+  cmp dword ptr [dash_action],1
+  je allow_original
+block_original:
+  ret
+allow_original:
+  push ebp
+  mov ebp,esp
+  sub esp,0C
+  jmp return_guard
+// dash_action: 0 block original, 1 allow original
+// dash_phase: 0 idle, 1 send1467, 2 send373F, 3 send31E6, 4 send1483, 5 group gap, 6 check/send1482 fallback
+// group struct size 64:
+// +00 current dword, +04 target dword, +08 count dword, +0C first entry, +10 payload array
+dash_tick:
+  call dash_statefix
+  mov dword ptr [dash_action],0
+  cmp dword ptr [Online.exe+230284],0
+  jne dash_total_on
+  mov dword ptr [dash_show_flag],0
+  mov dword ptr [dash_phase],0
+  mov dword ptr [dash_scan_next_tick],0
+  mov dword ptr [dash_group_count],0
+  mov dword ptr [dash_group_index],0
+  mov eax,1
+  call dash_mark_decision
+  mov dword ptr [dash_action],1
+  ret
+dash_total_on:
+  cmp dword ptr [dash_show_flag],0
+  je dash_show_options
+dash_after_show_options:
+  cmp dword ptr [Online.exe+23040C],0
+  jne dash_strike_on
+  mov dword ptr [dash_phase],0
+  mov dword ptr [dash_scan_next_tick],0
+  mov dword ptr [dash_group_count],0
+  mov dword ptr [dash_group_index],0
+  mov eax,2
+  call dash_mark_decision
+  mov dword ptr [dash_action],1
+  ret
+dash_strike_on:
+  cmp dword ptr [dash_lure_switch],0
+  jne dash_lure_enabled
+  mov dword ptr [dash_phase],0
+  mov dword ptr [dash_scan_next_tick],0
+  mov dword ptr [dash_group_count],0
+  mov dword ptr [dash_group_index],0
+  mov eax,3
+  call dash_mark_decision
+  mov dword ptr [dash_action],1
+  ret
+dash_lure_enabled:
+  cmp dword ptr [dash_phase],0
+  jne send_current_phase
+  call kernel32.GetTickCount
+  cmp eax,[dash_scan_next_tick]
+  jb allow_original_scan_wait
+  call build_groups
+  cmp dword ptr [dash_group_count],0
+  jne dash_groups_ready
+  cmp dword ptr [dash_has_move_ready],1
+  je allow_original_move_ready
+  cmp dword ptr [dash_waiting_no_rush],1
+  je allow_original_waiting_no_rush
+  cmp dword ptr [dash_has_waiting],1
+  je allow_original_waiting_no_rush
+  cmp dword ptr [Online.exe+2303E8],0
+  jne allow_original_move_ready
+  jmp block_original_ret
+allow_original_scan_wait:
+  jmp allow_original_throttled
+allow_original_throttled:
+allow_original_move_ready:
+  call kernel32.GetTickCount
+  cmp eax,[dash_original_next_tick]
+  jb block_original_ret
+  add eax,#1000
+  mov [dash_original_next_tick],eax
+  mov eax,11
+  call dash_mark_decision
+  mov dword ptr [dash_action],1
+  ret
+allow_original_waiting_no_rush:
+  mov eax,5
+  call dash_mark_decision
+  mov dword ptr [dash_phase],0
+  mov dword ptr [dash_scan_next_tick],0
+  mov dword ptr [dash_group_count],0
+  mov dword ptr [dash_group_index],0
+  mov dword ptr [dash_action],1
+  ret
+block_original_ret:
+  mov eax,6
+  call dash_mark_decision
+  mov dword ptr [dash_action],0
+  ret
+dash_groups_ready:
+  mov eax,7
+  call dash_mark_decision
+  jmp send_current_phase
+send_current_phase:
+  mov eax,8
+  call dash_mark_decision
+  call kernel32.GetTickCount
+  cmp eax,[dash_next_tick]
+  jb not_due
+  mov eax,[dash_group_index]
+  cmp eax,[dash_group_count]
+  jae finish_all
+  shl eax,6
+  lea edi,[dash_groups+eax]
+  mov eax,[dash_phase]
+  cmp eax,1
+  je send_1467
+  cmp eax,2
+  je send_373F
+  cmp eax,3
+  je send_31E6
+  cmp eax,4
+  je send_1483
+  cmp eax,5
+  je group_gap
+  cmp eax,6
+  je check_1482
+  mov dword ptr [dash_phase],0
+  mov dword ptr [dash_action],1
+  ret
+not_due:
+  mov eax,9
+  call dash_mark_decision
+  ret
+send_1467:
+  mov ecx,[edi+0C]
+  push 0
+  push 0
+  push 1467
+  call Online.exe+4A360
+  call kernel32.GetTickCount
+  add eax,#100
+  mov [dash_next_tick],eax
+  mov dword ptr [dash_phase],2
+  ret
+send_373F:
+  mov ecx,[edi+0C]
+  push 0
+  push 0
+  push 373F
+  call Online.exe+4A360
+  call kernel32.GetTickCount
+  add eax,#100
+  mov [dash_next_tick],eax
+  mov dword ptr [dash_phase],3
+  ret
+send_31E6:
+  mov ecx,[edi+0C]
+  push 0
+  push 0
+  push 31E6
+  call Online.exe+4A360
+  call kernel32.GetTickCount
+  add eax,#100
+  mov [dash_next_tick],eax
+  mov dword ptr [dash_phase],4
+  ret
+send_1483:
+  mov dword ptr [dashbuf+00],00000000
+  mov al,byte ptr [edi+00]
+  mov byte ptr [dashbuf+03],al
+  mov byte ptr [dashbuf+04],00
+  mov al,byte ptr [edi+08]
+  mov byte ptr [dashbuf+05],al
+  xor ebx,ebx
+  lea esi,[edi+10]
+  lea edx,[dashbuf+06]
+build_1483_loop:
+  cmp ebx,[edi+08]
+  jge build_1483_done
+  mov eax,[esi+00]
+  mov [edx+00],eax
+  mov eax,[esi+04]
+  mov [edx+04],eax
+  add esi,8
+  add edx,8
+  inc ebx
+  jmp build_1483_loop
+build_1483_done:
+  mov dword ptr [edx+00],00000000
+  mov al,byte ptr [edi+04]
+  mov byte ptr [edx+03],al
+  mov eax,[edi+08]
+  shl eax,3
+  add eax,#10
+  mov ecx,[edi+0C]
+  push eax
+  push dashbuf
+  push 1483
+  call Online.exe+4A360
+  call kernel32.GetTickCount
+  add eax,#100
+  mov [dash_next_tick],eax
+  mov dword ptr [dash_phase],6
+  ret
+dash_show_options:
+  call Online.exe+4D810
+  mov dword ptr [dash_show_flag],1
+  cmp dword ptr [dash_lure_switch],0
+  je dash_show_lure_off_fallback_off
+  cmp dword ptr [dash_fallback_switch],0
+  je dash_show_lure_on_fallback_off
+dash_show_lure_on_fallback_on:
+  mov eax,log_lure_on_fallback_on
+  call dash_log
+  jmp dash_after_show_options
+dash_show_lure_on_fallback_off:
+  mov eax,log_lure_on_fallback_off
+  call dash_log
+  jmp dash_after_show_options
+dash_show_lure_off_fallback_off:
+  cmp dword ptr [dash_fallback_switch],0
+  jne dash_show_lure_off_fallback_on
+  mov eax,log_lure_off_fallback_off
+  call dash_log
+  jmp dash_after_show_options
+dash_show_lure_off_fallback_on:
+  mov eax,log_lure_off_fallback_on
+  call dash_log
+  jmp dash_after_show_options
+check_1482:
+  cmp dword ptr [dash_fallback_switch],0
+  je advance_group_after_dash
+  mov ecx,[edi+0C]
+  test ecx,ecx
+  je advance_group_after_dash
+  movzx eax,word ptr [ecx+30]
+  cmp eax,[edi+00]
+  jne advance_group_after_dash
+  mov eax,[edi+08]
+  shl eax,3
+  add eax,#10
+  push eax
+  push dashbuf
+  push 1482
+  call Online.exe+4A360
+advance_group_after_dash:
+  mov eax,[dash_group_index]
+  inc eax
+  mov [dash_group_index],eax
+  cmp eax,[dash_group_count]
+  jae finish_all
+  call kernel32.GetTickCount
+  add eax,#100
+  mov [dash_next_tick],eax
+  mov dword ptr [dash_phase],5
+  ret
+group_gap:
+  mov dword ptr [dash_phase],1
+  ret
+finish_all:
+  mov eax,10
+  call dash_mark_decision
+  call kernel32.GetTickCount
+  add eax,#1000
+  mov [dash_scan_next_tick],eax
+  mov dword ptr [dash_phase],0
+  mov dword ptr [dash_group_count],0
+  mov dword ptr [dash_group_index],0
+  mov dword ptr [Online.exe+230FE0],0
+  mov dword ptr [dash_original_next_tick],0
+  mov dword ptr [dash_action],1
+  ret
+dash_statefix:
+  inc dword ptr [dash_statefix_tick]
+  cmp dword ptr [Online.exe+2303E8],0
+  je dash_statefix_done
+  mov esi,[Online.exe+230644]
+  test esi,esi
+  je dash_statefix_done
+  mov ecx,[Online.exe+230648]
+  test ecx,ecx
+  jle dash_statefix_done
+  cmp ecx,5
+  jle @f
+  mov ecx,5
+@@:
+  xor ebx,ebx
+dash_statefix_loop:
+  cmp ebx,ecx
+  jge dash_statefix_done
+  mov edi,[esi+ebx*4]
+  test edi,edi
+  je dash_statefix_next
+  cmp dword ptr [edi+1C],1
+  jne dash_statefix_next
+  cmp dword ptr [edi+44],0
+  jne dash_statefix_next
+  inc dword ptr [dash_statefix_write]
+  mov [dash_statefix_last_index],ebx
+  mov [dash_statefix_last_entry],edi
+  mov dword ptr [edi+1C],4
+dash_statefix_next:
+  inc ebx
+  jmp dash_statefix_loop
+dash_statefix_done:
+  ret
+dash_mark_decision:
+  inc dword ptr [dash_decision_count]
+  mov [dash_decision_code],eax
+  mov ecx,[dash_phase]
+  mov [dash_decision_phase],ecx
+  mov ecx,[dash_group_count]
+  mov [dash_decision_groups],ecx
+  mov ecx,[albattle_hero_count]
+  mov [dash_decision_hero_count],ecx
+  mov ecx,[albattle_left_count]
+  mov [dash_decision_left_count],ecx
+  mov ecx,[albattle_right_count]
+  mov [dash_decision_right_count],ecx
+  mov ecx,[albattle_location]
+  mov [dash_decision_location],ecx
+  ret
+build_groups:
+  mov dword ptr [dash_group_count],0
+  mov dword ptr [dash_group_index],0
+  mov dword ptr [dash_waiting_no_rush],0
+  mov dword ptr [dash_has_waiting],0
+  mov dword ptr [dash_has_move_ready],0
+  mov esi,[Online.exe+230644]
+  test esi,esi
+  je bg_done
+  mov ecx,[Online.exe+230648]
+  test ecx,ecx
+  jle bg_done
+  cmp ecx,20
+  jle bg_count_ok
+  mov ecx,20
+bg_count_ok:
+  xor ebx,ebx
+bg_loop:
+  cmp ebx,ecx
+  jge bg_done
+  mov edi,[esi+ebx*4]
+  test edi,edi
+  je bg_next
+  cmp dword ptr [edi+1C],4
+  jne @f
+  mov dword ptr [dash_has_move_ready],1
+@@:
+  cmp dword ptr [edi+1C],1
+  jne @f
+  mov dword ptr [dash_has_move_ready],1
+@@:
+  cmp dword ptr [edi+1C],8
+  jne @f
+  cmp dword ptr [edi+20],5
+  jne @f
+  cmp dword ptr [edi+44],0
+  jne @f
+  mov dword ptr [dash_has_move_ready],1
+@@:
+  cmp dword ptr [edi+1C],2
+  jne bg_next
+  cmp dword ptr [edi+20],3
+  jne bg_next
+  call dash_entry_is_waiting
+  cmp eax,01
+  jne bg_next
+  mov dword ptr [dash_has_waiting],1
+  jne @f
+@@:
+  push ecx
+  push esi
+  push ebx
+  push edi
+  call get_target
+  cmp eax,FFFFFFFF
+  je send_fail
+  mov eax,[albattle_last_city]
+  test eax,eax
+  je @f
+  cmp eax,edx
+  jne bg_rush_ok
+@@:
+  call dash_rush_count_ok
+  cmp eax,01
+  je bg_rush_ok
+  mov dword ptr [dash_waiting_no_rush],1
+  jmp send_fail
+bg_rush_ok:
+  pop edi
+  push edi
+  call find_group
+  cmp eax,FFFFFFFF
+  jne group_found
+  call create_group
+  cmp eax,FFFFFFFF
+  je send_fail
+  jmp group_found
+group_found:
+  mov edx,eax
+  call add_payload
+  jmp add_payload_done
+send_fail:
+add_payload_done:
+  pop edi
+  pop ebx
+  pop esi
+  pop ecx
+bg_next:
+  inc ebx
+  jmp bg_loop
+bg_done:
+  cmp dword ptr [dash_group_count],0
+  je send_done_block
+  mov dword ptr [dash_phase],1
+  mov dword ptr [dash_next_tick],0
+send_done_block:
+  ret
+// input edi=entry. output eax=1 when entry is not in the current deployed hero table.
+// If the table is empty/stale, do not block dash candidates.
+dash_entry_is_waiting:
+  push ebx
+  push ecx
+  push edx
+  push esi
+  mov ecx,[albattle_hero_count]
+  test ecx,ecx
+  jle dash_entry_wait_match
+  cmp ecx,20
+  jle @f
+  mov ecx,20
+@@:
+  mov edx,[edi]
+  mov esi,[edi+04]
+  xor ebx,ebx
+dash_entry_wait_loop:
+  cmp ebx,ecx
+  jge dash_entry_wait_match
+  mov eax,ebx
+  shl eax,4
+  cmp dword ptr [albattle_hero_table+eax+08],01
+  jne dash_entry_wait_next
+  cmp dword ptr [albattle_hero_table+eax],edx
+  jne dash_entry_wait_next
+  cmp dword ptr [albattle_hero_table+eax+04],esi
+  je dash_entry_wait_fail
+dash_entry_wait_next:
+  inc ebx
+  jmp dash_entry_wait_loop
+dash_entry_wait_match:
+  mov eax,01
+  jmp dash_entry_wait_done
+dash_entry_wait_fail:
+  xor eax,eax
+dash_entry_wait_done:
+  pop esi
+  pop edx
+  pop ecx
+  pop ebx
+  ret
+// output eax=1 only when current battle side has at least 2x enemy count
+dash_rush_count_ok:
+  push ebx
+  push ecx
+  push edx
+  mov eax,[albattle_left_count]
+  mov [dash_rush_seen_left],eax
+  mov ebx,[albattle_right_count]
+  mov [dash_rush_seen_right],ebx
+  mov ecx,[albattle_location]
+  mov [dash_rush_seen_location],ecx
+  cmp eax,00
+  jne dash_rush_left_nonzero
+  cmp ebx,00
+  jg dash_rush_compare
+  jmp dash_rush_fail
+dash_rush_left_nonzero:
+  cmp ebx,00
+  jle dash_rush_compare
+  cmp ecx,00
+  je dash_rush_check_left
+dash_rush_loc_right:
+dash_rush_check_right:
+  mov edx,eax
+  add edx,eax
+  cmp ebx,edx
+  jae dash_rush_compare
+  jmp dash_rush_fail
+dash_rush_check_left:
+  mov edx,ebx
+  add edx,ebx
+  cmp eax,edx
+  jae dash_rush_compare
+  jmp dash_rush_fail
+dash_rush_compare:
+dash_rush_success:
+  mov dword ptr [dash_rush_seen_result],1
+  mov eax,01
+  jmp dash_rush_done
+dash_rush_fail:
+  mov dword ptr [dash_rush_seen_result],0
+  xor eax,eax
+dash_rush_done:
+  pop edx
+  pop ecx
+  pop ebx
+  ret
+// input: edi=entry, output eax=target dword or FFFFFFFF, edx=current dword
+get_target:
+  movzx edx,word ptr [edi+30]
+  mov eax,[Online.exe+2303EC]
+  mov ebp,[Online.exe+2306C4]
+  cmp eax,ebp
+  jae gt_fail
+  mov ebp,[Online.exe+2306C0]
+  test ebp,ebp
+  je gt_fail
+  mov ebp,[ebp+eax*4]
+  test ebp,ebp
+  je gt_fail
+  mov ecx,[ebp+0C]
+  test ecx,ecx
+  jle gt_fail
+  mov ebp,[ebp+08]
+  test ebp,ebp
+  je gt_fail
+  xor eax,eax
+gt_loop:
+  cmp eax,ecx
+  jge gt_fail
+  mov esi,[ebp+eax*4]
+  test esi,esi
+  je gt_next
+  cmp dx,[esi]
+  jne gt_next
+  inc eax
+  cmp eax,ecx
+  jge gt_fail
+  mov esi,[ebp+eax*4]
+  test esi,esi
+  je gt_fail
+  movzx eax,word ptr [esi]
+  mov [dash_target_tmp],eax
+  ret
+gt_next:
+  inc eax
+  jmp gt_loop
+gt_fail:
+  mov eax,FFFFFFFF
+  ret
+// input edi=entry, edx=current. output eax=group ptr or FFFFFFFF
+find_group:
+  mov eax,[dash_group_count]
+  test eax,eax
+  jle gt_fail
+  xor ecx,ecx
+find_group_loop:
+  cmp ecx,[dash_group_count]
+  jge gt_fail
+  mov eax,ecx
+  shl eax,6
+  lea eax,[dash_groups+eax]
+  cmp [eax+00],edx
+  je add_payload_ok
+  inc ecx
+  jmp find_group_loop
+add_payload_ok:
+  ret
+// input edi=entry, edx=current, eax=target still from get_target? no, target lost if after find fail.
+// target is stored in [dash_target_tmp]. output eax=group ptr or FFFFFFFF
+create_group:
+  mov eax,[dash_group_count]
+  cmp eax,8
+  jae gt_fail
+  mov ecx,eax
+  shl eax,6
+  lea eax,[dash_groups+eax]
+  mov [eax+00],edx
+  mov edx,[dash_target_tmp]
+  mov [eax+04],edx
+  mov dword ptr [eax+08],0
+  mov [eax+0C],edi
+  inc ecx
+  mov [dash_group_count],ecx
+  ret
+// input eax=group ptr, edi=entry
+add_payload:
+  mov ecx,[eax+08]
+  cmp ecx,8
+  jae send_fail
+  mov edx,ecx
+  shl edx,3
+  lea edx,[eax+10+edx]
+  mov ebp,[edi+00]
+  mov [edx+00],ebp
+  mov ebp,[edi+04]
+  mov [edx+04],ebp
+  inc ecx
+  mov [eax+08],ecx
+  ret
+dash_log:
+  ret
+  push ebx
+  push ecx
+  push edx
+  push esi
+  push edi
+  mov ebx,eax
+  mov esi,ebx
+  mov edi,dash_last_log_text
+  mov ecx,#63
+dash_log_compare_loop:
+  mov dx,[esi]
+  cmp dx,[edi]
+  jne dash_log_emit
+  test dx,dx
+  je dash_log_skip
+  add esi,2
+  add edi,2
+  dec ecx
+  jne dash_log_compare_loop
+dash_log_emit:
+  mov esi,ebx
+  mov edi,dash_last_log_text
+  mov ecx,#63
+dash_log_copy_loop:
+  mov dx,[esi]
+  mov [edi],dx
+  test dx,dx
+  je dash_log_copy_done
+  add esi,2
+  add edi,2
+  dec ecx
+  jne dash_log_copy_loop
+  mov word ptr [edi],0
+dash_log_copy_done:
+  mov eax,ebx
+  pop edi
+  pop esi
+  pop edx
+  pop ecx
+  pop ebx
+  push eax
+  push Online.exe+1FE56C
+  push Online.exe+230504
+  call Online.exe+2EF0
+  add esp,0C
+  push 00
+  push 00
+  push [Online.exe+2304D8]
+  push [Online.exe+2300A4]
+  call dword ptr [Online.exe+1C46B0]
+  ret
+dash_log_skip:
+  pop edi
+  pop esi
+  pop edx
+  pop ecx
+  pop ebx
+  ret
+dash_config:
+dash_lure_switch:
+  dd 0
+dash_fallback_switch:
+  dd 0
+dash_show_flag:
+  dd 0
+config_debug:
+config_read_hits:
+  dd 0
+config_last_bstrike:
+  dd 0
+config_last_lure:
+  dd 0
+config_last_fallback:
+  dd 0
+dash_log_state:
+dash_last_log_text:
+  dq 0 0 0 0 0 0 0 0
+  dq 0 0 0 0 0 0 0 0
+log_lure_off_fallback_off:
+  dw 51FA,64CA,8A98,6575,0020,7A81,9032,003D,95DC,0020,64A4,9000,003D,95DC,0000
+log_lure_off_fallback_on:
+  dw 51FA,64CA,8A98,6575,0020,7A81,9032,003D,95DC,0020,64A4,9000,003D,958B,0000
+log_lure_on_fallback_off:
+  dw 51FA,64CA,8A98,6575,0020,7A81,9032,003D,958B,0020,64A4,9000,003D,95DC,0000
+log_lure_on_fallback_on:
+  dw 51FA,64CA,8A98,6575,0020,7A81,9032,003D,958B,0020,64A4,9000,003D,958B,0000
+str_worldwar:
+  dw 0057,006F,0072,006C,0064,0057,0061,0072,0000
+str_blure:
+  dw 0062,004C,0075,0072,0065,0000
+str_bfallback:
+  dw 0062,0046,0061,006C,006C,0062,0061,0063,006B,0000
+confighook:
+  call esi
+  inc dword ptr [config_read_hits]
+  mov [config_last_bstrike],eax
+  mov [ebx+24],eax
+  push edi
+  push 0
+  push str_blure
+  push str_worldwar
+  call esi
+  mov [dash_lure_switch],eax
+  mov [config_last_lure],eax
+  push edi
+  push 0
+  push str_bfallback
+  push str_worldwar
+  call esi
+  mov [dash_fallback_switch],eax
+  mov [config_last_fallback],eax
+  mov eax,[config_last_bstrike]
+  pop edi
+  pop esi
+  jmp return_config
+totalonhook:
+  mov dword ptr [dash_show_flag],0
+  push edi
+  mov edi,ecx
+  push 00
+  jmp return_total_on
+resumehook:
+  mov dword ptr [dash_show_flag],0
+  push edi
+  push 04
+  mov edi,ecx
+  jmp return_resume
+timerhook:
+  call Online.exe+351F0
+  push 00
+  cmp dword ptr [dash_phase],0
+  jne timer_fast
+  push #1000
+  jmp return_timer
+timer_fast:
+  push #100
+  jmp return_timer
+Online.exe+351F0:
+  jmp newmem
+  nop
+return_main:
+Online.exe+3B7A0:
+  jmp guardmem
+  nop
+return_guard:
+Online.exe+403A3:
+  jmp timerhook
+  nop 7
+return_timer:
+Online.exe+4B79B:
+  jmp confighook
+  nop 2
+return_config:
+Online.exe+401E0:
+  jmp totalonhook
+return_total_on:
+Online.exe+412F0:
+  jmp resumehook
+return_resume:
+registersymbol(config_read_hits)
+registersymbol(config_last_bstrike)
+registersymbol(config_last_lure)
+registersymbol(config_last_fallback)
+registersymbol(dash_lure_switch)
+registersymbol(dash_fallback_switch)
+// AutoWorldWar movement cadence kept here after ID270 retired.
+Online.exe+3AC2F:
+  dd #1000
+Online.exe+403E5:
+  dd #1000
+[DISABLE]
+unregistersymbol(config_read_hits)
+unregistersymbol(config_last_bstrike)
+unregistersymbol(config_last_lure)
+unregistersymbol(config_last_fallback)
+unregistersymbol(dash_lure_switch)
+unregistersymbol(dash_fallback_switch)
+Online.exe+351F0:
+  db 56 E8 9A 39 00 00
+Online.exe+3B7A0:
+  db 55 8B EC 83 EC 0C
+Online.exe+403A3:
+  db E8 48 4E FF FF 6A 00 68 20 4E 00 00
+Online.exe+4B79B:
+  db FF D6 5F 5E 89 43 24
+Online.exe+401E0:
+  db 57 8B F9 6A 00
+Online.exe+412F0:
+  db 57 6A 04 8B F9
+Online.exe+3AC2F:
+  db 58 1B 00 00
+Online.exe+403E5:
+  db 58 1B 00 00
+dealloc(newmem)
+dealloc(timerhook)
+dealloc(confighook)
+dealloc(totalonhook)
+dealloc(resumehook)
+dealloc(dash_groups)
+dealloc(dashbuf)
+dealloc(dash_phase)
+dealloc(dash_next_tick)
+dealloc(dash_scan_next_tick)
+dealloc(dash_original_next_tick)
+dealloc(dash_group_count)
+dealloc(dash_group_index)
+dealloc(dash_action)
+dealloc(dash_has_waiting)
+dealloc(dash_has_move_ready)
+dealloc(dash_waiting_no_rush)
+dealloc(dash_target_tmp)
+dealloc(dash_config)
+dealloc(config_debug)
+dealloc(dash_log_state)

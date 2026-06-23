@@ -1336,6 +1336,40 @@ BYTE* CreateGroup(uintptr_t entry, uint32_t current, uint32_t target)
     return group;
 }
 
+bool EntryIsWaiting(uintptr_t entry)
+{
+    const LONG heroCount = AlBattle::g_heroCount;
+    if (heroCount <= 0) {
+        return true;
+    }
+
+    LONG count = heroCount;
+    if (count > 20) {
+        count = 20;
+    }
+
+    const uint32_t idLo = ReadGameU32(entry);
+    const uint32_t idHi = ReadGameU32(entry + 0x04);
+    for (LONG i = 0; i < count; ++i) {
+        const AlBattle::HeroEntry& hero = AlBattle::g_heroTable[i];
+        if (hero.ready == 1 && hero.uuid0 == idLo && hero.uuid4 == idHi) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool CanDashFromCurrent(uint32_t current)
+{
+    const LONG lastCity = AlBattle::g_lastCity;
+    if (lastCity != 0 && static_cast<uint32_t>(lastCity) != current) {
+        return true;
+    }
+
+    return AlBattle::HasRushAdvantage();
+}
+
 void AddPayload(BYTE* group, uintptr_t entry)
 {
     uint32_t count = ReadGroupU32(group, 0x08);
@@ -1427,15 +1461,20 @@ void BuildGroups()
             continue;
         }
 
-        InterlockedExchange(&g_hasWaiting, 1);
-        if (!AlBattle::HasRushAdvantage()) {
-            InterlockedExchange(&g_waitingNoRush, 1);
+        if (!EntryIsWaiting(entry)) {
             continue;
         }
+
+        InterlockedExchange(&g_hasWaiting, 1);
 
         uint32_t current = 0;
         uint32_t target = 0;
         if (!GetTarget(entry, current, target)) {
+            continue;
+        }
+
+        if (!CanDashFromCurrent(current)) {
+            InterlockedExchange(&g_waitingNoRush, 1);
             continue;
         }
 
