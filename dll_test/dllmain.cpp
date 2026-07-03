@@ -299,6 +299,7 @@ namespace LegionDungeon
 constexpr DWORD kActionSwitchOffset = 0x2302C0;
 constexpr DWORD kIdleIntervalMs = 0x0BB8;
 constexpr DWORD kWaitTimeoutMs = 0x2710;
+constexpr DWORD kBattleResultTimeoutMs = 0x7530;
 constexpr DWORD kMaxClosedWaitSeconds = 7 * 24 * 60 * 60;
 constexpr size_t kDungeonCount = 9;
 constexpr size_t kMaxTeams = 10;
@@ -318,8 +319,12 @@ volatile LONG g_pendingId = 0;
 volatile LONG g_teamId = 0;
 volatile LONG g_logIndex = 0;
 volatile LONG g_timeBlocked = 0;
+volatile LONG g_timeWaitPassed = 0;
+volatile LONG g_timeOpenLogged = 0;
 volatile LONG g_activityState = 0;
 volatile LONG g_leftTime = 0;
+volatile LONG g_helpTrackId = 0;
+volatile LONG g_helpTrackCount = 0;
 volatile LONG g_nextTick = 0;
 volatile LONG g_waitTick = 0;
 volatile LONG g_teamCount = 0;
@@ -332,6 +337,7 @@ volatile LONG g_unlimitCount = 0;
 uint32_t g_unlimitId = 0;
 uint16_t g_teamIds[kMaxTeams]{};
 uint16_t g_teamDungeonIds[kMaxTeams]{};
+uint32_t g_teamOffsets[kMaxTeams]{};
 BYTE g_teamPeople[kMaxTeams]{};
 uint32_t g_bufZero4 = 0;
 BYTE g_bufId4[4]{};
@@ -371,6 +377,7 @@ bool HasRushAdvantage();
 
 namespace AutoLureDash
 {
+constexpr bool kEnableDashDiagLog = false;
 constexpr DWORD kPhaseGapMs = 100;
 constexpr DWORD kFallbackCheckMs = 500;
 constexpr DWORD kIdleScanMs = 1000;
@@ -393,6 +400,10 @@ volatile LONG g_stateFixTick = 0;
 volatile LONG g_stateFixWrite = 0;
 volatile LONG g_stateFixLastIndex = 0;
 volatile LONG g_stateFixLastEntry = 0;
+volatile LONG g_diagLastReason = 0;
+volatile LONG g_diagLastCurrent = 0;
+volatile LONG g_diagLastTarget = 0;
+volatile LONG g_diagLastTick = 0;
 uint32_t g_targetTmp = 0;
 BYTE g_groups[kMaxGroups * kGroupStride]{};
 BYTE g_dashBuffer[256]{};
@@ -432,7 +443,6 @@ bool BuildConfigCode(uintptr_t base, CodeBuffer& code);
 bool BuildTotalOnCode(uintptr_t base, CodeBuffer& code);
 bool BuildResumeCode(uintptr_t base, CodeBuffer& code);
 }
-
 // Dragon vein fix
 const BYTE kDragonVeinPatchBytes[] = {
     0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0xC7, 0x45,
@@ -564,6 +574,12 @@ bool BuildTickCode(uintptr_t base, CodeBuffer& code);
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
 }
 
+namespace ExpeditionGuard
+{
+bool BuildCode(uintptr_t base, CodeBuffer& code);
+void HandleRecvPacket(uint32_t opcode);
+}
+
 namespace SharedRecvRouter
 {
 volatile LONG g_clearStackArg = 0;
@@ -588,6 +604,7 @@ const JumpPatch kJumpPatches[] = {
     { "XYFP sender", 0x36690, 6, 128, Xyfp::BuildSendCode },
     { "Personal Task sender", 0x3D000, 13, 128, PersonalTask::BuildSendCode },
     { "Legion Dungeon", 0x3B2E0, 5, 128, LegionDungeon::BuildTickCode },
+    { "Expedition guard", 0x39D90, 11, 128, ExpeditionGuard::BuildCode },
     { "LGF status log", 0x37150, 7, 128, LgfGuard::BuildMainCode },
     { "LGF 396F fast slot", 0x48578, 9, 128, LgfGuard::Build396FSlotCode },
     { "LGF 396D guard", 0x4AC30, 6, 128, LgfGuard::Build396DCode },
@@ -924,6 +941,209 @@ DWORD GetGameTick()
     GetTickFn tick = *reinterpret_cast<GetTickFn*>(g_mainBase + 0x1C43DC);
     return tick ? tick() : 0;
 }
+namespace GameLog
+{
+volatile LONG g_refreshing = 0;
+
+const wchar_t* CurrentText()
+{
+    return *reinterpret_cast<const wchar_t* volatile*>(g_mainBase + 0x230504);
+}
+
+void RefreshExpected(const wchar_t* expectedText)
+{
+    if (g_mainBase == 0) {
+        return;
+    }
+
+    if (!expectedText || !*expectedText) {
+        return;
+    }
+
+    const wchar_t* currentText = CurrentText();
+    if (!currentText || std::wcscmp(currentText, expectedText) != 0) {
+        return;
+    }
+
+    if (InterlockedCompareExchange(&g_refreshing, 1, 0) != 0) {
+        return;
+    }
+
+    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
+    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
+    if (refreshLog) {
+        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
+    }
+
+    InterlockedExchange(&g_refreshing, 0);
+}
+
+void RefreshCurrent()
+{
+    // Bare refreshes can re-emit the game's previous shared log text.
+}
+
+template <typename... Args>
+void Write(const wchar_t* format, Args... args)
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, ...);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, format, args...);
+
+    wchar_t snapshot[512]{};
+    const wchar_t* text = CurrentText();
+    if (text) {
+        std::wcsncpy(snapshot, text, _countof(snapshot) - 1);
+        snapshot[_countof(snapshot) - 1] = 0;
+    }
+
+    RefreshExpected(snapshot);
+}
+
+}
+
+namespace ExpeditionGuard
+{
+constexpr DWORD kPendingTimeoutMs = 15000;
+constexpr DWORD kRefreshIntervalMs = 0x124F80;
+constexpr uintptr_t kSwitchOffset = 0x2302F0;
+constexpr uintptr_t kNodeArrayOffset = 0x2307C0;
+constexpr uintptr_t kNodeCountOffset = 0x2307C4;
+constexpr uintptr_t kChallengeCountOffset = 0x2307B4;
+constexpr uintptr_t kChallengeQueryFlagOffset = 0x2307B8;
+constexpr uintptr_t kRefreshTickOffset = 0x230FD4;
+
+volatile LONG g_pending = 0;
+volatile LONG g_pendingType = 0;
+volatile LONG g_pendingId = 0;
+volatile LONG g_pendingTick = 0;
+volatile LONG g_allowChallengeQuery = 0;
+volatile LONG g_pendingSetCount = 0;
+volatile LONG g_pendingClearCount = 0;
+volatile LONG g_skipCount = 0;
+
+void ClearPending()
+{
+    InterlockedExchange(&g_pending, 0);
+    InterlockedExchange(&g_pendingType, 0);
+    InterlockedExchange(&g_pendingId, 0);
+    InterlockedExchange(&g_pendingTick, 0);
+    InterlockedExchange(&g_allowChallengeQuery, 0);
+}
+
+void SetPending(uint32_t type, uint32_t id, bool allowChallengeQuery)
+{
+    InterlockedExchange(&g_pendingType, static_cast<LONG>(type));
+    InterlockedExchange(&g_pendingId, static_cast<LONG>(id));
+    InterlockedExchange(&g_pendingTick, static_cast<LONG>(GetTickCount()));
+    InterlockedExchange(&g_allowChallengeQuery, allowChallengeQuery ? 1 : 0);
+    InterlockedExchange(&g_pending, 1);
+    InterlockedIncrement(&g_pendingSetCount);
+}
+
+bool FindActionNode(uint32_t& id, uint32_t& type)
+{
+    const uint32_t count = ReadGameU32(g_mainBase + kNodeCountOffset);
+    const uint32_t nodeArray = ReadGameU32(g_mainBase + kNodeArrayOffset);
+    if (count == 0 || count > 256 || nodeArray == 0) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t node = ReadGameU32(nodeArray + i * sizeof(uint32_t));
+        if (node == 0) {
+            continue;
+        }
+
+        if (ReadGameU32(node + 8) != 1) {
+            continue;
+        }
+
+        id = ReadGameU32(node);
+        type = ReadGameU32(node + 4);
+        return true;
+    }
+
+    return false;
+}
+
+__declspec(noinline) uint32_t __stdcall ShouldSkip()
+{
+    if (g_mainBase == 0 || ReadGameU32(g_mainBase + kSwitchOffset) == 0) {
+        ClearPending();
+        return 0;
+    }
+
+    const DWORD now = GetTickCount();
+    if (g_pending != 0) {
+        const DWORD pendingTick = static_cast<DWORD>(g_pendingTick);
+        if (now - pendingTick >= kPendingTimeoutMs) {
+            ClearPending();
+        } else if (g_pendingType == 0 && g_allowChallengeQuery != 0) {
+            InterlockedExchange(&g_allowChallengeQuery, 0);
+            return 0;
+        } else {
+            InterlockedIncrement(&g_skipCount);
+            return 1;
+        }
+    }
+
+    if (ReadGameU32(g_mainBase + kNodeCountOffset) == 0) {
+        return 0;
+    }
+
+    const DWORD refreshTick = ReadGameU32(g_mainBase + kRefreshTickOffset);
+    if (now - refreshTick > kRefreshIntervalMs) {
+        return 0;
+    }
+
+    uint32_t id = 0;
+    uint32_t type = 0;
+    if (!FindActionNode(id, type)) {
+        return 0;
+    }
+
+    if (type == 1) {
+        SetPending(type, id, false);
+    } else if (type == 0 &&
+        ReadGameU32(g_mainBase + kChallengeCountOffset) > 0 &&
+        ReadGameU32(g_mainBase + kChallengeQueryFlagOffset) == 0) {
+        SetPending(type, id, true);
+    }
+
+    return 0;
+}
+
+void HandleRecvPacket(uint32_t opcode)
+{
+    if ((opcode & 0xFFFF) == 0x2BA3) {
+        ClearPending();
+        InterlockedIncrement(&g_pendingClearCount);
+    }
+}
+
+bool BuildCode(uintptr_t base, CodeBuffer& code)
+{
+    return AppendByte(code, 0x9C) &&
+        AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&ShouldSkip)) &&
+        AppendByte(code, 0x85) && AppendByte(code, 0xC0) &&
+        AppendJeShort(code, 0x03) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&
+        AppendByte(code, 0xC3) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&
+        AppendByte(code, 0x55) &&
+        AppendByte(code, 0x8B) && AppendByte(code, 0xEC) &&
+        AppendByte(code, 0x51) &&
+        AppendByte(code, 0x83) && AppendByte(code, 0x3D) &&
+        AppendU32(code, static_cast<uint32_t>(base + kSwitchOffset)) &&
+        AppendByte(code, 0x00) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x39D9B);
+}
+
+}
 
 namespace AlBattle
 {
@@ -1223,19 +1443,95 @@ void SendPacketWithEcx(uint32_t ecxValue, uint32_t opcode, const void* payload, 
 
 void RefreshLog()
 {
-    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
-    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
-    if (refreshLog) {
-        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
-    }
+    GameLog::RefreshCurrent();
 }
 
 void WriteDashLog(const wchar_t* text)
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, kLogFormat, text);
-    RefreshLog();
+    GameLog::Write(kLogFormat, text);
+}
+
+enum DashDiagReason : LONG
+{
+    kDiagTargetMissing = 1,
+    kDiagWrongCity = 2,
+    kDiagCountNoRush = 3,
+    kDiagGroupCreated = 4,
+    kDiagAllowOriginalWaiting = 5,
+    kDiagAllowOriginalMove = 6,
+    kDiagBlockOriginal = 7,
+    kDiagSend1467 = 8,
+    kDiagSend31E6 = 9,
+    kDiagSend1483 = 10,
+    kDiagSend1482 = 11,
+    kDiagSkip1482 = 12,
+};
+
+const wchar_t* DashDiagReasonText(LONG reason)
+{
+    switch (reason) {
+    case kDiagTargetMissing:
+        return L"target_missing";
+    case kDiagWrongCity:
+        return L"wrong_city";
+    case kDiagCountNoRush:
+        return L"count_no_rush";
+    case kDiagGroupCreated:
+        return L"group_created";
+    case kDiagAllowOriginalWaiting:
+        return L"allow_original_waiting";
+    case kDiagAllowOriginalMove:
+        return L"allow_original_move";
+    case kDiagBlockOriginal:
+        return L"block_original";
+    case kDiagSend1467:
+        return L"send_1467";
+    case kDiagSend31E6:
+        return L"send_31E6";
+    case kDiagSend1483:
+        return L"send_1483";
+    case kDiagSend1482:
+        return L"send_1482";
+    case kDiagSkip1482:
+        return L"skip_1482";
+    default:
+        return L"unknown";
+    }
+}
+
+void WriteDashDiag(LONG reason, uint32_t current, uint32_t target)
+{
+    if (!kEnableDashDiagLog) {
+        return;
+    }
+
+    const DWORD now = GetTickCount();
+    const LONG lastTick = g_diagLastTick;
+    if (g_diagLastReason == reason &&
+        g_diagLastCurrent == static_cast<LONG>(current) &&
+        g_diagLastTarget == static_cast<LONG>(target) &&
+        now - static_cast<DWORD>(lastTick) < 3000) {
+        return;
+    }
+
+    InterlockedExchange(&g_diagLastReason, reason);
+    InterlockedExchange(&g_diagLastCurrent, static_cast<LONG>(current));
+    InterlockedExchange(&g_diagLastTarget, static_cast<LONG>(target));
+    InterlockedExchange(&g_diagLastTick, static_cast<LONG>(now));
+
+    wchar_t message[192]{};
+    std::swprintf(
+        message,
+        _countof(message),
+        L"DashDiag %s cur=%u target=%u last=%ld L=%ld R=%ld loc=%ld",
+        DashDiagReasonText(reason),
+        current,
+        target,
+        AlBattle::g_lastCity,
+        AlBattle::g_leftCount,
+        AlBattle::g_rightCount,
+        AlBattle::g_location);
+    WriteDashLog(message);
 }
 
 void ShowOptions()
@@ -1336,37 +1632,8 @@ BYTE* CreateGroup(uintptr_t entry, uint32_t current, uint32_t target)
     return group;
 }
 
-bool EntryIsWaiting(uintptr_t entry)
-{
-    const LONG heroCount = AlBattle::g_heroCount;
-    if (heroCount <= 0) {
-        return true;
-    }
-
-    LONG count = heroCount;
-    if (count > 20) {
-        count = 20;
-    }
-
-    const uint32_t idLo = ReadGameU32(entry);
-    const uint32_t idHi = ReadGameU32(entry + 0x04);
-    for (LONG i = 0; i < count; ++i) {
-        const AlBattle::HeroEntry& hero = AlBattle::g_heroTable[i];
-        if (hero.ready == 1 && hero.uuid0 == idLo && hero.uuid4 == idHi) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
 bool CanDashFromCurrent(uint32_t current)
 {
-    const LONG lastCity = AlBattle::g_lastCity;
-    if (lastCity != 0 && static_cast<uint32_t>(lastCity) != current) {
-        return true;
-    }
-
     return AlBattle::HasRushAdvantage();
 }
 
@@ -1460,20 +1727,22 @@ void BuildGroups()
         if (state != 2 || subState != 3) {
             continue;
         }
-
-        if (!EntryIsWaiting(entry)) {
-            continue;
-        }
-
         InterlockedExchange(&g_hasWaiting, 1);
 
         uint32_t current = 0;
         uint32_t target = 0;
         if (!GetTarget(entry, current, target)) {
+            WriteDashDiag(kDiagTargetMissing, current, target);
             continue;
         }
 
-        if (!CanDashFromCurrent(current)) {
+        const LONG lastCity = AlBattle::g_lastCity;
+        if (lastCity != 0 && static_cast<uint32_t>(lastCity) != current) {
+            WriteDashDiag(kDiagWrongCity, current, target);
+        }
+
+        if (!AlBattle::HasRushAdvantage()) {
+            WriteDashDiag(kDiagCountNoRush, current, target);
             InterlockedExchange(&g_waitingNoRush, 1);
             continue;
         }
@@ -1484,6 +1753,7 @@ void BuildGroups()
         }
         if (group) {
             AddPayload(group, entry);
+            WriteDashDiag(kDiagGroupCreated, current, target);
         }
     }
 
@@ -1545,6 +1815,7 @@ void Send1483(BYTE* group)
     destination[3] = static_cast<BYTE>(ReadGroupU32(group, 0x04));
 
     const uint32_t payloadLength = count * 8 + 10;
+    WriteDashDiag(kDiagSend1483, ReadGroupU32(group, 0x00), ReadGroupU32(group, 0x04));
     SendPacketWithEcx(ReadGroupU32(group, 0x0C), 0x1483, g_dashBuffer, payloadLength);
 
     InterlockedExchange(&g_nextTick, static_cast<LONG>(GetTickCount() + kFallbackCheckMs));
@@ -1571,7 +1842,10 @@ void Check1482(BYTE* group)
 
         const uint32_t ecxValue = ReadGroupU32(group, 0x0C);
         if (allEntriesStillCurrent && ecxValue != 0) {
+            WriteDashDiag(kDiagSend1482, current, ReadGroupU32(group, 0x04));
             SendPacketWithEcx(ecxValue, 0x1482, g_dashBuffer, count * 8 + 10);
+        } else {
+            WriteDashDiag(kDiagSkip1482, current, ReadGroupU32(group, 0x04));
         }
     }
 
@@ -1602,14 +1876,12 @@ void SendCurrentPhase()
     const uint32_t ecxValue = ReadGroupU32(group, 0x0C);
     switch (g_phase) {
     case 1:
+        WriteDashDiag(kDiagSend1467, ReadGroupU32(group, 0x00), ReadGroupU32(group, 0x04));
         SendPacketWithEcx(ecxValue, 0x1467, nullptr, 0);
-        SetNextPhase(2);
-        break;
-    case 2:
-        SendPacketWithEcx(ecxValue, 0x373F, nullptr, 0);
         SetNextPhase(3);
         break;
     case 3:
+        WriteDashDiag(kDiagSend31E6, ReadGroupU32(group, 0x00), ReadGroupU32(group, 0x04));
         SendPacketWithEcx(ecxValue, 0x31E6, nullptr, 0);
         SetNextPhase(4);
         break;
@@ -1662,18 +1934,22 @@ __declspec(noinline) void __stdcall DashTick()
         BuildGroups();
         if (g_groupCount == 0) {
             if (g_waitingNoRush == 1 || g_hasWaiting == 1) {
+                WriteDashDiag(kDiagAllowOriginalWaiting, 0, 0);
                 ResetDashState();
                 InterlockedExchange(&g_action, 1);
                 return;
             }
             if (g_hasMoveReady == 1) {
+                WriteDashDiag(kDiagAllowOriginalMove, 0, 0);
                 AllowOriginalThrottled();
                 return;
             }
             if (ReadGameU32(g_mainBase + 0x2303E8) != 0) {
+                WriteDashDiag(kDiagAllowOriginalMove, 0, 0);
                 AllowOriginalThrottled();
                 return;
             }
+            WriteDashDiag(kDiagBlockOriginal, 0, 0);
             InterlockedExchange(&g_action, 0);
             return;
         }
@@ -1712,11 +1988,14 @@ bool BuildGuardCode(uintptr_t base, CodeBuffer& code)
 bool BuildTimerCode(uintptr_t base, CodeBuffer& code)
 {
     const uint32_t phase = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_phase));
+    const uint32_t action = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_action));
     return AppendRel32Instruction(code, 0xE8, base + 0x351F0) &&
         AppendByte(code, 0x6A) && AppendByte(code, 0x00) &&
         AppendCmpDwordAbsImm8(code, phase, 0) &&
-        AppendJneShort(code, 0x0A) &&
-        AppendPushImm32(code, kIdleScanMs) &&
+        AppendJneShort(code, 0x13) &&
+        AppendCmpDwordAbsImm8(code, action, 0) &&
+        AppendJeShort(code, 0x0A) &&
+        AppendPushImm32(code, 0x4E20) &&
         AppendRel32Instruction(code, 0xE9, base + 0x403AF) &&
         AppendPushImm32(code, kPhaseGapMs) &&
         AppendRel32Instruction(code, 0xE9, base + 0x403AF);
@@ -1859,18 +2138,11 @@ void CalcLevelMax()
 
 void RefreshLog()
 {
-    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
-    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
-    if (refreshLog) {
-        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
-    }
+    GameLog::RefreshCurrent();
 }
 
 void WriteStatusLog()
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, ...);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-
     const LONG current = static_cast<LONG>(ReadGameU32(g_mainBase + 0x230970));
     const LONG allowed = g_allowedRoom;
     const LONG maxRoom = g_maxRoom;
@@ -1880,21 +2152,16 @@ void WriteStatusLog()
         if (current >= maxRoom) {
             message = kLogAtBest;
         }
-        printLog(g_mainBase + 0x230504, kLogFullFormat, g_level, current, allowed, maxRoom, nextRoom, allowed, message);
+        GameLog::Write(kLogFullFormat, g_level, current, allowed, maxRoom, nextRoom, allowed, message);
     } else {
         const wchar_t* message = current < maxRoom ? kLogGoMax : kLogAtMax;
-        printLog(g_mainBase + 0x230504, kLogFormat, g_level, current, allowed, maxRoom, message);
+        GameLog::Write(kLogFormat, g_level, current, allowed, maxRoom, message);
     }
-
-    RefreshLog();
 }
 
 void WriteActionLog()
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, ...);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, kLogActionFormat, g_blockRoom, g_blockSlot);
-    RefreshLog();
+    GameLog::Write(kLogActionFormat, g_blockRoom, g_blockSlot);
 }
 
 __declspec(noinline) void __stdcall MainHook()
@@ -2055,16 +2322,7 @@ void SendDailySignPacket(uint32_t opcode, const void* payload, uint32_t payloadL
 
 void WriteDailySignLog(const wchar_t* text)
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
-    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
-
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
-
-    printLog(g_mainBase + 0x230504, kDailySignLogFormat, text);
-    if (refreshLog) {
-        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
-    }
+    GameLog::Write(kDailySignLogFormat, text);
 }
 
 uint32_t BuildDailySignBonusPayload(uint32_t index)
@@ -2197,16 +2455,7 @@ void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
 
 void WriteLog(const wchar_t* text)
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
-    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
-
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
-
-    printLog(g_mainBase + 0x230504, kLogFormat, text);
-    if (refreshLog) {
-        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
-    }
+    GameLog::Write(kLogFormat, text);
 }
 
 void SendAction(BYTE action)
@@ -2306,27 +2555,17 @@ void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
 
 void RefreshLog()
 {
-    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
-    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
-    if (refreshLog) {
-        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
-    }
+    GameLog::RefreshCurrent();
 }
 
 void WriteRecvLog()
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, uint32_t);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, kRecvLogFormat, static_cast<uint32_t>(g_activity));
-    RefreshLog();
+    GameLog::Write(kRecvLogFormat, static_cast<uint32_t>(g_activity));
 }
 
 void WriteRewardLog()
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, uint32_t);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, kRewardLogFormat, static_cast<uint32_t>(g_rewardNextIndex));
-    RefreshLog();
+    GameLog::Write(kRewardLogFormat, static_cast<uint32_t>(g_rewardNextIndex));
 }
 
 void FindNextPattern(const BYTE* payload, uint32_t payloadLength)
@@ -2520,19 +2759,12 @@ void SendPacketWithEcx(uint32_t ecxValue, uint32_t opcode, const void* payload, 
 
 void RefreshLog()
 {
-    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
-    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
-    if (refreshLog) {
-        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
-    }
+    GameLog::RefreshCurrent();
 }
 
 void WriteLog(const wchar_t* text)
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
-    RefreshLog();
+    GameLog::Write(reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
 }
 
 void ResetState()
@@ -2668,27 +2900,17 @@ void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
 
 void RefreshLog()
 {
-    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
-    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
-    if (refreshLog) {
-        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
-    }
+    GameLog::RefreshCurrent();
 }
 
 void WriteBattleLog()
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, uint32_t);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, kLogBattleFormat, static_cast<uint32_t>(g_candidateStage));
-    RefreshLog();
+    GameLog::Write(kLogBattleFormat, static_cast<uint32_t>(g_candidateStage));
 }
 
 void WriteSweepLog()
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, uint32_t);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, kLogSweepFormat, 1);
-    RefreshLog();
+    GameLog::Write(kLogSweepFormat, 1);
 }
 
 void SendSweep()
@@ -2810,19 +3032,12 @@ void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
 
 void RefreshLog()
 {
-    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
-    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
-    if (refreshLog) {
-        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
-    }
+    GameLog::RefreshCurrent();
 }
 
 void WriteLog(const wchar_t* text)
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
-    RefreshLog();
+    GameLog::Write(reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
 }
 
 const wchar_t* SelectPromoLog()
@@ -3501,19 +3716,12 @@ void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
 
 void RefreshLog()
 {
-    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
-    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
-    if (refreshLog) {
-        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
-    }
+    GameLog::RefreshCurrent();
 }
 
 void WriteLog(const wchar_t* text)
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
-    RefreshLog();
+    GameLog::Write(reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
 }
 
 void SendTick()
@@ -3870,12 +4078,17 @@ const wchar_t kLogUnlimit[] = {
     0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x7121, 0x9650, 0x6311,
     0x6230, 0x0000
 };
-const wchar_t kLogTimeClosedFormat[] = {
-    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x5C1A, 0x672A, 0x958B,
-    0x653E, 0x0020, 0x0025, 0x0075, 0x5929, 0x0025, 0x0075, 0x5C0F,
-    0x6642, 0x0025, 0x0075, 0x5206, 0x9418, 0x0000
+const wchar_t kLogTimeOpenFormat[] = {
+    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x5269, 0x9918, 0x958B,
+    0x653E, 0x6642, 0x9593, 0x0020, 0x0025, 0x0075, 0x5929, 0x0025,
+    0x0075, 0x5C0F, 0x6642, 0x0025, 0x0075, 0x5206, 0x9418, 0x0000
 };
-
+const wchar_t kLogTimeClosedFormat[] = {
+    0x8ECD, 0x5718, 0x526F, 0x672C, 0x0020, 0x672A, 0x958B, 0x653E,
+    0x0020, 0x5269, 0x9918, 0x6642, 0x9593, 0x0020, 0x0025, 0x0075,
+    0x5929, 0x0025, 0x0075, 0x5C0F, 0x6642, 0x0025, 0x0075, 0x5206,
+    0x9418, 0x0000
+};
 uint16_t ReadLe16(const BYTE* data)
 {
     return static_cast<uint16_t>(data[0] | (static_cast<uint16_t>(data[1]) << 8));
@@ -3916,11 +4129,7 @@ void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
 
 void RefreshLog()
 {
-    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
-    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
-    if (refreshLog) {
-        refreshLog(ReadGameU32(g_mainBase + 0x2300A4), ReadGameU32(g_mainBase + 0x2304D8), 0, 0);
-    }
+    GameLog::RefreshCurrent();
 }
 
 void WriteDungeonLog(const wchar_t* format, LONG index)
@@ -3929,41 +4138,38 @@ void WriteDungeonLog(const wchar_t* format, LONG index)
         return;
     }
 
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, format, kDungeonNames[index]);
-    RefreshLog();
+    GameLog::Write(format, kDungeonNames[index]);
 }
 
 void WriteJoinLog()
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), kLogJoin);
-    RefreshLog();
+    GameLog::Write(reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), kLogJoin);
 }
 
 void WriteRawLog(const wchar_t* text)
 {
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, const wchar_t*);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
-    RefreshLog();
+    GameLog::Write(reinterpret_cast<const wchar_t*>(g_mainBase + 0x1FE56C), text);
 }
 
-void WriteTimeClosedLog(uint32_t leftSeconds)
+void WriteTimeLog(const wchar_t* format, uint32_t leftSeconds)
 {
     const uint32_t roundedMinutes = (leftSeconds + 59) / 60;
     const uint32_t days = roundedMinutes / 1440;
     const uint32_t hours = (roundedMinutes % 1440) / 60;
     const uint32_t minutes = roundedMinutes % 60;
 
-    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, uint32_t, uint32_t, uint32_t);
-    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
-    printLog(g_mainBase + 0x230504, kLogTimeClosedFormat, days, hours, minutes);
-    RefreshLog();
+    GameLog::Write(format, days, hours, minutes);
 }
 
+void WriteTimeOpenLog(uint32_t leftSeconds)
+{
+    WriteTimeLog(kLogTimeOpenFormat, leftSeconds);
+}
+
+void WriteTimeClosedLog(uint32_t leftSeconds)
+{
+    WriteTimeLog(kLogTimeClosedFormat, leftSeconds);
+}
 void PutIdPayload(BYTE* buffer, uint16_t id)
 {
     buffer[0] = 0;
@@ -4086,8 +4292,12 @@ void ResetState()
     InterlockedExchange(&g_unlimitPassedOnce, 0);
     InterlockedExchange(&g_battleMode, 0);
     InterlockedExchange(&g_timeBlocked, 0);
+    InterlockedExchange(&g_timeWaitPassed, 0);
+    InterlockedExchange(&g_timeOpenLogged, 0);
     InterlockedExchange(&g_activityState, 0);
     InterlockedExchange(&g_leftTime, 0);
+    InterlockedExchange(&g_helpTrackId, 0);
+    InterlockedExchange(&g_helpTrackCount, 0);
 }
 
 void Finish()
@@ -4235,22 +4445,30 @@ bool TryApply42A1TimeBlock(const BYTE* payload, uint32_t payloadLength)
     uint32_t leftSeconds = ReadBe32(cursor);
     InterlockedExchange(&g_activityState, static_cast<LONG>(activityState));
     InterlockedExchange(&g_leftTime, static_cast<LONG>(leftSeconds));
-    if (leftSeconds == 0) {
+
+    if (activityState == 0) {
+        InterlockedExchange(&g_timeWaitPassed, 0);
+        InterlockedExchange(&g_timeBlocked, 0);
+        if (g_timeOpenLogged != 1) {
+            InterlockedExchange(&g_timeOpenLogged, 1);
+            WriteTimeOpenLog(leftSeconds);
+        }
         return false;
     }
 
+    InterlockedExchange(&g_timeOpenLogged, 0);
     if (leftSeconds > kMaxClosedWaitSeconds) {
         leftSeconds = kMaxClosedWaitSeconds;
     }
 
-    const DWORD waitMs = (leftSeconds + 1) * 1000;
+    const DWORD waitMs = leftSeconds == 0 ? kIdleIntervalMs : (leftSeconds + 1) * 1000;
     InterlockedExchange(&g_nextTick, static_cast<LONG>(GetGameTick() + waitMs));
     InterlockedExchange(&g_state, 0);
     InterlockedExchange(&g_timeBlocked, 1);
+    InterlockedExchange(&g_timeWaitPassed, 1);
     WriteTimeClosedLog(leftSeconds);
     return true;
 }
-
 void Handle42A1(const BYTE* payload, uint32_t payloadLength)
 {
     if (g_state != 1 || payloadLength < 0x0D) {
@@ -4482,6 +4700,7 @@ void ParseTeams(const BYTE* payload, uint32_t payloadLength)
     InterlockedExchange(&g_peopleCount, 0);
     std::memset(g_teamIds, 0, sizeof(g_teamIds));
     std::memset(g_teamDungeonIds, 0, sizeof(g_teamDungeonIds));
+    std::memset(g_teamOffsets, 0, sizeof(g_teamOffsets));
     std::memset(g_teamPeople, 0, sizeof(g_teamPeople));
     if (payloadLength < 2) {
         InterlockedExchange(&g_payloadTeamCount, 0);
@@ -4500,6 +4719,7 @@ void ParseTeams(const BYTE* payload, uint32_t payloadLength)
         const LONG index = g_teamCount;
         g_teamIds[index] = ReadLe16(payload + offset - 6);
         g_teamDungeonIds[index] = ReadLe16(payload + offset - 2);
+        g_teamOffsets[index] = offset;
         InterlockedExchange(&g_teamCount, index + 1);
     }
 
@@ -4511,6 +4731,35 @@ void ParseTeams(const BYTE* payload, uint32_t payloadLength)
         g_teamPeople[index] = payload[offset - 5];
         InterlockedExchange(&g_peopleCount, index + 1);
     }
+}
+
+BYTE FindPeopleNearTeam(const BYTE* payload, uint32_t payloadLength, LONG teamIndex)
+{
+    if (!payload || teamIndex < 0 || teamIndex >= static_cast<LONG>(kMaxTeams)) {
+        return 0;
+    }
+
+    uint32_t offset = g_teamOffsets[teamIndex];
+    if (offset >= payloadLength || offset + 4 > payloadLength) {
+        return 0;
+    }
+
+    uint32_t end = offset + 0x80;
+    if (end + 4 > payloadLength) {
+        end = payloadLength >= 4 ? payloadLength - 4 : 0;
+    }
+
+    for (uint32_t cursor = offset; cursor <= end; ++cursor) {
+        if (cursor != offset && cursor + 2 <= payloadLength && ReadLe16(payload + cursor) == 0x0C00) {
+            break;
+        }
+        if (cursor >= 5 && cursor + 4 <= payloadLength && ReadLe32(payload + cursor) == 0x7D7B0200) {
+            g_teamPeople[teamIndex] = payload[cursor - 5];
+            return g_teamPeople[teamIndex];
+        }
+    }
+
+    return 0;
 }
 
 void Handle42A4(const BYTE* payload, uint32_t payloadLength)
@@ -4531,7 +4780,8 @@ void Handle42A4(const BYTE* payload, uint32_t payloadLength)
 
         const LONG count = g_teamCount < static_cast<LONG>(kMaxTeams) ? g_teamCount : static_cast<LONG>(kMaxTeams);
         for (LONG i = 0; i < count; ++i) {
-            if (g_teamDungeonIds[i] != static_cast<uint16_t>(g_currentId) || g_teamPeople[i] != 1) {
+            const BYTE people = g_teamPeople[i] == 1 ? 1 : FindPeopleNearTeam(payload, payloadLength, i);
+            if (g_teamDungeonIds[i] != static_cast<uint16_t>(g_currentId) || people != 1) {
                 continue;
             }
             InterlockedExchange(&g_battleMode, 3);
@@ -4551,23 +4801,59 @@ void Handle42A4(const BYTE* payload, uint32_t payloadLength)
     }
 
     if (g_maxSoloIndex < 0 || g_payloadTeamCount == 0) {
+        InterlockedExchange(&g_helpTrackId, 0);
+        InterlockedExchange(&g_helpTrackCount, 0);
         return;
     }
 
     const LONG count = g_teamCount < static_cast<LONG>(kMaxTeams) ? g_teamCount : static_cast<LONG>(kMaxTeams);
+    if (g_helpTrackCount > 0) {
+        bool keepTrackedRoom = false;
+        for (LONG i = 0; i < count; ++i) {
+            if (g_teamIds[i] != static_cast<uint16_t>(g_helpTrackId)) {
+                continue;
+            }
+
+            const int index = GetIndexById(g_teamDungeonIds[i]);
+            if (index >= 0 && index <= g_maxSoloIndex && g_teamPeople[i] < 3) {
+                keepTrackedRoom = true;
+                const LONG nextCount = g_helpTrackCount + 1;
+                InterlockedExchange(&g_helpTrackCount, nextCount);
+                if (nextCount < 6) {
+                    return;
+                }
+
+                InterlockedExchange(&g_helpTrackId, 0);
+                InterlockedExchange(&g_helpTrackCount, 0);
+                InterlockedExchange(&g_battleMode, 3);
+                InterlockedExchange(&g_teamId, g_teamIds[i]);
+                Send4296();
+                Send4293();
+                WriteJoinLog();
+                Finish();
+                return;
+            }
+            break;
+        }
+
+        if (!keepTrackedRoom) {
+            InterlockedExchange(&g_helpTrackId, 0);
+            InterlockedExchange(&g_helpTrackCount, 0);
+        }
+    }
+
     for (LONG i = 0; i < count; ++i) {
         const int index = GetIndexById(g_teamDungeonIds[i]);
         if (index < 0 || index > g_maxSoloIndex || g_teamPeople[i] >= 3) {
             continue;
         }
-        InterlockedExchange(&g_battleMode, 3);
-        InterlockedExchange(&g_teamId, g_teamIds[i]);
-        Send4296();
-        Send4293();
-        WriteJoinLog();
-        Finish();
+        InterlockedExchange(&g_helpTrackId, g_teamIds[i]);
+        InterlockedExchange(&g_helpTrackCount, 1);
         return;
     }
+
+    InterlockedExchange(&g_helpTrackId, 0);
+    InterlockedExchange(&g_helpTrackCount, 0);
 }
 
 void Handle42A7(const BYTE* payload, uint32_t payloadLength)
@@ -4649,7 +4935,17 @@ void Handle1464(const BYTE* payload, uint32_t payloadLength)
         return;
     }
 
-    if (g_state != 5 || g_waitBattleResult != 1 || g_armyBattleConfirmed != 1) {
+    if (g_state != 5 || g_waitBattleResult != 1) {
+        return;
+    }
+    if (g_armyBattleConfirmed != 1) {
+        if (g_battleMode != 1) {
+            return;
+        }
+        InterlockedExchange(&g_armyBattleConfirmed, 1);
+        InterlockedExchange(&g_expectedWinValue, 0);
+    }
+    if (g_armyBattleConfirmed != 1) {
         return;
     }
     if (g_verifyMode != 1) {
@@ -4714,6 +5010,9 @@ __declspec(noinline) void __stdcall Tick()
 
     const DWORD now = GetGameTick();
     if (g_waitBattleResult == 1) {
+        if (now - static_cast<DWORD>(g_waitTick) >= kBattleResultTimeoutMs) {
+            ClearBattleAndFinish();
+        }
         return;
     }
 
@@ -4791,8 +5090,11 @@ __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* pa
     Xyfp::HandleRecvPacket(opcode, payload, payloadLength);
     PersonalTask::HandleRecvPacket(opcode, payload, payloadLength);
     TaskDispatch::HandleRecvPacket(opcode, payload, payloadLength);
+    ExpeditionGuard::HandleRecvPacket(opcode);
+    const BYTE* const legionPayload = payload;
+    const uint32_t legionPayloadLength = payloadLength;
     AlBattle::HandleRecvPacket(opcode, payload, payloadLength);
-    LegionDungeon::HandleRecvPacket(opcode, payload, payloadLength);
+    LegionDungeon::HandleRecvPacket(opcode, legionPayload, legionPayloadLength);
 }
 
 bool BuildCode(uintptr_t base, CodeBuffer& code)
@@ -4981,6 +5283,8 @@ DWORD WINAPI MainThread(LPVOID)
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash main");
     const bool legionDungeonOk = sharedRouterOk &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Legion Dungeon");
+    const bool expeditionGuardOk = sharedRouterOk &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Expedition guard");
     const bool lgfOk = IsPatchApplied(results, kPatchCount, "LGF refresh interval") &&
         IsPatchApplied(results, kPatchCount, "LGF suppress action log") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "LGF status log") &&
@@ -5008,6 +5312,7 @@ DWORD WINAPI MainThread(LPVOID)
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x500B\x4EBA\x4EFB\x52D9", personalTaskOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x4EFB\x52D9\x6D3E\x9063", taskDispatchOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x8ECD\x5718\x526F\x672C", legionDungeonOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x500B\x4EBA\x5F81\x6230", expeditionGuardOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7DF4\x529F\x623F", lgfOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5FEB\x901F\x6BCF\x65E5\x6230\x9B25", fastDailyBattleOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x81EA\x52D5\x7A81\x9032", autoLureDashOk);
@@ -5035,3 +5340,7 @@ extern "C" __declspec(dllexport)
 void InitPatch()
 {
 }
+
+
+
+

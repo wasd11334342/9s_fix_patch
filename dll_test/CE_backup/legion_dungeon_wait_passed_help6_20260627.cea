@@ -1,0 +1,1697 @@
+[ENABLE]
+// Codex Legion Dungeon rewrite FINAL wait-passed
+// Game LOG only for real actions.
+// Time gate waits left_time+1s once only when activityState says closed.
+
+define(gf_entry_aob,Online.exe+3B2E0)
+alloc(gf_entry_newmem,2048,gf_entry_aob)
+alloc(gf_recv_newmem,8192)
+alloc(gf_data,8192)
+globalalloc(gf_router_callback,16)
+define(gf_router_opcode,gf_router_callback+4)
+define(gf_router_payload,gf_router_callback+8)
+define(gf_router_len,gf_router_callback+C)
+
+label(gf_tick)
+label(gf_tick_on)
+label(gf_tick_off)
+label(gf_tick_idle)
+label(gf_tick_wait)
+label(gf_tick_done)
+label(gf_router_entry)
+label(gf_recv_parse)
+label(gf_parse_42A1)
+label(gf_42A1_time_return)
+label(gf_parse_42A1_time)
+label(gf_42A1_time_loop)
+label(gf_42A1_time_after_loop)
+label(gf_42A1_time_read_left)
+label(gf_42A1_time_closed_check)
+label(gf_42A1_time_set_next)
+label(gf_42A1_time_done)
+label(gf_42A1_time_fail)
+label(gf_log_time_closed)
+label(gf_append_wstr)
+label(gf_append_wstr_loop)
+label(gf_append_wstr_done)
+label(gf_append_dec)
+label(gf_append_dec_build)
+label(gf_append_dec_loop)
+label(gf_append_dec_rev)
+label(gf_append_dec_done)
+label(gf_42A1_precheck_loop)
+label(gf_42A1_precheck_match)
+label(gf_42A1_precheck_status)
+label(gf_42A1_precheck_next)
+label(gf_42A1_precheck_ok)
+label(gf_42A1_loop)
+label(gf_42A1_match)
+label(gf_42A1_next)
+label(gf_42A1_skip)
+label(gf_42A1_06)
+label(gf_42A1_06_check)
+label(gf_42A1_03)
+label(gf_42A1_03_team)
+label(gf_42A1_03_same)
+label(gf_42A1_04)
+label(gf_42A1_05)
+label(gf_42A1_05_reward)
+label(gf_42A1_01)
+label(gf_42A1_02)
+label(gf_42A1_08)
+label(gf_42A1_stop)
+label(gf_42A1_status08_block)
+label(gf_42A1_done)
+label(gf_parse_42A2)
+label(gf_42A2_member_loop)
+label(gf_42A2_member_done)
+label(gf_42A2_full)
+label(gf_42A2_done)
+label(gf_parse_42A4)
+label(gf_parse_42A7)
+label(gf_42A7_loop)
+label(gf_42A7_next)
+label(gf_42A7_battle)
+label(gf_42A7_done)
+label(gf_team_scan)
+label(gf_team_loop)
+label(gf_team_match)
+label(gf_people_start)
+label(gf_people_loop)
+label(gf_people_match)
+label(gf_42A4_decide)
+label(gf_need_current)
+label(gf_need_loop)
+label(gf_need_next)
+label(gf_create_team)
+label(gf_join_current)
+label(gf_help)
+label(gf_help_has_team)
+label(gf_help_loop)
+label(gf_help_loop_next)
+label(gf_help_track_existing)
+label(gf_help_track_loop)
+label(gf_help_track_next)
+label(gf_help_track_match)
+label(gf_help_pick_new)
+label(gf_help_set_target)
+label(gf_help_no_match)
+label(gf_join_help)
+label(gf_42A4_len_short)
+label(gf_42A4_done)
+label(gf_parse_5216)
+label(gf_5216_scan_loop)
+label(gf_5216_army_match)
+label(gf_5216_char_loop)
+label(gf_5216_char_next)
+label(gf_5216_char_defense)
+label(gf_5216_done)
+label(gf_parse_5220)
+label(gf_5220_win)
+label(gf_5220_loss)
+label(gf_5220_loss_no_index)
+label(gf_5220_clear)
+label(gf_5220_done)
+label(gf_finish)
+label(gf_start_solo)
+label(gf_update_max_solo)
+label(gf_update_max_solo_done)
+label(gf_get_index_by_id)
+label(gf_get_index_by_id_loop)
+label(gf_get_index_by_id_found)
+label(gf_get_index_by_id_not_found)
+label(gf_send_4293)
+label(gf_send_4294)
+label(gf_send_42A6)
+label(gf_send_42A8)
+label(gf_send_37A4)
+label(gf_send_4297)
+label(gf_send_429E)
+label(gf_send_429E_group)
+label(gf_send_429F)
+label(gf_send_4296)
+label(gf_send_429A)
+label(gf_copy_order_string)
+label(gf_copy_order_string_loop)
+label(gf_skip_utf)
+label(gf_skip_utf_fail)
+label(gf_get_id)
+label(gf_log)
+label(gf_state)
+label(gf_current_id)
+label(gf_verify_id)
+label(gf_verify_index)
+label(gf_verify_mode)
+label(gf_verify_failed_mask)
+label(gf_wait_battle_result)
+label(gf_army_battle_confirmed)
+label(gf_expected_win_value)
+label(gf_solo_verify_blocked)
+label(gf_max_solo_index)
+label(gf_pending_id)
+label(gf_team_id)
+label(gf_help_track_id)
+label(gf_help_track_count)
+label(gf_log_index)
+label(gf_time_blocked)
+label(gf_time_wait_passed)
+label(gf_time_open_logged)
+label(gf_activity_state)
+label(gf_left_time)
+label(gf_time_days)
+label(gf_time_hours)
+label(gf_time_mins)
+label(gf_num_tmp)
+label(log_time_buf)
+label(log_time_prefix)
+label(log_time_day)
+label(log_time_hour)
+label(log_time_min)
+label(gf_next_tick)
+label(gf_wait_tick)
+label(gf_opcode)
+label(gf_payload)
+label(gf_len)
+label(gf_team_count)
+label(gf_people_count)
+label(gf_payload_team_count)
+label(gf_team_order_sent)
+label(gf_unlimit_passed_once)
+label(gf_battle_mode)
+label(gf_unlimit_count)
+label(gf_unlimit_id)
+label(gf_member_ptrs)
+label(gf_member_lens)
+label(gf_ids)
+label(gf_team_ids)
+label(gf_team_dungeon_ids)
+label(gf_team_people)
+label(buf_zero4)
+label(buf_id4)
+label(buf_id6)
+label(buf_team4)
+label(buf_order)
+label(log_join)
+label(log_single_table)
+label(log_reward_table)
+label(log_create_table)
+label(log_group_table)
+label(log_max_table)
+label(log_fail_table)
+label(log_unlimit)
+
+gf_router_callback:
+  dd gf_router_entry
+  dd 0
+  dd 0
+  dd 0
+
+gf_entry_newmem:
+  pushfd
+  pushad
+  call gf_tick
+  popad
+  popfd
+  ret
+
+gf_tick:
+  cmp dword ptr [Online.exe+2302C0],0
+  jne gf_tick_on
+  jmp gf_tick_off
+
+gf_tick_off:
+  mov dword ptr [gf_state],0
+  mov dword ptr [gf_current_id],0
+  mov dword ptr [gf_verify_id],0
+  mov dword ptr [gf_verify_index],FFFFFFFF
+  mov dword ptr [gf_verify_mode],0
+  mov dword ptr [gf_verify_failed_mask],0
+  mov dword ptr [gf_wait_battle_result],0
+  mov dword ptr [gf_army_battle_confirmed],0
+  mov dword ptr [gf_expected_win_value],0
+  mov dword ptr [gf_solo_verify_blocked],0
+  mov dword ptr [gf_max_solo_index],FFFFFFFF
+  mov dword ptr [gf_unlimit_passed_once],0
+  mov dword ptr [gf_battle_mode],0
+  mov dword ptr [gf_time_wait_passed],0
+  mov dword ptr [gf_time_open_logged],0
+  mov dword ptr [gf_help_track_id],0
+  mov dword ptr [gf_help_track_count],0
+  ret
+
+gf_tick_on:
+  call dword ptr [Online.exe+1C43DC]
+  mov ebx,eax
+  cmp dword ptr [gf_wait_battle_result],1
+  je gf_tick_done
+  cmp dword ptr [gf_state],0
+  je gf_tick_idle
+  cmp dword ptr [gf_state],5
+  je gf_tick_done
+
+gf_tick_wait:
+  sub eax,[gf_wait_tick]
+  cmp eax,2710
+  jb gf_tick_done
+  mov dword ptr [gf_state],0
+
+gf_tick_done:
+  ret
+
+gf_tick_idle:
+  cmp eax,[gf_next_tick]
+  jb gf_tick_done
+  call gf_send_4293
+  mov dword ptr [gf_state],1
+  mov [gf_wait_tick],ebx
+  add ebx,0BB8
+  mov [gf_next_tick],ebx
+  ret
+
+gf_recv_newmem:
+gf_router_entry:
+  pushfd
+  pushad
+  mov eax,[gf_router_opcode]
+  mov [gf_opcode],eax
+  mov eax,[gf_router_payload]
+  mov [gf_payload],eax
+  mov eax,[gf_router_len]
+  mov [gf_len],eax
+  call gf_recv_parse
+  popad
+  popfd
+  ret
+
+gf_recv_parse:
+  cmp dword ptr [Online.exe+2302C0],0
+  je gf_42A4_done
+  mov eax,[gf_opcode]
+  cmp ax,42A1
+  je gf_parse_42A1
+  cmp ax,42A2
+  je gf_parse_42A2
+  cmp ax,42A4
+  je gf_parse_42A4
+  cmp ax,42A7
+  je gf_parse_42A7
+  cmp ax,1460
+  je gf_parse_5216
+  cmp ax,1464
+  je gf_parse_5220
+  ret
+
+gf_parse_42A1:
+  cmp dword ptr [gf_state],1
+  jne gf_42A4_done
+  mov esi,[gf_payload]
+  mov ecx,[gf_len]
+  cmp ecx,0D
+  jb gf_42A4_done
+  lea edi,[esi+ecx-4]
+  call gf_parse_42A1_time
+  cmp dword ptr [gf_time_blocked],1
+  je gf_42A1_time_return
+  xor ebx,ebx
+
+gf_42A1_precheck_loop:
+  cmp esi,edi
+  ja gf_42A1_precheck_ok
+  cmp dword ptr [esi],7D7B0200
+  je gf_42A1_precheck_match
+
+gf_42A1_precheck_next:
+  inc esi
+  jmp gf_42A1_precheck_loop
+
+gf_42A1_precheck_match:
+  cmp ebx,9
+  jae gf_42A1_precheck_ok
+  cmp ebx,8
+  jne gf_42A1_precheck_status
+  cmp dword ptr [esi+4],0
+  jne gf_42A1_status08_block
+
+gf_42A1_precheck_status:
+  cmp byte ptr [esi-9],08
+  je gf_42A1_08
+  inc ebx
+  inc esi
+  jmp gf_42A1_precheck_loop
+
+gf_42A1_precheck_ok:
+  mov esi,[gf_payload]
+  mov ecx,[gf_len]
+  lea edi,[esi+ecx-4]
+  xor ebx,ebx
+
+gf_42A1_loop:
+  cmp esi,edi
+  ja gf_42A1_done
+  cmp dword ptr [esi],7D7B0200
+  je gf_42A1_match
+
+gf_42A1_next:
+  inc esi
+  jmp gf_42A1_loop
+
+gf_42A1_match:
+  cmp ebx,9
+  jae gf_42A1_done
+  mov al,[esi-9]
+  cmp al,06
+  je gf_42A1_06
+  cmp al,07
+  je gf_42A1_stop
+  cmp al,08
+  je gf_42A1_08
+  cmp al,03
+  je gf_42A1_03
+  cmp al,04
+  je gf_42A1_04
+  cmp al,05
+  je gf_42A1_05
+  cmp al,02
+  je gf_42A1_02
+  cmp al,01
+  je gf_42A1_01
+
+gf_42A1_skip:
+  inc ebx
+  inc esi
+  jmp gf_42A1_loop
+
+gf_42A1_06:
+  mov [gf_log_index],ebx
+  mov ecx,ebx
+  call gf_get_id
+  mov [gf_pending_id],eax
+  cmp ax,word ptr [gf_verify_id]
+  jne gf_42A1_06_check
+  cmp dword ptr [gf_wait_battle_result],1
+  je gf_42A1_skip
+  cmp dword ptr [gf_verify_mode],1
+  je gf_42A1_skip
+  call gf_update_max_solo
+  jmp gf_42A1_skip
+
+gf_42A1_06_check:
+  cmp dword ptr [gf_wait_battle_result],1
+  je gf_42A1_skip
+  cmp dword ptr [gf_solo_verify_blocked],1
+  je gf_42A1_skip
+  mov ecx,[gf_log_index]
+  mov eax,1
+  shl eax,cl
+  test dword ptr [gf_verify_failed_mask],eax
+  jne gf_42A1_skip
+  mov eax,[gf_log_index]
+  cmp eax,[gf_max_solo_index]
+  jle gf_42A1_skip
+  mov dword ptr [gf_verify_mode],1
+  call gf_start_solo
+  ret
+
+gf_42A1_03:
+  mov [gf_log_index],ebx
+  mov ecx,ebx
+  call gf_get_id
+  mov [gf_pending_id],eax
+  cmp dword ptr [gf_wait_battle_result],1
+  je gf_42A1_skip
+  cmp dword ptr [gf_solo_verify_blocked],1
+  je gf_42A1_03_team
+  mov ecx,[gf_log_index]
+  mov edx,1
+  shl edx,cl
+  test dword ptr [gf_verify_failed_mask],edx
+  jne gf_42A1_skip
+  cmp ax,word ptr [gf_current_id]
+  je gf_42A1_03_same
+  mov dword ptr [gf_verify_mode],1
+  call gf_start_solo
+  ret
+
+gf_42A1_03_team:
+  mov word ptr [gf_current_id],ax
+  call gf_send_4294
+  mov dword ptr [gf_state],3
+  call dword ptr [Online.exe+1C43DC]
+  mov [gf_wait_tick],eax
+  ret
+
+gf_42A1_03_same:
+  cmp dword ptr [gf_wait_battle_result],1
+  je gf_42A1_skip
+  cmp dword ptr [gf_verify_mode],1
+  je gf_42A1_skip
+  call gf_send_4294
+  mov dword ptr [gf_state],3
+  call dword ptr [Online.exe+1C43DC]
+  mov [gf_wait_tick],eax
+  ret
+
+gf_42A1_04:
+  mov [gf_log_index],ebx
+  mov ecx,ebx
+  call gf_get_id
+  mov [gf_pending_id],eax
+  call gf_send_4294
+  mov dword ptr [gf_state],2
+  mov dword ptr [gf_team_order_sent],0
+  call dword ptr [Online.exe+1C43DC]
+  mov [gf_wait_tick],eax
+  ret
+
+gf_42A1_05:
+  mov [gf_log_index],ebx
+  mov ecx,ebx
+  call gf_get_id
+  mov [gf_pending_id],eax
+  cmp ax,word ptr [gf_verify_id]
+  jne gf_42A1_05_reward
+  call gf_update_max_solo
+
+gf_42A1_05_reward:
+  mov dword ptr [gf_battle_mode],0
+  call gf_send_429F
+  mov ecx,[gf_log_index]
+  mov eax,[log_reward_table+ecx*4]
+  call gf_log
+  jmp gf_finish
+
+gf_42A1_01:
+  cmp dword ptr [gf_unlimit_passed_once],1
+  jne gf_42A1_skip
+  cmp dword ptr [gf_max_solo_index],0
+  jl gf_42A1_stop
+  call gf_send_4294
+  mov dword ptr [gf_state],4
+  call dword ptr [Online.exe+1C43DC]
+  mov [gf_wait_tick],eax
+  ret
+
+gf_42A1_02:
+  cmp dword ptr [gf_unlimit_passed_once],1
+  je gf_42A1_01
+  jmp gf_42A1_done
+
+gf_42A1_08:
+  cmp dword ptr [gf_battle_mode],2
+  je gf_42A1_stop
+  cmp dword ptr [gf_battle_mode],3
+  je gf_42A1_stop
+  mov [gf_log_index],ebx
+  mov ecx,ebx
+  call gf_get_id
+  mov [gf_pending_id],eax
+  mov word ptr [gf_current_id],ax
+  mov word ptr [gf_verify_id],ax
+  mov [gf_verify_index],ebx
+  mov dword ptr [gf_verify_mode],1
+  mov dword ptr [gf_wait_battle_result],1
+  mov dword ptr [gf_army_battle_confirmed],1
+  mov dword ptr [gf_expected_win_value],0
+  mov dword ptr [gf_battle_mode],1
+  mov dword ptr [gf_state],5
+  call gf_send_37A4
+  call dword ptr [Online.exe+1C43DC]
+  mov [gf_wait_tick],eax
+  ret
+
+gf_42A1_stop:
+  jmp gf_finish
+
+gf_42A1_status08_block:
+  jmp gf_finish
+
+gf_42A1_done:
+  cmp dword ptr [gf_unlimit_passed_once],1
+  je gf_finish
+  call gf_send_42A6
+  mov dword ptr [gf_state],6
+  call dword ptr [Online.exe+1C43DC]
+  mov [gf_wait_tick],eax
+  ret
+
+
+
+gf_42A1_time_return:
+  ret
+
+gf_parse_42A1_time:
+  mov dword ptr [gf_time_blocked],0
+  pushad
+  mov esi,[gf_payload]
+  mov eax,[gf_len]
+  cmp eax,0A
+  jb gf_42A1_time_fail
+  lea edi,[esi+eax]
+  lea eax,[esi+02]
+  cmp eax,edi
+  ja gf_42A1_time_fail
+  movzx ecx,byte ptr [esi]
+  shl ecx,08
+  movzx edx,byte ptr [esi+1]
+  add ecx,edx
+  add esi,02
+  xor ebx,ebx
+
+gf_42A1_time_loop:
+  cmp ebx,ecx
+  jae gf_42A1_time_after_loop
+  cmp ebx,20
+  jae gf_42A1_time_fail
+  lea eax,[esi+04]
+  cmp eax,edi
+  ja gf_42A1_time_fail
+  add esi,04
+  call gf_skip_utf
+  test eax,eax
+  je gf_42A1_time_fail
+  lea eax,[esi+10]
+  cmp eax,edi
+  ja gf_42A1_time_fail
+  add esi,10
+  call gf_skip_utf
+  test eax,eax
+  je gf_42A1_time_fail
+  inc ebx
+  jmp gf_42A1_time_loop
+
+gf_42A1_time_after_loop:
+  lea eax,[esi+08]
+  cmp eax,edi
+  ja gf_42A1_time_fail
+  movzx eax,byte ptr [esi]
+  shl eax,08
+  movzx edx,byte ptr [esi+1]
+  add eax,edx
+  shl eax,08
+  movzx edx,byte ptr [esi+2]
+  add eax,edx
+  shl eax,08
+  movzx edx,byte ptr [esi+3]
+  add eax,edx
+  mov [gf_activity_state],eax
+  add esi,04
+
+gf_42A1_time_read_left:
+  movzx eax,byte ptr [esi]
+  shl eax,08
+  movzx edx,byte ptr [esi+1]
+  add eax,edx
+  shl eax,08
+  movzx edx,byte ptr [esi+2]
+  add eax,edx
+  shl eax,08
+  movzx edx,byte ptr [esi+3]
+  add eax,edx
+  mov [gf_left_time],eax
+  cmp dword ptr [gf_activity_state],0
+  jne gf_42A1_time_closed_check
+  cmp dword ptr [gf_time_open_logged],1
+  je gf_42A1_time_done
+  mov dword ptr [gf_time_open_logged],1
+  call gf_log_time_closed
+  jmp gf_42A1_time_done
+
+gf_42A1_time_closed_check:
+  test eax,eax
+  je gf_42A1_time_done
+  cmp dword ptr [gf_time_wait_passed],1
+  je gf_42A1_time_done
+
+gf_42A1_time_set_next:
+  inc eax
+  imul eax,eax,03E8
+  mov ebx,eax
+  call dword ptr [Online.exe+1C43DC]
+  add eax,ebx
+  mov [gf_next_tick],eax
+  mov dword ptr [gf_state],0
+  mov dword ptr [gf_time_blocked],1
+  mov dword ptr [gf_time_wait_passed],1
+  call gf_log_time_closed
+  jmp gf_42A1_time_done
+
+gf_42A1_time_fail:
+  mov dword ptr [gf_time_blocked],0
+
+gf_42A1_time_done:
+  popad
+  ret
+
+
+gf_parse_42A2:
+  cmp dword ptr [gf_state],2
+  jne gf_42A2_done
+  mov esi,[gf_payload]
+  mov eax,[gf_len]
+  cmp eax,1A
+  jb gf_42A2_done
+  lea edi,[esi+eax]
+  add esi,04
+  call gf_skip_utf
+  test eax,eax
+  je gf_42A2_done
+  lea eax,[esi+06]
+  cmp eax,edi
+  ja gf_42A2_done
+  add esi,04
+  movzx eax,byte ptr [esi]
+  shl eax,08
+  movzx edx,byte ptr [esi+1]
+  add eax,edx
+  add esi,02
+  cmp eax,03
+  jne gf_42A2_done
+  xor ebx,ebx
+
+gf_42A2_member_loop:
+  cmp ebx,03
+  jae gf_42A2_member_done
+  lea eax,[esi+02]
+  cmp eax,edi
+  ja gf_42A2_done
+  mov [gf_member_ptrs+ebx*4],esi
+  movzx eax,byte ptr [esi]
+  shl eax,08
+  movzx edx,byte ptr [esi+1]
+  add eax,edx
+  add eax,02
+  mov [gf_member_lens+ebx*4],eax
+  add esi,eax
+  cmp esi,edi
+  ja gf_42A2_done
+  call gf_skip_utf
+  test eax,eax
+  je gf_42A2_done
+  lea eax,[esi+0C]
+  cmp eax,edi
+  ja gf_42A2_done
+  add esi,0C
+  call gf_skip_utf
+  test eax,eax
+  je gf_42A2_done
+  inc ebx
+  jmp gf_42A2_member_loop
+
+gf_42A2_member_done:
+  cmp dword ptr [gf_team_order_sent],1
+  je gf_42A2_full
+  call gf_send_429A
+  mov dword ptr [gf_team_order_sent],1
+  ret
+
+gf_42A2_full:
+  mov dword ptr [gf_battle_mode],3
+  call gf_send_429E_group
+  mov ecx,[gf_log_index]
+  mov eax,[log_group_table+ecx*4]
+  call gf_log
+  jmp gf_finish
+
+gf_42A2_done:
+  ret
+
+gf_parse_42A7:
+  cmp dword ptr [gf_state],6
+  jne gf_42A7_done
+  mov esi,[gf_payload]
+  mov eax,[gf_len]
+  cmp eax,02
+  jb gf_42A7_done
+  lea edi,[esi+eax]
+  movzx eax,byte ptr [esi]
+  shl eax,08
+  movzx edx,byte ptr [esi+1]
+  add eax,edx
+  mov [gf_unlimit_count],eax
+  add esi,02
+  xor ebx,ebx
+
+gf_42A7_loop:
+  cmp ebx,[gf_unlimit_count]
+  jae gf_42A7_done
+  lea eax,[esi+04]
+  cmp eax,edi
+  ja gf_42A7_done
+  mov eax,[esi]
+  mov [gf_unlimit_id],eax
+  add esi,04
+  call gf_skip_utf
+  test eax,eax
+  je gf_42A7_done
+  lea eax,[esi+10]
+  cmp eax,edi
+  ja gf_42A7_done
+  add esi,04
+  cmp dword ptr [esi],04000000
+  je gf_42A7_battle
+  add esi,0C
+  call gf_skip_utf
+  test eax,eax
+  je gf_42A7_done
+
+gf_42A7_next:
+  inc ebx
+  jmp gf_42A7_loop
+
+gf_42A7_battle:
+  call gf_send_42A8
+  mov eax,log_unlimit
+  call gf_log
+  mov dword ptr [gf_unlimit_passed_once],1
+  mov dword ptr [gf_battle_mode],0
+  mov dword ptr [gf_state],0
+  mov dword ptr [gf_army_battle_confirmed],0
+  mov dword ptr [gf_expected_win_value],0
+  call dword ptr [Online.exe+1C43DC]
+  add eax,0BB8
+  mov [gf_next_tick],eax
+  ret
+
+gf_42A7_done:
+  ret
+
+gf_parse_42A4:
+  cmp dword ptr [gf_state],3
+  je gf_team_scan
+  cmp dword ptr [gf_state],4
+  je gf_team_scan
+  ret
+
+gf_team_scan:
+  mov dword ptr [gf_team_count],0
+  mov dword ptr [gf_people_count],0
+  mov esi,[gf_payload]
+  movzx eax,byte ptr [esi+1]
+  mov [gf_payload_team_count],eax
+  test eax,eax
+  je gf_42A4_decide
+  mov ecx,[gf_len]
+  cmp ecx,8
+  jb gf_42A4_len_short
+  lea edi,[esi+ecx-2]
+
+gf_team_loop:
+  cmp esi,edi
+  ja gf_people_start
+  cmp word ptr [esi],0C00
+  je gf_team_match
+  inc esi
+  jmp gf_team_loop
+
+gf_team_match:
+  mov eax,[gf_team_count]
+  cmp eax,10
+  jae gf_people_start
+  mov dx,word ptr [esi-6]
+  mov word ptr [gf_team_ids+eax*2],dx
+  mov dx,word ptr [esi-2]
+  mov word ptr [gf_team_dungeon_ids+eax*2],dx
+  inc dword ptr [gf_team_count]
+  inc esi
+  jmp gf_team_loop
+
+gf_people_start:
+  mov esi,[gf_payload]
+  mov ecx,[gf_len]
+  lea edi,[esi+ecx-4]
+
+gf_people_loop:
+  cmp esi,edi
+  ja gf_42A4_decide
+  cmp dword ptr [esi],7D7B0200
+  je gf_people_match
+  inc esi
+  jmp gf_people_loop
+
+gf_people_match:
+  mov eax,[gf_people_count]
+  cmp eax,10
+  jae gf_42A4_decide
+  mov dl,[esi-5]
+  mov [gf_team_people+eax],dl
+  inc dword ptr [gf_people_count]
+  inc esi
+  jmp gf_people_loop
+
+gf_42A4_decide:
+  cmp dword ptr [gf_state],3
+  je gf_need_current
+  cmp dword ptr [gf_state],4
+  je gf_help
+  jmp gf_42A4_done
+
+gf_need_current:
+  cmp dword ptr [gf_payload_team_count],0
+  je gf_create_team
+  xor ecx,ecx
+
+gf_need_loop:
+  cmp ecx,[gf_team_count]
+  jae gf_create_team
+  mov ax,word ptr [gf_current_id]
+  cmp word ptr [gf_team_dungeon_ids+ecx*2],ax
+  jne gf_need_next
+  cmp byte ptr [gf_team_people+ecx],01
+  je gf_join_current
+
+gf_need_next:
+  inc ecx
+  jmp gf_need_loop
+
+gf_create_team:
+  mov dword ptr [gf_battle_mode],3
+  call gf_send_4297
+  mov ecx,[gf_log_index]
+  mov eax,[log_create_table+ecx*4]
+  call gf_log
+  jmp gf_finish
+
+gf_join_current:
+  mov dword ptr [gf_battle_mode],3
+  mov ax,word ptr [gf_team_ids+ecx*2]
+  mov word ptr [gf_team_id],ax
+  call gf_send_4296
+  call gf_send_4293
+  mov eax,log_join
+  call gf_log
+  jmp gf_finish
+
+gf_help:
+  cmp dword ptr [gf_max_solo_index],0
+  jl gf_42A4_done
+  cmp dword ptr [gf_payload_team_count],0
+  jne gf_help_has_team
+  mov dword ptr [gf_help_track_id],0
+  mov dword ptr [gf_help_track_count],0
+  jmp gf_42A4_done
+
+gf_help_has_team:
+  cmp dword ptr [gf_help_track_count],0
+  jg gf_help_track_existing
+  jmp gf_help_pick_new
+
+gf_help_track_existing:
+  xor ecx,ecx
+
+gf_help_track_loop:
+  cmp ecx,[gf_team_count]
+  jae gf_help_pick_new
+  mov ax,word ptr [gf_team_ids+ecx*2]
+  cmp ax,word ptr [gf_help_track_id]
+  je gf_help_track_match
+
+gf_help_track_next:
+  inc ecx
+  jmp gf_help_track_loop
+
+gf_help_track_match:
+  mov ax,word ptr [gf_team_dungeon_ids+ecx*2]
+  call gf_get_index_by_id
+  cmp eax,FFFFFFFF
+  je gf_help_pick_new
+  cmp eax,[gf_max_solo_index]
+  jg gf_help_pick_new
+  cmp byte ptr [gf_team_people+ecx],03
+  jae gf_help_pick_new
+  inc dword ptr [gf_help_track_count]
+  cmp dword ptr [gf_help_track_count],6
+  jl gf_42A4_done
+  jmp gf_join_help
+
+gf_help_pick_new:
+  mov dword ptr [gf_help_track_id],0
+  mov dword ptr [gf_help_track_count],0
+  xor ecx,ecx
+
+gf_help_loop:
+  cmp ecx,[gf_team_count]
+  jae gf_help_no_match
+  mov ax,word ptr [gf_team_dungeon_ids+ecx*2]
+  call gf_get_index_by_id
+  cmp eax,FFFFFFFF
+  je gf_help_loop_next
+  cmp eax,[gf_max_solo_index]
+  jg gf_help_loop_next
+  cmp byte ptr [gf_team_people+ecx],03
+  jb gf_help_set_target
+
+gf_help_loop_next:
+  inc ecx
+  jmp gf_help_loop
+
+gf_help_set_target:
+  mov ax,word ptr [gf_team_ids+ecx*2]
+  mov word ptr [gf_help_track_id],ax
+  mov dword ptr [gf_help_track_count],1
+  jmp gf_42A4_done
+
+gf_help_no_match:
+  mov dword ptr [gf_help_track_id],0
+  mov dword ptr [gf_help_track_count],0
+  jmp gf_42A4_done
+
+gf_join_help:
+  mov dword ptr [gf_help_track_id],0
+  mov dword ptr [gf_help_track_count],0
+  mov dword ptr [gf_battle_mode],3
+  mov ax,word ptr [gf_team_ids+ecx*2]
+  mov word ptr [gf_team_id],ax
+  call gf_send_4296
+  call gf_send_4293
+  mov eax,log_join
+  call gf_log
+  jmp gf_finish
+
+gf_42A4_len_short:
+  jmp gf_42A4_done
+
+gf_42A4_done:
+  ret
+
+gf_parse_5216:
+  cmp dword ptr [gf_state],5
+  jne gf_5216_done
+  mov esi,[gf_payload]
+  mov ecx,[gf_len]
+  cmp ecx,0A
+  jb gf_5216_done
+  lea edi,[esi+ecx-0A]
+
+gf_5216_scan_loop:
+  cmp esi,edi
+  ja gf_5216_done
+  cmp dword ptr [esi],796D7261
+  jne @f
+  cmp dword ptr [esi+4],64696152
+  jne @f
+  cmp word ptr [esi+8],4246
+  je gf_5216_army_match
+@@:
+  inc esi
+  jmp gf_5216_scan_loop
+
+gf_5216_army_match:
+  mov dword ptr [gf_army_battle_confirmed],1
+  mov dword ptr [gf_expected_win_value],0
+  mov esi,[gf_payload]
+  mov ecx,[gf_len]
+  cmp ecx,0F
+  jb gf_5216_done
+  lea edi,[esi+ecx-0F]
+
+gf_5216_char_loop:
+  cmp esi,edi
+  ja gf_5216_done
+  cmp dword ptr [esi],72616863
+  jne gf_5216_char_next
+  cmp dword ptr [esi+4],61636F4C
+  jne gf_5216_char_next
+  cmp dword ptr [esi+8],6E6F6974
+  jne gf_5216_char_next
+  cmp byte ptr [esi+0E],31
+  je gf_5216_char_defense
+  jmp gf_5216_done
+
+gf_5216_char_defense:
+  mov dword ptr [gf_expected_win_value],1
+  jmp gf_5216_done
+
+gf_5216_char_next:
+  inc esi
+  jmp gf_5216_char_loop
+
+gf_5216_done:
+  ret
+
+gf_parse_5220:
+  cmp dword ptr [gf_state],5
+  jne gf_5220_done
+  cmp dword ptr [gf_wait_battle_result],1
+  jne gf_5220_done
+  cmp dword ptr [gf_army_battle_confirmed],1
+  jne gf_5220_done
+  cmp dword ptr [gf_verify_mode],1
+  jne gf_5220_clear
+  mov esi,[gf_payload]
+  mov al,[esi]
+  cmp al,byte ptr [gf_expected_win_value]
+  je gf_5220_win
+  jmp gf_5220_loss
+
+gf_5220_win:
+  call gf_update_max_solo
+  jmp gf_5220_clear
+
+gf_5220_loss:
+  mov ecx,[gf_verify_index]
+  cmp ecx,FFFFFFFF
+  je gf_5220_loss_no_index
+  mov eax,[log_fail_table+ecx*4]
+  call gf_log
+  mov ecx,[gf_verify_index]
+  mov eax,1
+  shl eax,cl
+  or dword ptr [gf_verify_failed_mask],eax
+
+gf_5220_loss_no_index:
+  mov dword ptr [gf_current_id],0
+  mov dword ptr [gf_verify_id],0
+  mov dword ptr [gf_verify_mode],0
+  mov dword ptr [gf_verify_index],FFFFFFFF
+  mov dword ptr [gf_solo_verify_blocked],1
+  jmp gf_5220_clear
+
+gf_5220_clear:
+  mov dword ptr [gf_wait_battle_result],0
+  mov dword ptr [gf_army_battle_confirmed],0
+  mov dword ptr [gf_expected_win_value],0
+  mov dword ptr [gf_battle_mode],0
+  mov dword ptr [gf_state],0
+  call dword ptr [Online.exe+1C43DC]
+  add eax,0BB8
+  mov [gf_next_tick],eax
+
+gf_5220_done:
+  ret
+
+gf_finish:
+  mov dword ptr [gf_state],0
+  call dword ptr [Online.exe+1C43DC]
+  add eax,0BB8
+  mov [gf_next_tick],eax
+  ret
+
+gf_start_solo:
+  mov dword ptr [gf_battle_mode],1
+  call gf_send_4297
+  call gf_send_429E
+  call gf_send_37A4
+  mov ax,word ptr [gf_pending_id]
+  mov word ptr [gf_current_id],ax
+  mov word ptr [gf_verify_id],ax
+  cmp dword ptr [gf_verify_mode],1
+  jne @f
+  mov eax,[gf_log_index]
+  mov [gf_verify_index],eax
+  mov dword ptr [gf_wait_battle_result],1
+  mov dword ptr [gf_army_battle_confirmed],0
+  mov dword ptr [gf_expected_win_value],0
+  mov dword ptr [gf_state],5
+  call dword ptr [Online.exe+1C43DC]
+  mov [gf_wait_tick],eax
+@@:
+  mov eax,[gf_log_index]
+  mov ecx,eax
+  mov eax,[log_single_table+ecx*4]
+  call gf_log
+  ret
+
+gf_update_max_solo:
+  mov dword ptr [gf_verify_id],0
+  mov dword ptr [gf_current_id],0
+  mov dword ptr [gf_verify_mode],0
+  mov dword ptr [gf_wait_battle_result],0
+  mov dword ptr [gf_army_battle_confirmed],0
+  mov eax,[gf_verify_index]
+  cmp eax,FFFFFFFF
+  je gf_update_max_solo_done
+  cmp eax,[gf_max_solo_index]
+  jle gf_update_max_solo_done
+  mov [gf_max_solo_index],eax
+  mov ecx,eax
+  mov eax,[log_max_table+ecx*4]
+  call gf_log
+
+gf_update_max_solo_done:
+  mov dword ptr [gf_verify_index],FFFFFFFF
+  ret
+
+gf_get_index_by_id:
+  push ecx
+  xor ecx,ecx
+
+gf_get_index_by_id_loop:
+  cmp ecx,9
+  jae gf_get_index_by_id_not_found
+  cmp word ptr [gf_ids+ecx*2],ax
+  je gf_get_index_by_id_found
+  inc ecx
+  jmp gf_get_index_by_id_loop
+
+gf_get_index_by_id_found:
+  mov eax,ecx
+  pop ecx
+  ret
+
+gf_get_index_by_id_not_found:
+  mov eax,FFFFFFFF
+  pop ecx
+  ret
+
+gf_send_4293:
+  push 04
+  push buf_zero4
+  push 4293
+  call Online.exe+4A360
+  ret
+
+gf_send_4294:
+  push 00
+  push 00
+  push 4294
+  call Online.exe+4A360
+  ret
+
+gf_send_42A6:
+  push 00
+  push 00
+  push 42A6
+  call Online.exe+4A360
+  ret
+
+gf_send_42A8:
+  mov eax,[gf_unlimit_id]
+  mov [buf_id4],eax
+  push 04
+  push buf_id4
+  push 42A8
+  call Online.exe+4A360
+  ret
+
+gf_send_37A4:
+  push 00
+  push 00
+  push 37A4
+  call Online.exe+4A360
+  ret
+
+gf_send_4297:
+  mov word ptr [buf_id4],0000
+  mov ax,word ptr [gf_pending_id]
+  mov word ptr [buf_id4+2],ax
+  push 04
+  push buf_id4
+  push 4297
+  call Online.exe+4A360
+  ret
+
+gf_send_429E:
+  mov word ptr [buf_id4],0000
+  mov ax,word ptr [gf_pending_id]
+  mov word ptr [buf_id4+2],ax
+  push 04
+  push buf_id4
+  push 429E
+  call Online.exe+4A360
+  ret
+
+gf_send_429E_group:
+  mov word ptr [buf_id6],0000
+  mov ax,word ptr [gf_pending_id]
+  mov word ptr [buf_id6+2],ax
+  mov word ptr [buf_id6+4],1A00
+  push 06
+  push buf_id6
+  push 429E
+  call Online.exe+4A360
+  ret
+
+gf_send_429F:
+  mov word ptr [buf_id4],0000
+  mov ax,word ptr [gf_pending_id]
+  mov word ptr [buf_id4+2],ax
+  push 04
+  push buf_id4
+  push 429F
+  call Online.exe+4A360
+  ret
+
+gf_send_4296:
+  mov word ptr [buf_team4],0000
+  mov ax,word ptr [gf_team_id]
+  mov word ptr [buf_team4+2],ax
+  push 04
+  push buf_team4
+  push 4296
+  call Online.exe+4A360
+  ret
+
+gf_send_429A:
+  mov byte ptr [buf_order],00
+  mov byte ptr [buf_order+1],03
+  lea edi,[buf_order+2]
+  mov esi,[gf_member_ptrs+8]
+  mov ecx,[gf_member_lens+8]
+  call gf_copy_order_string
+  mov esi,[gf_member_ptrs]
+  mov ecx,[gf_member_lens]
+  call gf_copy_order_string
+  mov esi,[gf_member_ptrs+4]
+  mov ecx,[gf_member_lens+4]
+  call gf_copy_order_string
+  mov eax,edi
+  mov edx,buf_order
+  sub eax,edx
+  push eax
+  push buf_order
+  push 429A
+  call Online.exe+4A360
+  ret
+
+gf_copy_order_string:
+  test ecx,ecx
+  je @f
+
+gf_copy_order_string_loop:
+  mov al,[esi]
+  mov [edi],al
+  inc esi
+  inc edi
+  loop gf_copy_order_string_loop
+@@:
+  ret
+
+gf_skip_utf:
+  lea eax,[esi+02]
+  cmp eax,edi
+  ja gf_skip_utf_fail
+  movzx eax,byte ptr [esi]
+  shl eax,08
+  movzx edx,byte ptr [esi+1]
+  add eax,edx
+  add esi,eax
+  add esi,02
+  cmp esi,edi
+  ja gf_skip_utf_fail
+  mov eax,1
+  ret
+
+gf_skip_utf_fail:
+  xor eax,eax
+  ret
+
+gf_get_id:
+  movzx eax,word ptr [gf_ids+ecx*2]
+  ret
+
+gf_log_time_closed:
+  pushad
+  mov eax,[gf_left_time]
+  add eax,3B
+  xor edx,edx
+  mov ecx,3C
+  div ecx
+  xor edx,edx
+  mov ecx,5A0
+  div ecx
+  mov [gf_time_days],eax
+  mov eax,edx
+  xor edx,edx
+  mov ecx,3C
+  div ecx
+  mov [gf_time_hours],eax
+  mov [gf_time_mins],edx
+  mov edi,log_time_buf
+  mov esi,log_time_prefix
+  call gf_append_wstr
+  mov eax,[gf_time_days]
+  call gf_append_dec
+  mov esi,log_time_day
+  call gf_append_wstr
+  mov eax,[gf_time_hours]
+  call gf_append_dec
+  mov esi,log_time_hour
+  call gf_append_wstr
+  mov eax,[gf_time_mins]
+  call gf_append_dec
+  mov esi,log_time_min
+  call gf_append_wstr
+  mov word ptr [edi],0000
+  mov eax,log_time_buf
+  call gf_log
+  popad
+  ret
+
+gf_append_wstr:
+gf_append_wstr_loop:
+  mov ax,[esi]
+  test ax,ax
+  je gf_append_wstr_done
+  mov [edi],ax
+  add esi,02
+  add edi,02
+  jmp gf_append_wstr_loop
+
+gf_append_wstr_done:
+  ret
+
+gf_append_dec:
+  test eax,eax
+  jne gf_append_dec_build
+  mov word ptr [edi],0030
+  add edi,02
+  ret
+
+gf_append_dec_build:
+  xor ecx,ecx
+
+gf_append_dec_loop:
+  xor edx,edx
+  mov ebx,0A
+  div ebx
+  add dl,30
+  movzx edx,dl
+  mov [gf_num_tmp+ecx*2],dx
+  inc ecx
+  test eax,eax
+  jne gf_append_dec_loop
+
+gf_append_dec_rev:
+  dec ecx
+  mov dx,[gf_num_tmp+ecx*2]
+  mov [edi],dx
+  add edi,02
+  test ecx,ecx
+  jne gf_append_dec_rev
+
+gf_append_dec_done:
+  ret
+
+
+gf_log:
+  push eax
+  push Online.exe+1FE56C
+  push Online.exe+230504
+  call Online.exe+2EF0
+  add esp,0C
+  push 00
+  push 00
+  push [Online.exe+2304D8]
+  push [Online.exe+2300A4]
+  call dword ptr [Online.exe+1C46B0]
+  ret
+
+gf_data:
+gf_state:
+  dd 0
+gf_current_id:
+  dd 0
+gf_verify_id:
+  dd 0
+gf_verify_index:
+  dd FFFFFFFF
+gf_verify_mode:
+  dd 0
+gf_verify_failed_mask:
+  dd 0
+gf_wait_battle_result:
+  dd 0
+gf_army_battle_confirmed:
+  dd 0
+gf_expected_win_value:
+  dd 0
+gf_solo_verify_blocked:
+  dd 0
+gf_max_solo_index:
+  dd FFFFFFFF
+gf_pending_id:
+  dd 0
+gf_team_id:
+  dd 0
+gf_help_track_id:
+  dd 0
+gf_help_track_count:
+  dd 0
+gf_log_index:
+  dd 0
+gf_time_blocked:
+  dd 0
+gf_time_wait_passed:
+  dd 0
+gf_time_open_logged:
+  dd 0
+gf_activity_state:
+  dd 0
+gf_left_time:
+  dd 0
+gf_time_days:
+  dd 0
+gf_time_hours:
+  dd 0
+gf_time_mins:
+  dd 0
+gf_num_tmp:
+  dq 0,0
+log_time_buf:
+  dq 0,0,0,0,0,0,0,0
+  dq 0,0,0,0,0,0,0,0
+  dq 0,0,0,0,0,0,0,0
+  dq 0,0,0,0,0,0,0,0
+log_time_prefix:
+  dw 8ECD,5718,526F,672C,5269,9918,958B,653E,6642,9593,0020,0000
+log_time_day:
+  dw 5929,0000
+log_time_hour:
+  dw 5C0F,6642,0000
+log_time_min:
+  dw 5206,9418,0000
+gf_next_tick:
+  dd 0
+gf_wait_tick:
+  dd 0
+gf_opcode:
+  dd 0
+gf_payload:
+  dd 0
+gf_len:
+  dd 0
+gf_team_count:
+  dd 0
+gf_people_count:
+  dd 0
+gf_payload_team_count:
+  dd 0
+gf_team_order_sent:
+  dd 0
+gf_unlimit_passed_once:
+  dd 0
+gf_battle_mode:
+  dd 0
+gf_unlimit_count:
+  dd 0
+gf_unlimit_id:
+  dd 0
+gf_member_ptrs:
+  dd 0,0,0
+gf_member_lens:
+  dd 0,0,0
+buf_zero4:
+  dd 0
+buf_id4:
+  dd 0
+buf_id6:
+  dd 0,0
+buf_team4:
+  dd 0
+buf_order:
+  dq 0,0,0,0,0,0,0,0
+  dq 0,0,0,0,0,0,0,0
+gf_ids:
+  dw E903,D107,B90B,A10F,8913,7117,591B,411F,2923
+gf_team_ids:
+  dq 0,0,0
+gf_team_dungeon_ids:
+  dq 0,0,0
+gf_team_people:
+  db 0,0,0,0,0,0,0,0,0,0,0,0
+log_single_table:
+  dd log_single_0
+  dd log_single_1
+  dd log_single_2
+  dd log_single_3
+  dd log_single_4
+  dd log_single_5
+  dd log_single_6
+  dd log_single_7
+  dd log_single_8
+log_reward_table:
+  dd log_reward_0
+  dd log_reward_1
+  dd log_reward_2
+  dd log_reward_3
+  dd log_reward_4
+  dd log_reward_5
+  dd log_reward_6
+  dd log_reward_7
+  dd log_reward_8
+log_create_table:
+  dd log_create_0
+  dd log_create_1
+  dd log_create_2
+  dd log_create_3
+  dd log_create_4
+  dd log_create_5
+  dd log_create_6
+  dd log_create_7
+  dd log_create_8
+log_group_table:
+  dd log_group_0
+  dd log_group_1
+  dd log_group_2
+  dd log_group_3
+  dd log_group_4
+  dd log_group_5
+  dd log_group_6
+  dd log_group_7
+  dd log_group_8
+log_max_table:
+  dd log_max_0
+  dd log_max_1
+  dd log_max_2
+  dd log_max_3
+  dd log_max_4
+  dd log_max_5
+  dd log_max_6
+  dd log_max_7
+  dd log_max_8
+log_fail_table:
+  dd log_fail_0
+  dd log_fail_1
+  dd log_fail_2
+  dd log_fail_3
+  dd log_fail_4
+  dd log_fail_5
+  dd log_fail_6
+  dd log_fail_7
+  dd log_fail_8
+log_single_0:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,5F35,89D2,0000
+log_single_1:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,8463,5353,0000
+log_single_2:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,8881,7D39,0000
+log_single_3:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,5B6B,5805,0000
+log_single_4:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,5442,5E03,0000
+log_single_5:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,5289,5099,0000
+log_single_6:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,66F9,64CD,0000
+log_single_7:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,5B6B,6B0A,0000
+log_single_8:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,53F8,99AC,708E,0000
+log_reward_0:
+  dw 8ECD,5718,526F,672C,0020,9818,53D6,734E,52F5,0020,5F35,89D2,0000
+log_reward_1:
+  dw 8ECD,5718,526F,672C,0020,9818,53D6,734E,52F5,0020,8463,5353,0000
+log_reward_2:
+  dw 8ECD,5718,526F,672C,0020,9818,53D6,734E,52F5,0020,8881,7D39,0000
+log_reward_3:
+  dw 8ECD,5718,526F,672C,0020,9818,53D6,734E,52F5,0020,5B6B,5805,0000
+log_reward_4:
+  dw 8ECD,5718,526F,672C,0020,9818,53D6,734E,52F5,0020,5442,5E03,0000
+log_reward_5:
+  dw 8ECD,5718,526F,672C,0020,9818,53D6,734E,52F5,0020,5289,5099,0000
+log_reward_6:
+  dw 8ECD,5718,526F,672C,0020,9818,53D6,734E,52F5,0020,66F9,64CD,0000
+log_reward_7:
+  dw 8ECD,5718,526F,672C,0020,9818,53D6,734E,52F5,0020,5B6B,6B0A,0000
+log_reward_8:
+  dw 8ECD,5718,526F,672C,0020,9818,53D6,734E,52F5,0020,53F8,99AC,708E,0000
+log_create_0:
+  dw 8ECD,5718,526F,672C,0020,5EFA,7ACB,7D44,968A,0020,5F35,89D2,0000
+log_create_1:
+  dw 8ECD,5718,526F,672C,0020,5EFA,7ACB,7D44,968A,0020,8463,5353,0000
+log_create_2:
+  dw 8ECD,5718,526F,672C,0020,5EFA,7ACB,7D44,968A,0020,8881,7D39,0000
+log_create_3:
+  dw 8ECD,5718,526F,672C,0020,5EFA,7ACB,7D44,968A,0020,5B6B,5805,0000
+log_create_4:
+  dw 8ECD,5718,526F,672C,0020,5EFA,7ACB,7D44,968A,0020,5442,5E03,0000
+log_create_5:
+  dw 8ECD,5718,526F,672C,0020,5EFA,7ACB,7D44,968A,0020,5289,5099,0000
+log_create_6:
+  dw 8ECD,5718,526F,672C,0020,5EFA,7ACB,7D44,968A,0020,66F9,64CD,0000
+log_create_7:
+  dw 8ECD,5718,526F,672C,0020,5EFA,7ACB,7D44,968A,0020,5B6B,6B0A,0000
+log_create_8:
+  dw 8ECD,5718,526F,672C,0020,5EFA,7ACB,7D44,968A,0020,53F8,99AC,708E,0000
+log_group_0:
+  dw 8ECD,5718,526F,672C,0020,7D44,968A,6311,6230,0020,5F35,89D2,0000
+log_group_1:
+  dw 8ECD,5718,526F,672C,0020,7D44,968A,6311,6230,0020,8463,5353,0000
+log_group_2:
+  dw 8ECD,5718,526F,672C,0020,7D44,968A,6311,6230,0020,8881,7D39,0000
+log_group_3:
+  dw 8ECD,5718,526F,672C,0020,7D44,968A,6311,6230,0020,5B6B,5805,0000
+log_group_4:
+  dw 8ECD,5718,526F,672C,0020,7D44,968A,6311,6230,0020,5442,5E03,0000
+log_group_5:
+  dw 8ECD,5718,526F,672C,0020,7D44,968A,6311,6230,0020,5289,5099,0000
+log_group_6:
+  dw 8ECD,5718,526F,672C,0020,7D44,968A,6311,6230,0020,66F9,64CD,0000
+log_group_7:
+  dw 8ECD,5718,526F,672C,0020,7D44,968A,6311,6230,0020,5B6B,6B0A,0000
+log_group_8:
+  dw 8ECD,5718,526F,672C,0020,7D44,968A,6311,6230,0020,53F8,99AC,708E,0000
+log_max_0:
+  dw 8ECD,5718,526F,672C,0020,6700,9AD8,55AE,901A,0020,5F35,89D2,0000
+log_max_1:
+  dw 8ECD,5718,526F,672C,0020,6700,9AD8,55AE,901A,0020,8463,5353,0000
+log_max_2:
+  dw 8ECD,5718,526F,672C,0020,6700,9AD8,55AE,901A,0020,8881,7D39,0000
+log_max_3:
+  dw 8ECD,5718,526F,672C,0020,6700,9AD8,55AE,901A,0020,5B6B,5805,0000
+log_max_4:
+  dw 8ECD,5718,526F,672C,0020,6700,9AD8,55AE,901A,0020,5442,5E03,0000
+log_max_5:
+  dw 8ECD,5718,526F,672C,0020,6700,9AD8,55AE,901A,0020,5289,5099,0000
+log_max_6:
+  dw 8ECD,5718,526F,672C,0020,6700,9AD8,55AE,901A,0020,66F9,64CD,0000
+log_max_7:
+  dw 8ECD,5718,526F,672C,0020,6700,9AD8,55AE,901A,0020,5B6B,6B0A,0000
+log_max_8:
+  dw 8ECD,5718,526F,672C,0020,6700,9AD8,55AE,901A,0020,53F8,99AC,708E,0000
+log_fail_0:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,5F35,89D2,0020,5931,6557,0000
+log_fail_1:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,8463,5353,0020,5931,6557,0000
+log_fail_2:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,8881,7D39,0020,5931,6557,0000
+log_fail_3:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,5B6B,5805,0020,5931,6557,0000
+log_fail_4:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,5442,5E03,0020,5931,6557,0000
+log_fail_5:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,5289,5099,0020,5931,6557,0000
+log_fail_6:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,66F9,64CD,0020,5931,6557,0000
+log_fail_7:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,5B6B,6B0A,0020,5931,6557,0000
+log_fail_8:
+  dw 8ECD,5718,526F,672C,0020,55AE,4EBA,6311,6230,0020,53F8,99AC,708E,0020,5931,6557,0000
+log_unlimit:
+  dw 8ECD,5718,526F,672C,0020,7121,9650,6311,6230,0000
+log_join:
+  dw 8ECD,5718,526F,672C,0020,9032,5165,7D44,968A,0000
+
+gf_entry_aob:
+  jmp gf_entry_newmem
+
+[DISABLE]
+gf_entry_aob:
+  db 55 8B EC 51 83
+
+gf_router_callback:
+  dd 0
+
+dealloc(gf_entry_newmem)
+dealloc(gf_recv_newmem)
+dealloc(gf_data)

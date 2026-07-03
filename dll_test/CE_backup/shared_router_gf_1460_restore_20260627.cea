@@ -1,0 +1,1883 @@
+[ENABLE]
+// Codex split shared recv router
+// Enable once before Daily Sign / Prize Pool / Weekly Task scripts.
+
+define(shared_dispatch,Online.exe+42AD0)
+
+alloc(shared_dispatch_hook,32768)
+
+alloc(daysign_need_sign,4)
+alloc(daysign_bonus_bits,4)
+alloc(daysign_last_query,4)
+
+alloc(xycj_id,4)
+alloc(xycj_count,4)
+alloc(xycj_state,4)
+alloc(zpdfw_pending,4)
+alloc(zpdfw_router_3ea4_hits,4)
+alloc(zpdfw_router_switch_seen,4)
+alloc(zpdfw_router_pending_sets,4)
+
+alloc(weekly_activity,4)
+alloc(weekly_next_data,4)
+alloc(weekly_pending_next,4)
+alloc(weekly_cmd_send_next,4)
+alloc(weekly_last_sent_data,4)
+alloc(weekly_recv_len,4)
+alloc(weekly_packet_dump,2048)
+
+alloc(jrnt_ids,4)
+alloc(jrnt_pending_open,4)
+alloc(jrnt_claim_pending,4)
+
+globalalloc(ptask_level,4)
+globalalloc(ptask_pending_promo,4)
+globalalloc(ptask_reward_ids,8)
+globalalloc(ptask_reward_valid,4)
+globalalloc(ptask_claim_pending,4)
+
+globalalloc(td_parse_error,4)
+globalalloc(albattle_hero_count,4)
+globalalloc(albattle_hero_table,512)
+globalalloc(albattle_left_count,4)
+globalalloc(albattle_right_count,4)
+globalalloc(albattle_location,4)
+globalalloc(albattle_rush_ratio,4)
+globalalloc(albattle_last_city,4)
+globalalloc(albattle_city_attackers,4)
+globalalloc(albattle_city_defenders,4)
+globalalloc(albattle_parse_error,4)
+globalalloc(albattle_end,4)
+globalalloc(albattle_payload_base,4)
+globalalloc(albattle_loop_count,4)
+globalalloc(albattle_loop_index,4)
+globalalloc(albattle_tmp_uuid0,4)
+globalalloc(albattle_tmp_uuid4,4)
+globalalloc(albattle_saved_count,4)
+globalalloc(albattle_saved_index,4)
+globalalloc(td_fail_stage,4)
+globalalloc(td_fail_offset,4)
+globalalloc(td_dbg_task_start,4)
+globalalloc(td_dbg_after_text,4)
+globalalloc(td_dbg_after_fixed,4)
+globalalloc(td_dbg_after_normal,4)
+globalalloc(td_dbg_after_special,4)
+globalalloc(td_dbg_after_conditions,4)
+globalalloc(td_dbg_after_heroes,4)
+globalalloc(td_dbg_after_extra,4)
+globalalloc(td_dbg_normal_count,4)
+globalalloc(td_dbg_special_count,4)
+globalalloc(td_dbg_condition_count,4)
+globalalloc(td_dbg_hero_count,4)
+globalalloc(td_current_dispatch,4)
+globalalloc(td_max_dispatch,4)
+globalalloc(td_free_slots,4)
+globalalloc(td_unassigned_count,4)
+globalalloc(td_dispatched_count,4)
+globalalloc(td_unassigned_seen,4)
+globalalloc(td_unassigned_ids,128)
+globalalloc(td_unassigned_quality,64)
+globalalloc(td_unassigned_status,64)
+globalalloc(td_unassigned_rank,64)
+globalalloc(td_dispatched_seen,4)
+globalalloc(td_dispatched_ids,128)
+globalalloc(td_dispatched_quality,64)
+globalalloc(td_dispatched_status,64)
+globalalloc(td_dispatched_rank,64)
+globalalloc(td_claim_pending,4)
+globalalloc(td_claim_task_id,8)
+globalalloc(td_best_pending,4)
+globalalloc(td_best_task_id,8)
+globalalloc(td_best_rank,4)
+globalalloc(td_best_quality,4)
+globalalloc(td_config_ready,4)
+globalalloc(td_config_task_id,8)
+globalalloc(td_4b45_payload_len,4)
+globalalloc(td_4b45_payload,1024)
+globalalloc(td_skip_count,4)
+globalalloc(td_skip_ids,128)
+globalalloc(gf_router_callback,16)
+define(gf_router_opcode,gf_router_callback+4)
+define(gf_router_payload,gf_router_callback+8)
+define(gf_router_len,gf_router_callback+C)
+alloc(router_gf_saved_payload,4)
+alloc(router_gf_saved_len,4)
+
+alloc(router_log_weekly_recv,128)
+
+registersymbol(daysign_need_sign)
+registersymbol(daysign_bonus_bits)
+registersymbol(daysign_last_query)
+registersymbol(xycj_id)
+registersymbol(xycj_count)
+registersymbol(xycj_state)
+registersymbol(zpdfw_pending)
+registersymbol(zpdfw_router_3ea4_hits)
+registersymbol(zpdfw_router_switch_seen)
+registersymbol(zpdfw_router_pending_sets)
+registersymbol(weekly_activity)
+registersymbol(weekly_next_data)
+registersymbol(weekly_pending_next)
+registersymbol(weekly_cmd_send_next)
+registersymbol(weekly_last_sent_data)
+registersymbol(weekly_recv_len)
+registersymbol(weekly_packet_dump)
+registersymbol(jrnt_ids)
+registersymbol(jrnt_pending_open)
+registersymbol(jrnt_claim_pending)
+
+label(dispatch_return)
+label(dispatch_done)
+label(handle_daysign_4f05)
+label(handle_xycj_3ea4)
+label(handle_weekly_4bb0)
+label(handle_jrnt_4f35)
+label(handle_ptask_4e61)
+label(handle_td_4b49)
+label(handle_td_4b4b)
+label(handle_gf_armyraid)
+label(handle_albattle_1460)
+label(handle_albattle_146f)
+label(handle_albattle_147c)
+label(handle_albattle_1b3e)
+label(albattle_parse_hero_list)
+label(albattle_hero_loop)
+label(albattle_hero_loop_next)
+label(albattle_hero_loop_done)
+label(albattle_parse_one_hero)
+label(albattle_store_current_hero)
+label(albattle_no_store_current_hero)
+label(albattle_skip_tactics_loop)
+label(albattle_skip_tactics_done)
+label(albattle_parse_city_troops)
+label(albattle_city_loop)
+label(albattle_city_loop_done)
+label(albattle_read_u16_adv)
+label(albattle_read_u32_adv)
+label(albattle_skip_string)
+label(albattle_skip_bytes_eax)
+label(albattle_fail)
+label(td_parse_4b4b_config)
+label(td_4b49_unassigned_loop)
+label(td_4b49_unassigned_done)
+label(td_4b49_dispatched_loop)
+label(td_4b49_dispatched_done)
+label(td_parse_task)
+label(td_task_after_normal_rewards)
+label(td_task_after_heroes)
+label(td_task_skip_optional_extra)
+label(td_task_no_extra)
+label(td_task_finish_after_extra)
+label(td_task_finish_unassigned)
+label(td_task_finish_dispatched)
+label(td_task_finish_config)
+label(td_task_done)
+label(td_is_current_skipped)
+label(td_is_current_skipped_loop)
+label(td_is_current_skipped_yes)
+label(td_is_current_skipped_no)
+label(td_4b49_keep_skip_list)
+label(td_store_unassigned_detail)
+label(td_store_unassigned_done)
+label(td_store_dispatched_detail)
+label(td_store_dispatched_done)
+label(td_parse_normal_rewards)
+label(td_normal_reward_loop)
+label(td_normal_reward_done)
+label(td_rank_type)
+label(td_rank_1)
+label(td_rank_2)
+label(td_rank_3)
+label(td_rank_4)
+label(td_rank_5)
+label(td_rank_6)
+label(td_rank_7)
+label(td_rank_8)
+label(td_rank_9)
+label(td_skip_rewards)
+label(td_skip_rewards_loop)
+label(td_skip_rewards_done)
+label(td_skip_conditions)
+label(td_skip_conditions_loop)
+label(td_skip_conditions_done)
+label(td_skip_heroes)
+label(td_skip_heroes_loop)
+label(td_skip_heroes_done)
+label(td_parse_config_heroes)
+label(td_config_heroes_loop)
+label(td_config_heroes_done)
+label(td_copy_bytes_ecx)
+label(td_copy_bytes_loop)
+label(td_copy_bytes_done)
+label(td_read_u16_adv)
+label(td_read_u32_adv)
+label(td_skip_string)
+label(td_skip_bytes_eax)
+label(td_skip_bytes_eax_1)
+label(td_fail)
+label(td_end)
+label(td_outer_count)
+label(td_outer_index)
+label(td_loop_count)
+label(td_loop_index)
+label(td_parse_mode)
+label(td_current_task_id)
+label(td_current_quality)
+label(td_current_status)
+label(td_current_rank)
+label(td_hero_count)
+label(td_payload_write)
+label(td_payload_base)
+label(td_clear_outputs)
+label(td_clear_arrays_loop)
+label(ptask_promo_not03)
+label(ptask_scan_ids_loop)
+label(ptask_scan_ids_next)
+label(ptask_scan_ids_done)
+label(ptask_id_bad_tail)
+label(ptask_id_count_loop)
+label(ptask_id_count_next)
+label(ptask_id_count_done)
+label(ptask_scan_status_loop)
+label(ptask_scan_status_next)
+label(ptask_scan_status_done)
+label(ptask_status_after)
+label(jrnt_scan_ids_loop)
+label(jrnt_scan_ids_next)
+label(jrnt_scan_ids_done)
+label(jrnt_scan_status_loop)
+label(jrnt_scan_status_next)
+label(jrnt_scan_status_done)
+label(weekly_new_pair)
+label(weekly_find_next_pattern)
+label(weekly_find_next_loop)
+label(weekly_find_next_found)
+label(weekly_find_next_done)
+label(parse_payload)
+label(scan_b1)
+label(scan_b2)
+label(scan_b3)
+label(scan_b4)
+label(scan_b5)
+label(scan_b6)
+label(scan_b7)
+label(next_b2)
+label(next_b3)
+label(next_b4)
+label(next_b5)
+label(next_b6)
+label(next_b7)
+
+daysign_need_sign:
+  dd 0
+daysign_bonus_bits:
+  dd 0
+daysign_last_query:
+  dd 0
+
+xycj_id:
+  dd 0
+xycj_count:
+  dd 0
+xycj_state:
+  dd 0
+zpdfw_pending:
+  dd 0
+zpdfw_router_3ea4_hits:
+  dd 0
+zpdfw_router_switch_seen:
+  dd 0
+zpdfw_router_pending_sets:
+  dd 0
+weekly_activity:
+  dd 0
+weekly_next_data:
+  dd 0
+weekly_pending_next:
+  dd 0
+weekly_cmd_send_next:
+  dd 0
+weekly_last_sent_data:
+  dd FFFFFFFF
+weekly_recv_len:
+  dd 0
+weekly_packet_dump:
+  db 00 00 00 00
+jrnt_ids:
+  db FF FF FF 00
+jrnt_pending_open:
+  dd 0
+jrnt_claim_pending:
+  db 00 00 00 00
+td_end:
+  dd 0
+td_outer_count:
+  dd 0
+td_outer_index:
+  dd 0
+td_loop_count:
+  dd 0
+td_loop_index:
+  dd 0
+td_parse_mode:
+  dd 0
+td_current_task_id:
+  db 00 00 00 00 00 00 00 00
+td_current_quality:
+  dd 0
+td_current_status:
+  dd 0
+td_current_rank:
+  dd 63
+td_hero_count:
+  dd 0
+td_payload_write:
+  dd 0
+td_payload_base:
+  dd 0
+// L"周常任務 積分 %i"
+router_log_weekly_recv:
+  db 68 54 38 5E FB 4E D9 52 20 00 4D 7A 06 52 20 00 25 00 69 00 00 00
+shared_dispatch:
+  jmp shared_dispatch_hook
+dispatch_return:
+
+shared_dispatch_hook:
+  pushad
+
+  cmp cx,4F05
+  je handle_daysign_4f05
+
+  cmp cx,3EA4
+  je handle_xycj_3ea4
+
+  cmp cx,4BB0
+  je handle_weekly_4bb0
+
+  cmp cx,4F35
+  je handle_jrnt_4f35
+
+  cmp cx,4E61
+  je handle_ptask_4e61
+
+  cmp cx,4B49
+  je handle_td_4b49
+
+  cmp cx,4B4B
+  je handle_td_4b4b
+
+  cmp cx,1460
+  je handle_albattle_1460
+
+  cmp cx,146F
+  je handle_albattle_146f
+
+  cmp cx,147C
+  je handle_albattle_147c
+
+  cmp cx,1B3E
+  je handle_albattle_1b3e
+
+  cmp cx,42A1
+  je handle_gf_armyraid
+
+  cmp cx,42A2
+  je handle_gf_armyraid
+
+  cmp cx,42A4
+  je handle_gf_armyraid
+
+  cmp cx,42A7
+  je handle_gf_armyraid
+
+  cmp cx,1460
+  je handle_gf_armyraid
+
+  cmp cx,1464
+  je handle_gf_armyraid
+
+  jmp dispatch_done
+
+handle_albattle_147c:
+  mov esi,edx
+  mov eax,[esp+24]
+  cmp eax,03
+  jb dispatch_done
+  movzx ebx,byte ptr [esi]
+  movzx eax,byte ptr [esi+1]
+  shl eax,08
+  movzx ecx,byte ptr [esi+2]
+  add eax,ecx
+  cmp ebx,00
+  jne short @f
+  mov [albattle_left_count],eax
+  jmp dispatch_done
+@@:
+  mov [albattle_right_count],eax
+  jmp dispatch_done
+
+handle_albattle_146f:
+  mov esi,edx
+  mov eax,[esp+24]
+  cmp eax,07
+  jb dispatch_done
+  movzx eax,byte ptr [esi]
+  mov [albattle_location],eax
+  mov dword ptr [albattle_rush_ratio],02
+  jmp dispatch_done
+
+handle_albattle_1b3e:
+  mov esi,edx
+  mov edi,edx
+  mov eax,[esp+24]
+  add eax,edx
+  mov [albattle_end],eax
+  mov dword ptr [albattle_parse_error],00
+  mov dword ptr [albattle_city_attackers],00
+  mov dword ptr [albattle_city_defenders],00
+  call albattle_read_u16_adv
+  mov [albattle_last_city],eax
+  call albattle_read_u32_adv
+  mov ebx,albattle_city_attackers
+  call albattle_parse_city_troops
+  mov ebx,albattle_city_defenders
+  call albattle_parse_city_troops
+  jmp dispatch_done
+
+handle_albattle_1460:
+  mov [router_gf_saved_payload],edx
+  mov eax,[esp+24]
+  mov [router_gf_saved_len],eax
+  mov esi,edx
+  mov edi,edx
+  mov eax,[esp+24]
+  add eax,edx
+  mov [albattle_end],eax
+  mov dword ptr [albattle_parse_error],00
+  mov dword ptr [albattle_hero_count],00
+  mov eax,edi
+  add eax,10
+  cmp eax,[albattle_end]
+  ja albattle_fail_1460
+  add edi,10
+  call albattle_parse_hero_list
+  call albattle_parse_hero_list
+albattle_fail_1460:
+  mov edx,[router_gf_saved_payload]
+  mov eax,[router_gf_saved_len]
+  mov [esp+24],eax
+  mov ecx,1460
+  jmp handle_gf_armyraid
+
+albattle_parse_hero_list:
+  call albattle_read_u16_adv
+  mov [albattle_loop_count],eax
+  mov dword ptr [albattle_loop_index],00
+albattle_hero_loop:
+  mov eax,[albattle_loop_index]
+  cmp eax,[albattle_loop_count]
+  jae albattle_hero_loop_done
+  call albattle_parse_one_hero
+  cmp dword ptr [albattle_parse_error],01
+  je albattle_hero_loop_done
+albattle_hero_loop_next:
+  inc dword ptr [albattle_loop_index]
+  jmp albattle_hero_loop
+albattle_hero_loop_done:
+  ret
+
+albattle_parse_one_hero:
+  lea eax,[edi+08]
+  cmp eax,[albattle_end]
+  ja albattle_fail
+  mov eax,[edi]
+  mov [albattle_tmp_uuid0],eax
+  mov eax,[edi+04]
+  mov [albattle_tmp_uuid4],eax
+  add edi,08
+  call albattle_skip_string
+  call albattle_skip_string
+  mov eax,1A
+  call albattle_skip_bytes_eax
+  lea eax,[edi+04]
+  cmp eax,[albattle_end]
+  ja albattle_fail
+  movzx ebx,byte ptr [edi]
+  inc edi
+  call albattle_read_u16_adv
+  mov ecx,eax
+  inc edi
+  mov eax,[albattle_loop_index]
+  cmp eax,05
+  jae albattle_no_store_current_hero
+  cmp ebx,01
+  jne albattle_no_store_current_hero
+  cmp ecx,04
+  je albattle_no_store_current_hero
+  call albattle_store_current_hero
+albattle_no_store_current_hero:
+  call albattle_skip_string
+  mov eax,04
+  call albattle_skip_bytes_eax
+  call albattle_read_u16_adv
+  mov eax,[albattle_loop_count]
+  mov [albattle_saved_count],eax
+  mov eax,[albattle_loop_index]
+  mov [albattle_saved_index],eax
+  mov [albattle_loop_count],eax
+  mov dword ptr [albattle_loop_index],00
+albattle_skip_tactics_loop:
+  mov eax,[albattle_loop_index]
+  cmp eax,[albattle_loop_count]
+  jae albattle_skip_tactics_done
+  mov eax,04
+  call albattle_skip_bytes_eax
+  call albattle_skip_string
+  inc dword ptr [albattle_loop_index]
+  jmp albattle_skip_tactics_loop
+albattle_skip_tactics_done:
+  mov eax,[albattle_saved_index]
+  mov [albattle_loop_index],eax
+  mov eax,[albattle_saved_count]
+  mov [albattle_loop_count],eax
+  call albattle_skip_string
+  ret
+
+albattle_store_current_hero:
+  mov ebx,[albattle_hero_count]
+  cmp ebx,20
+  jae albattle_store_done
+  shl ebx,4
+  mov eax,[albattle_tmp_uuid0]
+  mov [albattle_hero_table+ebx],eax
+  mov eax,[albattle_tmp_uuid4]
+  mov [albattle_hero_table+ebx+04],eax
+  mov dword ptr [albattle_hero_table+ebx+08],01
+  call kernel32.GetTickCount
+  mov [albattle_hero_table+ebx+0C],eax
+  inc dword ptr [albattle_hero_count]
+albattle_store_done:
+  ret
+
+albattle_parse_city_troops:
+  call albattle_read_u16_adv
+  mov [albattle_loop_count],eax
+  mov dword ptr [albattle_loop_index],00
+albattle_city_loop:
+  mov eax,[albattle_loop_index]
+  cmp eax,[albattle_loop_count]
+  jae albattle_city_loop_done
+  call albattle_read_u16_adv
+  call albattle_read_u32_adv
+  add dword ptr [ebx],eax
+  call albattle_skip_string
+  inc dword ptr [albattle_loop_index]
+  jmp albattle_city_loop
+albattle_city_loop_done:
+  ret
+
+albattle_read_u16_adv:
+  lea eax,[edi+02]
+  cmp eax,[albattle_end]
+  ja albattle_fail
+  movzx eax,byte ptr [edi]
+  shl eax,08
+  movzx edx,byte ptr [edi+01]
+  add eax,edx
+  add edi,02
+  ret
+
+albattle_read_u32_adv:
+  lea eax,[edi+04]
+  cmp eax,[albattle_end]
+  ja albattle_fail
+  movzx eax,byte ptr [edi]
+  shl eax,08
+  movzx edx,byte ptr [edi+01]
+  add eax,edx
+  shl eax,08
+  movzx edx,byte ptr [edi+02]
+  add eax,edx
+  shl eax,08
+  movzx edx,byte ptr [edi+03]
+  add eax,edx
+  add edi,04
+  ret
+
+albattle_skip_string:
+  call albattle_read_u16_adv
+albattle_skip_bytes_eax:
+  add eax,edi
+  cmp eax,[albattle_end]
+  ja albattle_fail
+  mov edi,eax
+  ret
+
+albattle_fail:
+  mov dword ptr [albattle_parse_error],01
+  mov edi,[albattle_end]
+  xor eax,eax
+  ret
+
+handle_gf_armyraid:
+  cmp dword ptr [gf_router_callback],00
+  je dispatch_done
+  mov [gf_router_opcode],ecx
+  mov [gf_router_payload],edx
+  mov eax,[esp+24]
+  mov [gf_router_len],eax
+  call dword ptr [gf_router_callback]
+  jmp dispatch_done
+
+handle_daysign_4f05:
+  mov esi,edx
+  call parse_payload
+
+  call dword ptr [Online.exe+1C43DC]
+  mov [daysign_last_query],eax
+  jmp dispatch_done
+
+handle_xycj_3ea4:
+  inc dword ptr [zpdfw_router_3ea4_hits]
+  mov esi,edx
+
+  push dword ptr [esi]
+  call dword ptr [Online.exe+1C4930]
+  mov [xycj_id],eax
+
+  movzx eax,byte ptr [esi+215]
+  mov [xycj_count],eax
+
+  movzx eax,byte ptr [esi+21A]
+  mov [xycj_state],eax
+
+  mov eax,[Online.exe+230388]
+  mov [zpdfw_router_switch_seen],eax
+  test eax,eax
+  je @f
+  mov dword ptr [zpdfw_pending],01
+  inc dword ptr [zpdfw_router_pending_sets]
+@@:
+
+  mov dword ptr [esp+24],00
+  jmp dispatch_done
+
+handle_weekly_4bb0:
+  mov esi,edx
+
+  mov eax,[esp+24]
+  mov [weekly_recv_len],eax
+
+  // Reconstructed packet bytes:
+  // [0..1] = payload_len + 4, [2..3] = 4B B0, [4..] = payload.
+  // The original trailing checksum is not available at this dispatch layer.
+  mov ebx,eax
+  add ebx,04
+  mov byte ptr [weekly_packet_dump],bh
+  mov byte ptr [weekly_packet_dump+1],bl
+  mov byte ptr [weekly_packet_dump+2],4B
+  mov byte ptr [weekly_packet_dump+3],B0
+
+  mov ecx,eax
+  cmp ecx,07FC
+  jbe @f
+  mov ecx,07FC
+@@:
+  lea edi,[weekly_packet_dump+4]
+  mov ebx,esi
+  test ecx,ecx
+  je @f
+@@:
+  mov al,[ebx]
+  mov [edi],al
+  inc ebx
+  inc edi
+  loop @b
+@@:
+
+  movzx eax,byte ptr [esi+2]
+  shl eax,08
+  movzx ebx,byte ptr [esi+3]
+  add eax,ebx
+  mov [weekly_activity],eax
+
+  push eax
+  push router_log_weekly_recv
+  push Online.exe+230504
+  call Online.exe+2EF0
+  add esp,0C
+
+  push 00
+  push 00
+  push dword ptr [Online.exe+2304D8]
+  push dword ptr [Online.exe+2300A4]
+  call dword ptr [Online.exe+1C46B0]
+
+  call weekly_find_next_pattern
+  cmp dword ptr [weekly_next_data],FFFFFFFF
+  je dispatch_done
+
+  mov eax,[weekly_next_data]
+  cmp eax,[weekly_last_sent_data]
+  jne weekly_new_pair
+  jmp dispatch_done
+
+weekly_new_pair:
+  mov dword ptr [weekly_pending_next],01
+  mov dword ptr [weekly_cmd_send_next],01
+
+  jmp dispatch_done
+
+weekly_find_next_pattern:
+  mov dword ptr [weekly_next_data],FFFFFFFF
+
+  mov edi,esi
+  mov ecx,[weekly_recv_len]
+  cmp ecx,08
+  jb weekly_find_next_done
+  sub ecx,07
+
+weekly_find_next_loop:
+  cmp dword ptr [edi],09007D7B
+  je weekly_find_next_found
+  inc edi
+  loop weekly_find_next_loop
+  jmp weekly_find_next_done
+
+weekly_find_next_found:
+  mov eax,[edi+4]
+  mov [weekly_next_data],eax
+
+weekly_find_next_done:
+  ret
+
+handle_jrnt_4f35:
+  mov esi,edx
+  mov edi,[esp+24]
+  cmp edi,04
+  jb dispatch_done
+
+  mov dword ptr [jrnt_pending_open],00
+  mov byte ptr [jrnt_ids],FF
+  mov byte ptr [jrnt_ids+1],FF
+  mov byte ptr [jrnt_ids+2],FF
+  mov byte ptr [jrnt_claim_pending],00
+  mov byte ptr [jrnt_claim_pending+1],00
+  mov byte ptr [jrnt_claim_pending+2],00
+
+  movzx eax,byte ptr [esi+3]
+  test eax,eax
+  je @f
+  mov dword ptr [jrnt_pending_open],01
+  jmp dispatch_done
+@@:
+
+  xor ebx,ebx
+  mov ecx,01
+jrnt_scan_ids_loop:
+  mov eax,edi
+  sub eax,02
+  cmp ecx,eax
+  ja jrnt_scan_ids_done
+  cmp byte ptr [esi+ecx],00
+  jne jrnt_scan_ids_next
+  cmp byte ptr [esi+ecx+1],0C
+  jne jrnt_scan_ids_next
+  cmp ebx,03
+  jae jrnt_scan_ids_next
+  mov al,[esi+ecx-1]
+  mov [jrnt_ids+ebx],al
+  inc ebx
+jrnt_scan_ids_next:
+  inc ecx
+  jmp jrnt_scan_ids_loop
+
+jrnt_scan_ids_done:
+  xor ebx,ebx
+  mov ecx,01
+jrnt_scan_status_loop:
+  mov eax,edi
+  sub eax,04
+  cmp ecx,eax
+  ja jrnt_scan_status_done
+  cmp byte ptr [esi+ecx],00
+  jne jrnt_scan_status_next
+  cmp byte ptr [esi+ecx+1],02
+  jne jrnt_scan_status_next
+  cmp byte ptr [esi+ecx+2],7B
+  jne jrnt_scan_status_next
+  cmp byte ptr [esi+ecx+3],7D
+  jne jrnt_scan_status_next
+  cmp ebx,03
+  jae jrnt_scan_status_next
+  mov al,[esi+ecx-1]
+  cmp al,01
+  jne @f
+  cmp byte ptr [jrnt_ids+ebx],FF
+  je @f
+  mov byte ptr [jrnt_claim_pending+ebx],01
+@@:
+  inc ebx
+jrnt_scan_status_next:
+  inc ecx
+  jmp jrnt_scan_status_loop
+
+jrnt_scan_status_done:
+  jmp dispatch_done
+
+handle_ptask_4e61:
+  mov esi,edx
+  mov edi,[esp+24]
+  cmp edi,0E
+  jb dispatch_done
+  cmp dword ptr [ptask_pending_promo],01
+  je dispatch_done
+  cmp byte ptr [ptask_claim_pending],01
+  je dispatch_done
+  cmp byte ptr [ptask_claim_pending+1],01
+  je dispatch_done
+  cmp byte ptr [ptask_claim_pending+2],01
+  je dispatch_done
+
+  mov dword ptr [ptask_pending_promo],00
+  mov byte ptr [ptask_claim_pending],00
+  mov byte ptr [ptask_claim_pending+1],00
+  mov byte ptr [ptask_claim_pending+2],00
+  mov byte ptr [ptask_reward_ids],00
+  mov byte ptr [ptask_reward_ids+1],00
+  mov byte ptr [ptask_reward_ids+2],00
+  mov byte ptr [ptask_reward_ids+3],00
+  mov byte ptr [ptask_reward_ids+4],00
+  mov byte ptr [ptask_reward_ids+5],00
+  mov byte ptr [ptask_reward_valid],00
+  mov byte ptr [ptask_reward_valid+1],00
+  mov byte ptr [ptask_reward_valid+2],00
+
+  movzx eax,byte ptr [esi+3]
+  mov [ptask_level],eax
+
+  cmp byte ptr [esi+0D],03
+  jne ptask_promo_not03
+  mov dword ptr [ptask_pending_promo],01
+  jmp dispatch_done
+
+ptask_promo_not03:
+  xor ebx,ebx
+  mov ecx,02
+ptask_scan_ids_loop:
+  mov eax,edi
+  sub eax,04
+  cmp ecx,eax
+  ja ptask_scan_ids_done
+  cmp byte ptr [esi+ecx],00
+  jne ptask_scan_ids_next
+  cmp byte ptr [esi+ecx+1],14
+  jne ptask_scan_ids_next
+  cmp ebx,03
+  jae ptask_scan_ids_next
+
+  movzx eax,word ptr [esi+ecx+2]
+  push ecx
+  push ebx
+  xor ebp,ebp
+  mov edx,02
+ptask_id_count_loop:
+  mov ebx,edi
+  sub ebx,04
+  cmp edx,ebx
+  ja ptask_id_count_done
+  cmp byte ptr [esi+edx],00
+  jne ptask_id_count_next
+  cmp byte ptr [esi+edx+1],14
+  jne ptask_id_count_next
+  movzx ecx,word ptr [esi+edx+2]
+  cmp ecx,eax
+  jne ptask_id_count_next
+  inc ebp
+ptask_id_count_next:
+  inc edx
+  jmp ptask_id_count_loop
+
+ptask_id_count_done:
+  pop ebx
+  pop ecx
+  cmp ebp,03
+  jb ptask_id_bad_tail
+
+  mov al,[esi+ecx-2]
+  mov [ptask_reward_ids+ebx*2],al
+  mov al,[esi+ecx-1]
+  mov [ptask_reward_ids+ebx*2+1],al
+  mov byte ptr [ptask_reward_valid+ebx],01
+  inc ebx
+  jmp ptask_scan_ids_next
+
+ptask_id_bad_tail:
+  jmp ptask_scan_ids_next
+
+ptask_scan_ids_next:
+  inc ecx
+  jmp ptask_scan_ids_loop
+
+ptask_scan_ids_done:
+  xor ebx,ebx
+  mov ecx,01
+ptask_scan_status_loop:
+  mov eax,edi
+  sub eax,04
+  cmp ecx,eax
+  ja ptask_scan_status_done
+  cmp byte ptr [esi+ecx],00
+  jne ptask_scan_status_next
+  cmp byte ptr [esi+ecx+1],03
+  jne ptask_scan_status_next
+  cmp byte ptr [esi+ecx+2],00
+  jne ptask_scan_status_next
+  cmp byte ptr [esi+ecx+3],C8
+  jne ptask_scan_status_next
+  cmp ebx,03
+  jae ptask_scan_status_next
+  mov al,[esi+ecx-1]
+  cmp al,02
+  jne ptask_status_after
+  cmp byte ptr [ptask_reward_valid+ebx],01
+  jne ptask_status_after
+  mov byte ptr [ptask_claim_pending+ebx],01
+ptask_status_after:
+  inc ebx
+ptask_scan_status_next:
+  inc ecx
+  jmp ptask_scan_status_loop
+
+ptask_scan_status_done:
+  jmp dispatch_done
+
+td_clear_outputs:
+  mov dword ptr [td_parse_error],00
+  mov dword ptr [td_fail_stage],00
+  mov dword ptr [td_fail_offset],00
+  mov dword ptr [td_dbg_task_start],00
+  mov dword ptr [td_dbg_after_text],00
+  mov dword ptr [td_dbg_after_fixed],00
+  mov dword ptr [td_dbg_after_normal],00
+  mov dword ptr [td_dbg_after_special],00
+  mov dword ptr [td_dbg_after_conditions],00
+  mov dword ptr [td_dbg_after_heroes],00
+  mov dword ptr [td_dbg_after_extra],00
+  mov dword ptr [td_dbg_normal_count],00
+  mov dword ptr [td_dbg_special_count],00
+  mov dword ptr [td_dbg_condition_count],00
+  mov dword ptr [td_dbg_hero_count],00
+  mov dword ptr [td_current_dispatch],00
+  mov dword ptr [td_max_dispatch],00
+  mov dword ptr [td_free_slots],00
+  mov dword ptr [td_unassigned_count],00
+  mov dword ptr [td_dispatched_count],00
+  mov dword ptr [td_unassigned_seen],00
+  mov dword ptr [td_dispatched_seen],00
+  mov dword ptr [td_claim_pending],00
+  mov dword ptr [td_claim_task_id],00
+  mov dword ptr [td_claim_task_id+04],00
+  mov dword ptr [td_best_pending],00
+  mov dword ptr [td_best_task_id],00
+  mov dword ptr [td_best_task_id+04],00
+  mov dword ptr [td_best_rank],63
+  mov dword ptr [td_best_quality],00
+  mov dword ptr [td_config_ready],00
+  mov dword ptr [td_config_task_id],00
+  mov dword ptr [td_config_task_id+04],00
+  mov dword ptr [td_4b45_payload_len],00
+  mov dword ptr [td_4b45_payload],00
+  mov dword ptr [td_4b45_payload+04],00
+  mov dword ptr [td_4b45_payload+08],00
+  xor ebx,ebx
+td_clear_arrays_loop:
+  cmp ebx,10
+  jae short @f
+  mov dword ptr [td_unassigned_ids+ebx*8],00
+  mov dword ptr [td_unassigned_ids+ebx*8+04],00
+  mov dword ptr [td_unassigned_quality+ebx*4],00
+  mov dword ptr [td_unassigned_status+ebx*4],00
+  mov dword ptr [td_unassigned_rank+ebx*4],00
+  mov dword ptr [td_dispatched_ids+ebx*8],00
+  mov dword ptr [td_dispatched_ids+ebx*8+04],00
+  mov dword ptr [td_dispatched_quality+ebx*4],00
+  mov dword ptr [td_dispatched_status+ebx*4],00
+  mov dword ptr [td_dispatched_rank+ebx*4],00
+  inc ebx
+  jmp td_clear_arrays_loop
+@@:
+  ret
+
+handle_td_4b49:
+  cmp dword ptr [Online.exe+2311F0],00
+  je dispatch_done
+  call td_clear_outputs
+  mov dword ptr [td_parse_error],00
+  mov dword ptr [td_fail_stage],00
+  mov dword ptr [td_fail_offset],00
+  mov esi,edx
+  mov edi,edx
+  mov [td_payload_base],edx
+  mov eax,[esp+24]
+  add eax,edx
+  mov [td_end],eax
+
+  call td_read_u32_adv
+  mov [td_current_dispatch],eax
+  call td_read_u32_adv
+  mov [td_max_dispatch],eax
+  mov edx,eax
+  sub edx,[td_current_dispatch]
+  mov [td_free_slots],edx
+  call td_read_u32_adv
+  call td_skip_bytes_eax_1
+  call td_read_u32_adv
+  call td_read_u16_adv
+  cmp dword ptr [td_parse_error],01
+  je dispatch_done
+  cmp eax,14
+  jbe short @f
+  mov eax,14
+@@:
+  mov [td_unassigned_count],eax
+  mov [td_outer_count],eax
+  mov dword ptr [td_outer_index],00
+
+td_4b49_unassigned_loop:
+  mov eax,[td_outer_index]
+  cmp eax,[td_outer_count]
+  jae td_4b49_unassigned_done
+  mov dword ptr [td_parse_mode],01
+  call td_parse_task
+  cmp dword ptr [td_parse_error],01
+  je dispatch_done
+  inc dword ptr [td_outer_index]
+  jmp td_4b49_unassigned_loop
+
+td_4b49_unassigned_done:
+  cmp dword ptr [td_best_pending],01
+  je td_4b49_keep_skip_list
+  cmp dword ptr [td_free_slots],00
+  jle td_4b49_keep_skip_list
+  cmp dword ptr [td_skip_count],00
+  je td_4b49_keep_skip_list
+  mov dword ptr [td_skip_count],00
+td_4b49_keep_skip_list:
+  call td_read_u16_adv
+  cmp dword ptr [td_parse_error],01
+  je dispatch_done
+  cmp eax,14
+  jbe short @f
+  mov eax,14
+@@:
+  mov [td_dispatched_count],eax
+  mov [td_outer_count],eax
+  mov dword ptr [td_outer_index],00
+
+td_4b49_dispatched_loop:
+  mov eax,[td_outer_index]
+  cmp eax,[td_outer_count]
+  jae td_4b49_dispatched_done
+  mov dword ptr [td_parse_mode],03
+  call td_parse_task
+  cmp dword ptr [td_parse_error],01
+  je dispatch_done
+  inc dword ptr [td_outer_index]
+  jmp td_4b49_dispatched_loop
+
+td_4b49_dispatched_done:
+  call td_skip_string
+  jmp dispatch_done
+
+handle_td_4b4b:
+  cmp dword ptr [Online.exe+2311F0],00
+  je dispatch_done
+  mov dword ptr [td_config_ready],00
+  mov dword ptr [td_4b45_payload_len],00
+  mov dword ptr [td_config_task_id],00
+  mov dword ptr [td_config_task_id+04],00
+  mov dword ptr [td_4b45_payload],00
+  mov dword ptr [td_4b45_payload+04],00
+  mov dword ptr [td_4b45_payload+08],00
+  mov dword ptr [td_parse_error],00
+  mov dword ptr [td_fail_stage],00
+  mov dword ptr [td_fail_offset],00
+  mov esi,edx
+  mov edi,edx
+  mov [td_payload_base],edx
+  mov eax,[esp+24]
+  add eax,edx
+  mov [td_end],eax
+  call td_parse_4b4b_config
+  jmp dispatch_done
+
+td_parse_4b4b_config:
+  mov dword ptr [td_parse_mode],02
+  mov dword ptr [td_fail_stage],100
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_task_start],eax
+  lea eax,[edi+08]
+  cmp eax,[td_end]
+  ja td_fail
+  mov eax,[edi]
+  mov [td_current_task_id],eax
+  mov [td_config_task_id],eax
+  mov [td_4b45_payload],eax
+  mov eax,[edi+04]
+  mov [td_current_task_id+04],eax
+  mov [td_config_task_id+04],eax
+  mov [td_4b45_payload+04],eax
+  add edi,08
+  mov dword ptr [td_fail_stage],110
+  call td_skip_string
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov dword ptr [td_fail_stage],111
+  call td_skip_string
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_text],eax
+  mov dword ptr [td_fail_stage],120
+  call td_read_u32_adv
+  mov [td_current_quality],eax
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov dword ptr [td_fail_stage],121
+  call td_read_u32_adv
+  mov [td_current_status],eax
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov dword ptr [td_fail_stage],122
+  call td_read_u32_adv
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov dword ptr [td_fail_stage],123
+  call td_read_u32_adv
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov dword ptr [td_fail_stage],124
+  call td_read_u32_adv
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov dword ptr [td_fail_stage],125
+  call td_skip_string
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov dword ptr [td_fail_stage],126
+  call td_read_u32_adv
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_fixed],eax
+  mov dword ptr [td_fail_stage],130
+  call td_parse_normal_rewards
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_normal],eax
+  mov dword ptr [td_fail_stage],140
+  call td_skip_rewards
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_special],eax
+  mov dword ptr [td_fail_stage],150
+  call td_skip_conditions
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_conditions],eax
+  call td_parse_config_heroes
+  cmp dword ptr [td_parse_error],01
+  je td_task_done
+  call td_skip_string
+  ret
+
+td_parse_task:
+  mov dword ptr [td_fail_stage],100
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_task_start],eax
+  lea eax,[edi+08]
+  cmp eax,[td_end]
+  ja td_fail
+  mov eax,[edi]
+  mov [td_current_task_id],eax
+  mov [td_config_task_id],eax
+  mov eax,[edi+04]
+  mov [td_current_task_id+04],eax
+  mov [td_config_task_id+04],eax
+  cmp dword ptr [td_parse_mode],02
+  jne short @f
+  mov eax,[edi]
+  mov [td_4b45_payload],eax
+  mov eax,[edi+04]
+  mov [td_4b45_payload+04],eax
+@@:
+  add edi,08
+  mov dword ptr [td_fail_stage],110
+  call td_skip_string
+  mov dword ptr [td_fail_stage],111
+  call td_skip_string
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_text],eax
+  mov dword ptr [td_fail_stage],120
+  call td_read_u32_adv
+  mov [td_current_quality],eax
+  mov dword ptr [td_fail_stage],121
+  call td_read_u32_adv
+  mov [td_current_status],eax
+  mov dword ptr [td_fail_stage],122
+  call td_read_u32_adv
+  mov dword ptr [td_fail_stage],123
+  call td_read_u32_adv
+  mov dword ptr [td_fail_stage],124
+  call td_read_u32_adv
+  mov dword ptr [td_fail_stage],125
+  call td_skip_string
+  mov dword ptr [td_fail_stage],126
+  call td_read_u32_adv
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_fixed],eax
+  mov dword ptr [td_fail_stage],130
+  call td_parse_normal_rewards
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_normal],eax
+td_task_after_normal_rewards:
+  mov dword ptr [td_fail_stage],140
+  call td_skip_rewards
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_special],eax
+  mov dword ptr [td_fail_stage],150
+  call td_skip_conditions
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_conditions],eax
+  cmp dword ptr [td_parse_mode],02
+  je td_parse_config_heroes
+  mov dword ptr [td_fail_stage],160
+  call td_skip_heroes
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_heroes],eax
+  jmp td_task_after_heroes
+
+td_parse_config_heroes:
+  mov dword ptr [td_fail_stage],161
+  call td_read_u16_adv
+  mov [td_hero_count],eax
+  mov [td_dbg_hero_count],eax
+  mov edx,eax
+  shr edx,08
+  mov byte ptr [td_4b45_payload+08],dl
+  mov eax,[td_hero_count]
+  mov byte ptr [td_4b45_payload+09],al
+  mov eax,td_4b45_payload+0A
+  mov [td_payload_write],eax
+  mov dword ptr [td_loop_index],00
+
+td_config_heroes_loop:
+  mov eax,[td_loop_index]
+  cmp eax,[td_hero_count]
+  jae td_config_heroes_done
+  mov dword ptr [td_fail_stage],162
+  mov ecx,04
+  call td_copy_bytes_ecx
+  mov dword ptr [td_fail_stage],163
+  movzx ecx,byte ptr [edi]
+  shl ecx,08
+  movzx eax,byte ptr [edi+01]
+  add ecx,eax
+  add ecx,02
+  call td_copy_bytes_ecx
+  mov dword ptr [td_fail_stage],164
+  mov ecx,04
+  call td_copy_bytes_ecx
+  mov dword ptr [td_fail_stage],165
+  mov ecx,04
+  call td_copy_bytes_ecx
+  mov dword ptr [td_fail_stage],166
+  call td_skip_string
+  inc dword ptr [td_loop_index]
+  jmp td_config_heroes_loop
+
+td_config_heroes_done:
+  mov eax,[td_payload_write]
+  mov edx,td_4b45_payload
+  sub eax,edx
+  mov [td_4b45_payload_len],eax
+  cmp dword ptr [td_hero_count],00
+  je td_task_after_heroes
+  mov dword ptr [td_config_ready],01
+
+td_task_after_heroes:
+  mov dword ptr [td_fail_stage],170
+  call td_task_skip_optional_extra
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_dbg_after_extra],eax
+  jmp td_task_finish_after_extra
+
+td_task_skip_optional_extra:
+  mov eax,edi
+  add eax,02
+  cmp eax,[td_end]
+  ja td_task_no_extra
+  cmp dword ptr [td_parse_mode],01
+  jne short @f
+  mov eax,[td_outer_index]
+  inc eax
+  cmp eax,[td_outer_count]
+  jae short @f
+  cmp word ptr [edi],0000
+  je td_task_no_extra
+@@:
+  call td_skip_string
+td_task_no_extra:
+  ret
+
+td_task_finish_after_extra:
+  cmp dword ptr [td_parse_mode],01
+  je td_task_finish_unassigned
+  cmp dword ptr [td_parse_mode],03
+  je td_task_finish_dispatched
+  cmp dword ptr [td_parse_mode],02
+  je td_task_finish_config
+  jmp td_task_done
+
+td_task_finish_unassigned:
+  call td_store_unassigned_detail
+  cmp dword ptr [td_free_slots],00
+  jle td_task_done
+  cmp dword ptr [td_current_status],01
+  jne td_task_done
+  call td_is_current_skipped
+  cmp eax,01
+  je td_task_done
+  mov eax,[td_current_rank]
+  cmp eax,[td_best_rank]
+  jb short @f
+  ja td_task_done
+  mov eax,[td_current_quality]
+  cmp eax,[td_best_quality]
+  jbe td_task_done
+@@:
+  mov eax,[td_current_rank]
+  mov [td_best_rank],eax
+  mov eax,[td_current_quality]
+  mov [td_best_quality],eax
+  mov eax,[td_current_task_id]
+  mov [td_best_task_id],eax
+  mov eax,[td_current_task_id+04]
+  mov [td_best_task_id+04],eax
+  mov dword ptr [td_best_pending],01
+  jmp td_task_done
+
+td_task_finish_dispatched:
+  call td_store_dispatched_detail
+  cmp dword ptr [td_claim_pending],01
+  je td_task_done
+  cmp dword ptr [td_current_status],03
+  jne td_task_done
+  mov eax,[td_current_task_id]
+  mov [td_claim_task_id],eax
+  mov eax,[td_current_task_id+04]
+  mov [td_claim_task_id+04],eax
+  mov dword ptr [td_claim_pending],01
+  jmp td_task_done
+
+td_task_finish_config:
+  jmp td_task_done
+
+td_task_done:
+  ret
+
+td_is_current_skipped:
+  xor ecx,ecx
+  mov ebx,[td_skip_count]
+  cmp ebx,10
+  jbe td_is_current_skipped_loop
+  mov ebx,10
+td_is_current_skipped_loop:
+  cmp ecx,ebx
+  jae td_is_current_skipped_no
+  mov eax,[td_skip_ids+ecx*8]
+  cmp eax,[td_current_task_id]
+  jne short @f
+  mov eax,[td_skip_ids+ecx*8+04]
+  cmp eax,[td_current_task_id+04]
+  je td_is_current_skipped_yes
+@@:
+  inc ecx
+  jmp td_is_current_skipped_loop
+td_is_current_skipped_yes:
+  mov eax,01
+  ret
+td_is_current_skipped_no:
+  xor eax,eax
+  ret
+
+td_store_unassigned_detail:
+  mov ebx,[td_unassigned_seen]
+  cmp ebx,10
+  jae td_store_unassigned_done
+  mov eax,[td_current_task_id]
+  mov [td_unassigned_ids+ebx*8],eax
+  mov eax,[td_current_task_id+04]
+  mov [td_unassigned_ids+ebx*8+04],eax
+  mov eax,[td_current_quality]
+  mov [td_unassigned_quality+ebx*4],eax
+  mov eax,[td_current_status]
+  mov [td_unassigned_status+ebx*4],eax
+  mov eax,[td_current_rank]
+  mov [td_unassigned_rank+ebx*4],eax
+  inc dword ptr [td_unassigned_seen]
+td_store_unassigned_done:
+  ret
+
+td_store_dispatched_detail:
+  mov ebx,[td_dispatched_seen]
+  cmp ebx,10
+  jae td_store_dispatched_done
+  mov eax,[td_current_task_id]
+  mov [td_dispatched_ids+ebx*8],eax
+  mov eax,[td_current_task_id+04]
+  mov [td_dispatched_ids+ebx*8+04],eax
+  mov eax,[td_current_quality]
+  mov [td_dispatched_quality+ebx*4],eax
+  mov eax,[td_current_status]
+  mov [td_dispatched_status+ebx*4],eax
+  mov eax,[td_current_rank]
+  mov [td_dispatched_rank+ebx*4],eax
+  inc dword ptr [td_dispatched_seen]
+td_store_dispatched_done:
+  ret
+
+td_parse_normal_rewards:
+  mov dword ptr [td_current_rank],63
+  mov dword ptr [td_fail_stage],131
+  call td_read_u16_adv
+  mov [td_loop_count],eax
+  mov [td_dbg_normal_count],eax
+  mov dword ptr [td_loop_index],00
+
+td_normal_reward_loop:
+  mov eax,[td_loop_index]
+  cmp eax,[td_loop_count]
+  jae td_normal_reward_done
+  mov dword ptr [td_fail_stage],132
+  call td_read_u16_adv
+  call td_rank_type
+  mov edx,[td_current_rank]
+  cmp eax,edx
+  jae short @f
+  mov [td_current_rank],eax
+@@:
+  mov dword ptr [td_fail_stage],133
+  call td_read_u32_adv
+  mov dword ptr [td_fail_stage],134
+  call td_skip_string
+  inc dword ptr [td_loop_index]
+  jmp td_normal_reward_loop
+
+td_normal_reward_done:
+  ret
+
+td_rank_type:
+  cmp eax,08
+  je td_rank_1
+  cmp eax,10
+  je td_rank_2
+  cmp eax,11
+  je td_rank_3
+  cmp eax,26
+  je td_rank_4
+  cmp eax,1A
+  je td_rank_5
+  cmp eax,1C
+  je td_rank_6
+  cmp eax,06
+  je td_rank_7
+  cmp eax,2E
+  je td_rank_8
+  cmp eax,05
+  je td_rank_9
+  mov eax,63
+  ret
+td_rank_1:
+  mov eax,01
+  ret
+td_rank_2:
+  mov eax,02
+  ret
+td_rank_3:
+  mov eax,03
+  ret
+td_rank_4:
+  mov eax,04
+  ret
+td_rank_5:
+  mov eax,05
+  ret
+td_rank_6:
+  mov eax,06
+  ret
+td_rank_7:
+  mov eax,07
+  ret
+td_rank_8:
+  mov eax,08
+  ret
+td_rank_9:
+  mov eax,09
+  ret
+
+td_skip_rewards:
+  mov dword ptr [td_fail_stage],141
+  call td_read_u16_adv
+  mov [td_loop_count],eax
+  mov [td_dbg_special_count],eax
+  mov dword ptr [td_loop_index],00
+
+td_skip_rewards_loop:
+  mov eax,[td_loop_index]
+  cmp eax,[td_loop_count]
+  jae td_skip_rewards_done
+  mov dword ptr [td_fail_stage],142
+  call td_read_u16_adv
+  mov dword ptr [td_fail_stage],143
+  call td_read_u32_adv
+  mov dword ptr [td_fail_stage],144
+  call td_skip_string
+  inc dword ptr [td_loop_index]
+  jmp td_skip_rewards_loop
+
+td_skip_rewards_done:
+  ret
+
+td_skip_conditions:
+  mov dword ptr [td_fail_stage],151
+  call td_read_u16_adv
+  mov [td_loop_count],eax
+  mov [td_dbg_condition_count],eax
+  mov dword ptr [td_loop_index],00
+
+td_skip_conditions_loop:
+  mov eax,[td_loop_index]
+  cmp eax,[td_loop_count]
+  jae td_skip_conditions_done
+  mov dword ptr [td_fail_stage],152
+  call td_read_u32_adv
+  mov dword ptr [td_fail_stage],153
+  call td_read_u32_adv
+  mov dword ptr [td_fail_stage],154
+  call td_read_u32_adv
+  mov dword ptr [td_fail_stage],155
+  call td_skip_string
+  mov dword ptr [td_fail_stage],156
+  call td_skip_string
+  mov dword ptr [td_fail_stage],157
+  lea eax,[edi+01]
+  cmp eax,[td_end]
+  ja td_fail
+  inc edi
+  mov dword ptr [td_fail_stage],158
+  call td_skip_string
+  inc dword ptr [td_loop_index]
+  jmp td_skip_conditions_loop
+
+td_skip_conditions_done:
+  ret
+
+td_skip_heroes:
+  mov dword ptr [td_fail_stage],161
+  call td_read_u16_adv
+  mov [td_loop_count],eax
+  mov [td_dbg_hero_count],eax
+  mov dword ptr [td_loop_index],00
+
+td_skip_heroes_loop:
+  mov eax,[td_loop_index]
+  cmp eax,[td_loop_count]
+  jae td_skip_heroes_done
+  mov dword ptr [td_fail_stage],162
+  call td_read_u32_adv
+  mov dword ptr [td_fail_stage],163
+  call td_skip_string
+  mov dword ptr [td_fail_stage],164
+  call td_read_u32_adv
+  mov dword ptr [td_fail_stage],165
+  call td_read_u32_adv
+  mov dword ptr [td_fail_stage],166
+  call td_skip_string
+  inc dword ptr [td_loop_index]
+  jmp td_skip_heroes_loop
+
+td_skip_heroes_done:
+  ret
+
+td_copy_bytes_ecx:
+  mov eax,edi
+  add eax,ecx
+  cmp eax,[td_end]
+  ja td_fail
+  mov edx,[td_payload_write]
+  mov eax,edx
+  add eax,ecx
+  mov ebx,td_4b45_payload+400
+  cmp eax,ebx
+  ja td_fail
+
+td_copy_bytes_loop:
+  test ecx,ecx
+  je td_copy_bytes_done
+  mov al,[edi]
+  mov [edx],al
+  inc edi
+  inc edx
+  dec ecx
+  jmp td_copy_bytes_loop
+
+td_copy_bytes_done:
+  mov [td_payload_write],edx
+  ret
+
+td_read_u16_adv:
+  lea eax,[edi+02]
+  cmp eax,[td_end]
+  ja td_fail
+  movzx eax,byte ptr [edi]
+  shl eax,08
+  movzx edx,byte ptr [edi+01]
+  add eax,edx
+  add edi,02
+  ret
+
+td_read_u32_adv:
+  lea eax,[edi+04]
+  cmp eax,[td_end]
+  ja td_fail
+  movzx eax,byte ptr [edi]
+  shl eax,08
+  movzx edx,byte ptr [edi+01]
+  add eax,edx
+  shl eax,08
+  movzx edx,byte ptr [edi+02]
+  add eax,edx
+  shl eax,08
+  movzx edx,byte ptr [edi+03]
+  add eax,edx
+  add edi,04
+  ret
+
+td_skip_string:
+  call td_read_u16_adv
+
+td_skip_bytes_eax:
+  add eax,edi
+  cmp eax,[td_end]
+  ja td_fail
+  mov edi,eax
+  ret
+
+td_skip_bytes_eax_1:
+  mov eax,01
+  jmp td_skip_bytes_eax
+
+td_fail:
+  mov dword ptr [td_parse_error],01
+  mov eax,edi
+  sub eax,[td_payload_base]
+  mov [td_fail_offset],eax
+  mov edi,[td_end]
+  xor eax,eax
+  ret
+
+dispatch_done:
+  popad
+
+  push ebp
+  mov ebp,esp
+  push FF
+  push 005B4A58
+  jmp dispatch_return
+
+parse_payload:
+  cmp byte ptr [esi+12],01
+  jne @f
+  mov dword ptr [daysign_need_sign],01
+@@:
+
+  mov dword ptr [daysign_bonus_bits],00
+
+  mov edi,esi
+  mov ecx,900
+scan_b1:
+  cmp dword ptr [edi],01000000
+  jne @f
+  cmp dword ptr [edi+4],02000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],01
+  jmp next_b2
+@@:
+  inc edi
+  loop scan_b1
+
+next_b2:
+  mov edi,esi
+  mov ecx,900
+scan_b2:
+  cmp dword ptr [edi],02000000
+  jne @f
+  cmp dword ptr [edi+4],05000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],02
+  jmp next_b3
+@@:
+  inc edi
+  loop scan_b2
+
+next_b3:
+  mov edi,esi
+  mov ecx,900
+scan_b3:
+  cmp dword ptr [edi],03000000
+  jne @f
+  cmp dword ptr [edi+4],08000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],04
+  jmp next_b4
+@@:
+  inc edi
+  loop scan_b3
+
+next_b4:
+  mov edi,esi
+  mov ecx,900
+scan_b4:
+  cmp dword ptr [edi],04000000
+  jne @f
+  cmp dword ptr [edi+4],0C000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],08
+  jmp next_b5
+@@:
+  inc edi
+  loop scan_b4
+
+next_b5:
+  mov edi,esi
+  mov ecx,900
+scan_b5:
+  cmp dword ptr [edi],05000000
+  jne @f
+  cmp dword ptr [edi+4],10000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],10
+  jmp next_b6
+@@:
+  inc edi
+  loop scan_b5
+
+next_b6:
+  mov edi,esi
+  mov ecx,900
+scan_b6:
+  cmp dword ptr [edi],06000000
+  jne @f
+  cmp dword ptr [edi+4],14000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],20
+  jmp next_b7
+@@:
+  inc edi
+  loop scan_b6
+
+next_b7:
+  mov edi,esi
+  mov ecx,900
+scan_b7:
+  cmp dword ptr [edi],07000000
+  jne @f
+  cmp dword ptr [edi+4],1A000000
+  jne @f
+  cmp dword ptr [edi+8],02000000
+  jne @f
+  or dword ptr [daysign_bonus_bits],40
+@@:
+  ret
+
+[DISABLE]
+
+shared_dispatch:
+  db 55 8B EC 6A FF
+
+unregistersymbol(xycj_state)
+unregistersymbol(xycj_count)
+unregistersymbol(xycj_id)
+unregistersymbol(zpdfw_router_pending_sets)
+unregistersymbol(zpdfw_router_switch_seen)
+unregistersymbol(zpdfw_router_3ea4_hits)
+unregistersymbol(zpdfw_pending)
+unregistersymbol(weekly_last_sent_data)
+unregistersymbol(weekly_cmd_send_next)
+unregistersymbol(weekly_pending_next)
+unregistersymbol(weekly_recv_len)
+unregistersymbol(weekly_packet_dump)
+unregistersymbol(weekly_next_data)
+unregistersymbol(weekly_activity)
+unregistersymbol(jrnt_claim_pending)
+unregistersymbol(jrnt_pending_open)
+unregistersymbol(jrnt_ids)
+unregistersymbol(daysign_last_query)
+unregistersymbol(daysign_bonus_bits)
+unregistersymbol(daysign_need_sign)
+
+dealloc(router_log_weekly_recv)
+dealloc(weekly_last_sent_data)
+dealloc(weekly_cmd_send_next)
+dealloc(weekly_pending_next)
+dealloc(weekly_recv_len)
+dealloc(weekly_packet_dump)
+dealloc(weekly_next_data)
+dealloc(weekly_activity)
+dealloc(jrnt_claim_pending)
+dealloc(jrnt_pending_open)
+dealloc(jrnt_ids)
+dealloc(zpdfw_router_pending_sets)
+dealloc(zpdfw_router_switch_seen)
+dealloc(zpdfw_router_3ea4_hits)
+dealloc(zpdfw_pending)
+dealloc(xycj_state)
+dealloc(xycj_count)
+dealloc(xycj_id)
+dealloc(daysign_last_query)
+dealloc(daysign_bonus_bits)
+dealloc(daysign_need_sign)
+dealloc(router_gf_saved_len)
+dealloc(router_gf_saved_payload)
+dealloc(shared_dispatch_hook)
