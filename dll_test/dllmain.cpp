@@ -122,7 +122,7 @@ namespace Jrnt
 volatile LONG g_this = 0;
 volatile LONG g_didWork = 0;
 volatile LONG g_pendingOpen = 0;
-BYTE g_ids[4] = { 0xFF, 0xFF, 0xFF, 0x00 };
+uint32_t g_ids[4] = { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0 };
 BYTE g_claimPending[4]{};
 BYTE g_payloadZero = 0;
 BYTE g_payload4F37 = 0;
@@ -303,6 +303,9 @@ constexpr DWORD kBattleResultTimeoutMs = 0x7530;
 constexpr DWORD kMaxClosedWaitSeconds = 7 * 24 * 60 * 60;
 constexpr size_t kDungeonCount = 9;
 constexpr size_t kMaxTeams = 10;
+constexpr size_t kOrderMemberMaxBytes = 128;
+constexpr LONG kOrderRetryMax = 3;
+constexpr LONG kCreateTeamMissMax = 6;
 
 volatile LONG g_state = 0;
 volatile LONG g_currentId = 0;
@@ -331,6 +334,8 @@ volatile LONG g_teamCount = 0;
 volatile LONG g_peopleCount = 0;
 volatile LONG g_payloadTeamCount = 0;
 volatile LONG g_teamOrderSent = 0;
+volatile LONG g_teamOrderRetries = 0;
+volatile LONG g_createTeamMissCount = 0;
 volatile LONG g_unlimitPassedOnce = 0;
 volatile LONG g_battleMode = 0;
 volatile LONG g_unlimitCount = 0;
@@ -343,7 +348,9 @@ uint32_t g_bufZero4 = 0;
 BYTE g_bufId4[4]{};
 BYTE g_bufId6[6]{};
 BYTE g_bufTeam4[4]{};
-BYTE g_bufOrder[128]{};
+BYTE g_bufOrder[256]{};
+BYTE g_orderExpected[3][kOrderMemberMaxBytes]{};
+uint32_t g_orderExpectedLens[3]{};
 
 bool BuildTickCode(uintptr_t base, CodeBuffer& code);
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
@@ -2771,6 +2778,7 @@ void ResetState()
 {
     InterlockedExchange(&g_pendingOpen, 0);
     for (size_t i = 0; i < 3; ++i) {
+        g_ids[i] = 0xFFFFFFFF;
         g_claimPending[i] = 0;
     }
 }
@@ -2785,10 +2793,14 @@ void SendOpen()
     SendPacketWithEcx(static_cast<uint32_t>(g_this), 0x4F37, &g_payload4F37, 1);
 }
 
-void SendClaim(BYTE id)
+void SendClaim(uint32_t id)
 {
     g_payload4F36 = 0;
-    reinterpret_cast<BYTE*>(&g_payload4F36)[3] = id;
+    BYTE* const payload = reinterpret_cast<BYTE*>(&g_payload4F36);
+    payload[0] = static_cast<BYTE>((id >> 24) & 0xFF);
+    payload[1] = static_cast<BYTE>((id >> 16) & 0xFF);
+    payload[2] = static_cast<BYTE>((id >> 8) & 0xFF);
+    payload[3] = static_cast<BYTE>(id & 0xFF);
     SendPacketWithEcx(static_cast<uint32_t>(g_this), 0x4F36, &g_payload4F36, sizeof(g_payload4F36));
 }
 
@@ -2801,6 +2813,7 @@ void Tick()
         SendOpen();
         InterlockedExchange(&g_pendingOpen, 0);
         InterlockedExchange(&g_didWork, 1);
+        return;
     }
 
     for (size_t i = 0; i < 3; ++i) {
@@ -2812,7 +2825,35 @@ void Tick()
         SendClaim(g_ids[i]);
         g_claimPending[i] = 0;
         InterlockedExchange(&g_didWork, 1);
+        return;
     }
+}
+
+uint16_t ReadBe16(const BYTE* data)
+{
+    return static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) | data[1]);
+}
+
+uint32_t ReadBe32(const BYTE* data)
+{
+    return (static_cast<uint32_t>(data[0]) << 24) |
+        (static_cast<uint32_t>(data[1]) << 16) |
+        (static_cast<uint32_t>(data[2]) << 8) |
+        static_cast<uint32_t>(data[3]);
+}
+
+bool SkipUtf(const BYTE*& cursor, const BYTE* end)
+{
+    if (cursor + 2 > end) {
+        return false;
+    }
+    const uint16_t length = ReadBe16(cursor);
+    cursor += 2;
+    if (cursor + length > end) {
+        return false;
+    }
+    cursor += length;
+    return true;
 }
 
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
@@ -2822,43 +2863,53 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
     }
 
     InterlockedExchange(&g_pendingOpen, 0);
-    g_ids[0] = 0xFF;
-    g_ids[1] = 0xFF;
-    g_ids[2] = 0xFF;
-    g_claimPending[0] = 0;
-    g_claimPending[1] = 0;
-    g_claimPending[2] = 0;
+    for (size_t i = 0; i < 3; ++i) {
+        g_ids[i] = 0xFFFFFFFF;
+        g_claimPending[i] = 0;
+    }
 
-    if (payload[3] != 0) {
+    const BYTE* cursor = payload;
+    const BYTE* const end = payload + payloadLength;
+    const uint32_t boxCount = ReadBe32(cursor);
+    cursor += 4;
+    if (boxCount != 0) {
         InterlockedExchange(&g_pendingOpen, 1);
+    }
+
+    if (cursor + 2 > end) {
         return;
     }
+    const uint16_t taskCount = ReadBe16(cursor);
+    cursor += 2;
 
-    size_t idIndex = 0;
-    for (uint32_t offset = 1; offset <= payloadLength - 2; ++offset) {
-        if (payload[offset] != 0 || payload[offset + 1] != 0x0C) {
-            continue;
+    size_t pendingIndex = 0;
+    for (uint16_t task = 0; task < taskCount; ++task) {
+        if (cursor + 4 > end) {
+            return;
         }
-        if (idIndex < 3) {
-            g_ids[idIndex++] = payload[offset - 1];
-        }
-    }
+        const uint32_t taskId = ReadBe32(cursor);
+        cursor += 4;
 
-    size_t statusIndex = 0;
-    for (uint32_t offset = 1; offset <= payloadLength - 4; ++offset) {
-        if (payload[offset] != 0 ||
-            payload[offset + 1] != 0x02 ||
-            payload[offset + 2] != 0x7B ||
-            payload[offset + 3] != 0x7D) {
-            continue;
+        if (!SkipUtf(cursor, end) ||
+            !SkipUtf(cursor, end) ||
+            !SkipUtf(cursor, end) ||
+            !SkipUtf(cursor, end) ||
+            cursor + 8 > end) {
+            return;
         }
 
-        if (statusIndex < 3 &&
-            payload[offset - 1] == 1 &&
-            g_ids[statusIndex] != 0xFF) {
-            g_claimPending[statusIndex] = 1;
+        cursor += 4; // rewardBox
+        const uint32_t taskState = ReadBe32(cursor);
+        cursor += 4;
+        if (!SkipUtf(cursor, end)) {
+            return;
         }
-        ++statusIndex;
+
+        if (taskState == 1 && pendingIndex < 3) {
+            g_ids[pendingIndex] = taskId;
+            g_claimPending[pendingIndex] = 1;
+            ++pendingIndex;
+        }
     }
 }
 
@@ -4235,7 +4286,36 @@ void Send4296()
     SendPacket(0x4296, g_bufTeam4, sizeof(g_bufTeam4));
 }
 
-void Send429A(const BYTE* member0, uint32_t len0, const BYTE* member1, uint32_t len1, const BYTE* member2, uint32_t len2)
+bool SaveExpectedOrder(const BYTE* member0, uint32_t len0, const BYTE* member1, uint32_t len1, const BYTE* member2, uint32_t len2)
+{
+    const BYTE* members[] = { member2, member0, member1 };
+    const uint32_t lengths[] = { len2, len0, len1 };
+    for (size_t i = 0; i < 3; ++i) {
+        if (!members[i] || lengths[i] == 0 || lengths[i] > kOrderMemberMaxBytes) {
+            return false;
+        }
+        std::memcpy(g_orderExpected[i], members[i], lengths[i]);
+        g_orderExpectedLens[i] = lengths[i];
+    }
+    return true;
+}
+
+bool CurrentOrderMatchesExpected(const BYTE* member0, uint32_t len0, const BYTE* member1, uint32_t len1, const BYTE* member2, uint32_t len2)
+{
+    const BYTE* members[] = { member0, member1, member2 };
+    const uint32_t lengths[] = { len0, len1, len2 };
+    for (size_t i = 0; i < 3; ++i) {
+        if (g_orderExpectedLens[i] == 0 || lengths[i] != g_orderExpectedLens[i]) {
+            return false;
+        }
+        if (std::memcmp(members[i], g_orderExpected[i], lengths[i]) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Send429A(const BYTE* member0, uint32_t len0, const BYTE* member1, uint32_t len1, const BYTE* member2, uint32_t len2)
 {
     std::memset(g_bufOrder, 0, sizeof(g_bufOrder));
     g_bufOrder[0] = 0;
@@ -4247,13 +4327,35 @@ void Send429A(const BYTE* member0, uint32_t len0, const BYTE* member1, uint32_t 
     const uint32_t lengths[] = { len2, len0, len1 };
     for (size_t i = 0; i < 3; ++i) {
         if (!members[i] || lengths[i] == 0 || write + lengths[i] > end) {
-            return;
+            return false;
         }
         std::memcpy(write, members[i], lengths[i]);
         write += lengths[i];
     }
 
     SendPacket(0x429A, g_bufOrder, static_cast<uint32_t>(write - g_bufOrder));
+    return true;
+}
+
+bool SendExpected429A()
+{
+    std::memset(g_bufOrder, 0, sizeof(g_bufOrder));
+    g_bufOrder[0] = 0;
+    g_bufOrder[1] = 3;
+    BYTE* write = g_bufOrder + 2;
+    BYTE* end = g_bufOrder + sizeof(g_bufOrder);
+
+    for (size_t i = 0; i < 3; ++i) {
+        const uint32_t length = g_orderExpectedLens[i];
+        if (length == 0 || length > kOrderMemberMaxBytes || write + length > end) {
+            return false;
+        }
+        std::memcpy(write, g_orderExpected[i], length);
+        write += length;
+    }
+
+    SendPacket(0x429A, g_bufOrder, static_cast<uint32_t>(write - g_bufOrder));
+    return true;
 }
 
 int GetIndexById(uint16_t id)
@@ -4298,6 +4400,11 @@ void ResetState()
     InterlockedExchange(&g_leftTime, 0);
     InterlockedExchange(&g_helpTrackId, 0);
     InterlockedExchange(&g_helpTrackCount, 0);
+    InterlockedExchange(&g_teamOrderSent, 0);
+    InterlockedExchange(&g_teamOrderRetries, 0);
+    InterlockedExchange(&g_createTeamMissCount, 0);
+    std::memset(g_orderExpected, 0, sizeof(g_orderExpected));
+    std::memset(g_orderExpectedLens, 0, sizeof(g_orderExpectedLens));
 }
 
 void Finish()
@@ -4369,24 +4476,8 @@ void ClearBattleAndFinish()
 
 void StartStatus08Battle(LONG matchIndex)
 {
-    if (g_battleMode == 2 || g_battleMode == 3) {
-        Finish();
-        return;
-    }
-
-    InterlockedExchange(&g_logIndex, matchIndex);
-    InterlockedExchange(&g_pendingId, GetIdByIndex(matchIndex));
-    InterlockedExchange(&g_currentId, g_pendingId);
-    InterlockedExchange(&g_verifyId, g_pendingId);
-    InterlockedExchange(&g_verifyIndex, matchIndex);
-    InterlockedExchange(&g_verifyMode, 1);
-    InterlockedExchange(&g_waitBattleResult, 1);
-    InterlockedExchange(&g_armyBattleConfirmed, 1);
-    InterlockedExchange(&g_expectedWinValue, 0);
-    InterlockedExchange(&g_battleMode, 1);
-    InterlockedExchange(&g_state, 5);
-    Send37A4();
-    InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+    (void)matchIndex;
+    Finish();
 }
 
 bool SkipUtf(const BYTE*& cursor, const BYTE* end)
@@ -4557,6 +4648,7 @@ void Handle42A1(const BYTE* payload, uint32_t payloadLength)
                 InterlockedExchange(&g_currentId, g_pendingId);
                 Send4294();
                 InterlockedExchange(&g_state, 3);
+                InterlockedExchange(&g_createTeamMissCount, 0);
                 InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
                 return;
             }
@@ -4572,6 +4664,7 @@ void Handle42A1(const BYTE* payload, uint32_t payloadLength)
                 }
                 Send4294();
                 InterlockedExchange(&g_state, 3);
+                InterlockedExchange(&g_createTeamMissCount, 0);
                 InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
                 return;
             }
@@ -4584,6 +4677,10 @@ void Handle42A1(const BYTE* payload, uint32_t payloadLength)
             Send4294();
             InterlockedExchange(&g_state, 2);
             InterlockedExchange(&g_teamOrderSent, 0);
+            InterlockedExchange(&g_teamOrderRetries, 0);
+            InterlockedExchange(&g_createTeamMissCount, 0);
+            std::memset(g_orderExpected, 0, sizeof(g_orderExpected));
+            std::memset(g_orderExpectedLens, 0, sizeof(g_orderExpectedLens));
             InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
             return;
         }
@@ -4683,8 +4780,29 @@ void Handle42A2(const BYTE* payload, uint32_t payloadLength)
     }
 
     if (g_teamOrderSent != 1) {
-        Send429A(memberPtrs[0], memberLens[0], memberPtrs[1], memberLens[1], memberPtrs[2], memberLens[2]);
-        InterlockedExchange(&g_teamOrderSent, 1);
+        if (!SaveExpectedOrder(memberPtrs[0], memberLens[0], memberPtrs[1], memberLens[1], memberPtrs[2], memberLens[2])) {
+            Finish();
+            return;
+        }
+        if (Send429A(memberPtrs[0], memberLens[0], memberPtrs[1], memberLens[1], memberPtrs[2], memberLens[2])) {
+            InterlockedExchange(&g_teamOrderSent, 1);
+            InterlockedExchange(&g_teamOrderRetries, 1);
+            Send4294();
+            InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+        }
+        return;
+    }
+
+    if (!CurrentOrderMatchesExpected(memberPtrs[0], memberLens[0], memberPtrs[1], memberLens[1], memberPtrs[2], memberLens[2])) {
+        if (g_teamOrderRetries >= kOrderRetryMax) {
+            Finish();
+            return;
+        }
+        if (SendExpected429A()) {
+            InterlockedExchange(&g_teamOrderRetries, g_teamOrderRetries + 1);
+            Send4294();
+            InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+        }
         return;
     }
 
@@ -4762,6 +4880,20 @@ BYTE FindPeopleNearTeam(const BYTE* payload, uint32_t payloadLength, LONG teamIn
     return 0;
 }
 
+bool WaitBeforeCreateTeam()
+{
+    const LONG nextMiss = g_createTeamMissCount + 1;
+    InterlockedExchange(&g_createTeamMissCount, nextMiss);
+    if (nextMiss < kCreateTeamMissMax) {
+        Send4294();
+        InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+        return true;
+    }
+
+    InterlockedExchange(&g_createTeamMissCount, 0);
+    return false;
+}
+
 void Handle42A4(const BYTE* payload, uint32_t payloadLength)
 {
     if (g_state != 3 && g_state != 4) {
@@ -4771,6 +4903,9 @@ void Handle42A4(const BYTE* payload, uint32_t payloadLength)
     ParseTeams(payload, payloadLength);
     if (g_state == 3) {
         if (g_payloadTeamCount == 0) {
+            if (WaitBeforeCreateTeam()) {
+                return;
+            }
             InterlockedExchange(&g_battleMode, 3);
             Send4297();
             WriteDungeonLog(kLogCreateFormat, g_logIndex);
@@ -4784,6 +4919,7 @@ void Handle42A4(const BYTE* payload, uint32_t payloadLength)
             if (g_teamDungeonIds[i] != static_cast<uint16_t>(g_currentId) || people != 1) {
                 continue;
             }
+            InterlockedExchange(&g_createTeamMissCount, 0);
             InterlockedExchange(&g_battleMode, 3);
             InterlockedExchange(&g_teamId, g_teamIds[i]);
             Send4296();
@@ -4793,6 +4929,9 @@ void Handle42A4(const BYTE* payload, uint32_t payloadLength)
             return;
         }
 
+        if (WaitBeforeCreateTeam()) {
+            return;
+        }
         InterlockedExchange(&g_battleMode, 3);
         Send4297();
         WriteDungeonLog(kLogCreateFormat, g_logIndex);
