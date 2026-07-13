@@ -1,13 +1,18 @@
 #include <windows.h>
+#include <winhttp.h>
 #include <climits>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <string>
+#include <vector>
 
 namespace
 {
 HHOOK g_msgBoxHook = nullptr;
+HMODULE g_selfModule = nullptr;
+wchar_t g_patchStatusMessage[2048]{};
 constexpr DWORD kMessageBoxAutoCloseMs = 3000;
 
 struct MemoryPatch
@@ -54,6 +59,19 @@ struct JumpPatchResult
 };
 
 uintptr_t g_mainBase = 0;
+
+bool IsNativeEntryReady()
+{
+    if (g_mainBase == 0) {
+        return false;
+    }
+    HWND mainHwnd = *reinterpret_cast<HWND volatile*>(g_mainBase + 0x2300A4);
+    if (!mainHwnd || !IsWindow(mainHwnd)) {
+        return false;
+    }
+    HWND startHwnd = GetDlgItem(mainHwnd, 1010);
+    return startHwnd && IsWindowEnabled(startHwnd) != FALSE;
+}
 
 namespace DailySign
 {
@@ -336,6 +354,7 @@ volatile LONG g_payloadTeamCount = 0;
 volatile LONG g_teamOrderSent = 0;
 volatile LONG g_teamOrderRetries = 0;
 volatile LONG g_createTeamMissCount = 0;
+volatile LONG g_restoredTeamId = 0;
 volatile LONG g_unlimitPassedOnce = 0;
 volatile LONG g_battleMode = 0;
 volatile LONG g_unlimitCount = 0;
@@ -378,6 +397,8 @@ volatile LONG g_lastCity = 0;
 volatile LONG g_cityAttackers = 0;
 volatile LONG g_cityDefenders = 0;
 volatile LONG g_parseError = 0;
+volatile LONG g_marchFree = -1;
+volatile LONG g_marchFreeKnown = 0;
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
 bool HasRushAdvantage();
 }
@@ -411,6 +432,8 @@ volatile LONG g_diagLastReason = 0;
 volatile LONG g_diagLastCurrent = 0;
 volatile LONG g_diagLastTarget = 0;
 volatile LONG g_diagLastTick = 0;
+volatile LONG g_noMarchFreeLogShown = 0;
+volatile LONG g_noRetreatMarchFreeLogShown = 0;
 uint32_t g_targetTmp = 0;
 BYTE g_groups[kMaxGroups * kGroupStride]{};
 BYTE g_dashBuffer[256]{};
@@ -1331,6 +1354,33 @@ void Handle146F(const BYTE* payload, uint32_t payloadLength)
 
     InterlockedExchange(&g_location, payload[0]);
     InterlockedExchange(&g_rushRatio, 2);
+
+    static constexpr char kMarchFreeKey[] = "\"march_free\":";
+    const size_t keyLength = sizeof(kMarchFreeKey) - 1;
+    for (uint32_t i = 0; i + keyLength <= payloadLength; ++i) {
+        if (std::memcmp(payload + i, kMarchFreeKey, keyLength) != 0) {
+            continue;
+        }
+
+        uint32_t cursor = i + static_cast<uint32_t>(keyLength);
+        LONG value = 0;
+        bool hasDigit = false;
+        while (cursor < payloadLength && payload[cursor] >= '0' && payload[cursor] <= '9') {
+            hasDigit = true;
+            const LONG digit = static_cast<LONG>(payload[cursor] - '0');
+            if (value > 1000000) {
+                return;
+            }
+            value = value * 10 + digit;
+            ++cursor;
+        }
+
+        if (hasDigit) {
+            InterlockedExchange(&g_marchFree, value);
+            InterlockedExchange(&g_marchFreeKnown, 1);
+        }
+        return;
+    }
 }
 
 void Handle147C(const BYTE* payload, uint32_t payloadLength)
@@ -1456,6 +1506,68 @@ void RefreshLog()
 void WriteDashLog(const wchar_t* text)
 {
     GameLog::Write(kLogFormat, text);
+}
+
+bool IsMarchFreeExhausted()
+{
+    return AlBattle::g_marchFreeKnown == 0 || AlBattle::g_marchFree <= 0;
+}
+
+void WriteNoMarchFreeLogOnce()
+{
+    if (InterlockedCompareExchange(&g_noMarchFreeLogShown, 1, 0) == 0) {
+        if (AlBattle::g_marchFreeKnown == 0) {
+            static const wchar_t unknownMessage[] = {
+                0x884C, 0x8ECD, 0x6B21, 0x6578, 0x672A, 0x77E5, 0x0000
+            };
+            WriteDashLog(unknownMessage);
+            return;
+        }
+        static const wchar_t message[] = {
+            0x6C92, 0x6709, 0x5269, 0x9918, 0x7A81, 0x9032, 0x6B21, 0x6578, 0x0000
+        };
+        WriteDashLog(message);
+    }
+}
+
+void RefreshMarchFreeLogState()
+{
+    if (AlBattle::g_marchFreeKnown != 0 && AlBattle::g_marchFree > 0) {
+        InterlockedExchange(&g_noMarchFreeLogShown, 0);
+        InterlockedExchange(&g_noRetreatMarchFreeLogShown, 0);
+    }
+}
+
+void WriteNoRetreatMarchFreeLogOnce()
+{
+    if (InterlockedCompareExchange(&g_noRetreatMarchFreeLogShown, 1, 0) == 0) {
+        if (AlBattle::g_marchFreeKnown == 0) {
+            static const wchar_t unknownMessage[] = {
+                0x884C, 0x8ECD, 0x6B21, 0x6578, 0x672A, 0x77E5, 0x0000
+            };
+            WriteDashLog(unknownMessage);
+            return;
+        }
+        static const wchar_t message[] = {
+            0x6C92, 0x6709, 0x5269, 0x9918, 0x64A4, 0x9000, 0x6B21, 0x6578, 0x0000
+        };
+        WriteDashLog(message);
+    }
+}
+
+void WriteMarchFreeBeforeDash()
+{
+    static const wchar_t format[] = {
+        0x7A81, 0x9032, 0x5269, 0x9918, 0x6B21, 0x6578, 0xFF1A,
+        0x0025, 0x006C, 0x0064, 0x0000
+    };
+    wchar_t message[64]{};
+    std::swprintf(
+        message,
+        _countof(message),
+        format,
+        AlBattle::g_marchFree);
+    WriteDashLog(message);
 }
 
 enum DashDiagReason : LONG
@@ -1703,6 +1815,13 @@ void BuildGroups()
     InterlockedExchange(&g_hasMoveReady, 0);
     std::memset(g_groups, 0, sizeof(g_groups));
 
+    RefreshMarchFreeLogState();
+    if (IsMarchFreeExhausted()) {
+        WriteNoMarchFreeLogOnce();
+        InterlockedExchange(&g_waitingNoRush, 1);
+        return;
+    }
+
     uintptr_t list = ReadGameU32(g_mainBase + 0x230644);
     if (list == 0) {
         return;
@@ -1799,6 +1918,13 @@ void AllowOriginalThrottled()
 
 void Send1483(BYTE* group)
 {
+    RefreshMarchFreeLogState();
+    if (IsMarchFreeExhausted()) {
+        WriteNoMarchFreeLogOnce();
+        FinishAll();
+        return;
+    }
+
     std::memset(g_dashBuffer, 0, sizeof(g_dashBuffer));
     g_dashBuffer[3] = static_cast<BYTE>(ReadGroupU32(group, 0x00));
     g_dashBuffer[4] = 0;
@@ -1822,8 +1948,14 @@ void Send1483(BYTE* group)
     destination[3] = static_cast<BYTE>(ReadGroupU32(group, 0x04));
 
     const uint32_t payloadLength = count * 8 + 10;
+    if (AlBattle::g_marchFreeKnown != 0) {
+        WriteMarchFreeBeforeDash();
+    }
     WriteDashDiag(kDiagSend1483, ReadGroupU32(group, 0x00), ReadGroupU32(group, 0x04));
     SendPacketWithEcx(ReadGroupU32(group, 0x0C), 0x1483, g_dashBuffer, payloadLength);
+    if (AlBattle::g_marchFreeKnown != 0 && AlBattle::g_marchFree > 0) {
+        InterlockedDecrement(&AlBattle::g_marchFree);
+    }
 
     InterlockedExchange(&g_nextTick, static_cast<LONG>(GetTickCount() + kFallbackCheckMs));
     InterlockedExchange(&g_phase, 6);
@@ -1849,8 +1981,17 @@ void Check1482(BYTE* group)
 
         const uint32_t ecxValue = ReadGroupU32(group, 0x0C);
         if (allEntriesStillCurrent && ecxValue != 0) {
-            WriteDashDiag(kDiagSend1482, current, ReadGroupU32(group, 0x04));
-            SendPacketWithEcx(ecxValue, 0x1482, g_dashBuffer, count * 8 + 10);
+            RefreshMarchFreeLogState();
+            if (IsMarchFreeExhausted()) {
+                WriteNoRetreatMarchFreeLogOnce();
+                WriteDashDiag(kDiagSkip1482, current, ReadGroupU32(group, 0x04));
+            } else {
+                WriteDashDiag(kDiagSend1482, current, ReadGroupU32(group, 0x04));
+                SendPacketWithEcx(ecxValue, 0x1482, g_dashBuffer, count * 8 + 10);
+                if (AlBattle::g_marchFreeKnown != 0 && AlBattle::g_marchFree > 0) {
+                    InterlockedDecrement(&AlBattle::g_marchFree);
+                }
+            }
         } else {
             WriteDashDiag(kDiagSkip1482, current, ReadGroupU32(group, 0x04));
         }
@@ -2059,6 +2200,315 @@ bool BuildResumeCode(uintptr_t base, CodeBuffer& code)
         AppendByte(code, 0x6A) && AppendByte(code, 0x04) &&
         AppendMovEdiEcx(code) &&
         AppendRel32Instruction(code, 0xE9, base + 0x412F5);
+}
+
+}
+
+namespace LureSwitchUi
+{
+constexpr UINT kRushCheckboxId = 0x7B01;
+constexpr UINT kRetreatCheckboxId = 0x7B02;
+constexpr UINT kPrivateMessage = 0x87B1;
+constexpr UINT kTimerId = 0x87B3;
+
+volatile LONG g_started = 0;
+volatile LONG g_writeHits = 0;
+volatile LONG g_writeFailures = 0;
+volatile LONG g_defaultCreateHits = 0;
+HWND g_settingsHwnd = nullptr;
+HWND g_parentHwnd = nullptr;
+HWND g_lureAnchorHwnd = nullptr;
+HWND g_killBoxAnchorHwnd = nullptr;
+HWND g_rushCheckboxHwnd = nullptr;
+HWND g_retreatCheckboxHwnd = nullptr;
+WNDPROC g_oldProc = nullptr;
+int g_rushX = 0;
+int g_y = 0;
+int g_w = 0;
+int g_h = 0;
+
+const wchar_t kSettingsTitle[] = L"\x8A2D\x7F6E";
+const wchar_t kLureAnchorText[] = L"\x51FA\x64CA\x8A98\x6575";
+const wchar_t kKillBoxAnchorText[] = L"\x64CA\x6BBA\x5BF6\x7BB1";
+const wchar_t kRushText[] = L"\x7A81\x9032";
+const wchar_t kRetreatText[] = L"\x64A4\x9000";
+
+bool TryGetConfigPath(const wchar_t** pathOut)
+{
+    if (g_mainBase == 0 || !pathOut) {
+        return false;
+    }
+
+    const uint32_t pathAddress = ReadGameU32(g_mainBase + 0x230280);
+    if (pathAddress == 0) {
+        return false;
+    }
+
+    const wchar_t* path = reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(pathAddress));
+    __try {
+        const uint32_t pathLength = *(reinterpret_cast<const uint32_t*>(path) - 3);
+        if (pathLength == 0 || pathLength >= 1024 || path[pathLength] != L'\0') {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    *pathOut = path;
+    return true;
+}
+
+bool PersistSwitch(const wchar_t* key, LONG value)
+{
+    const wchar_t* path = nullptr;
+    if (!key || !TryGetConfigPath(&path)) {
+        InterlockedIncrement(&g_writeFailures);
+        return false;
+    }
+
+    __try {
+        const wchar_t* text = value != 0 ? L"1" : L"0";
+        if (!WritePrivateProfileStringW(AutoLureDash::kConfigSection, key, text, path)) {
+            InterlockedIncrement(&g_writeFailures);
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedIncrement(&g_writeFailures);
+        return false;
+    }
+
+    InterlockedIncrement(&g_writeHits);
+    return true;
+}
+
+bool EnsureSwitchKey(const wchar_t* key)
+{
+    const wchar_t* path = nullptr;
+    if (!key || !TryGetConfigPath(&path)) {
+        InterlockedIncrement(&g_writeFailures);
+        return false;
+    }
+
+    __try {
+        wchar_t value[16]{};
+        const wchar_t missingMarker[] = { 0xFFFF, 0x0000 };
+        const DWORD length = GetPrivateProfileStringW(
+            AutoLureDash::kConfigSection,
+            key,
+            missingMarker,
+            value,
+            static_cast<DWORD>(sizeof(value) / sizeof(value[0])),
+            path);
+        const bool missing = length == 0 ||
+            (length == 1 && value[0] == missingMarker[0] && value[1] == L'\0');
+        if (!missing) {
+            return true;
+        }
+
+        if (!WritePrivateProfileStringW(AutoLureDash::kConfigSection, key, L"0", path)) {
+            InterlockedIncrement(&g_writeFailures);
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedIncrement(&g_writeFailures);
+        return false;
+    }
+
+    InterlockedIncrement(&g_writeHits);
+    InterlockedIncrement(&g_defaultCreateHits);
+    return true;
+}
+
+void ApplyButtonStates()
+{
+    if (g_rushCheckboxHwnd && IsWindow(g_rushCheckboxHwnd)) {
+        SendMessageW(
+            g_rushCheckboxHwnd,
+            BM_SETCHECK,
+            AutoLureDash::g_lureSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+            0);
+    }
+    if (g_retreatCheckboxHwnd && IsWindow(g_retreatCheckboxHwnd)) {
+        SendMessageW(
+            g_retreatCheckboxHwnd,
+            BM_SETCHECK,
+            AutoLureDash::g_fallbackSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+            0);
+    }
+}
+
+void SyncSwitchFromButton(UINT controlId)
+{
+    if (controlId == kRushCheckboxId && g_rushCheckboxHwnd && IsWindow(g_rushCheckboxHwnd)) {
+        const LONG value = SendMessageW(g_rushCheckboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
+        InterlockedExchange(&AutoLureDash::g_lureSwitch, value);
+        InterlockedExchange(&AutoLureDash::g_configLastLure, value);
+        InterlockedExchange(&AutoLureDash::g_showFlag, 0);
+        PersistSwitch(AutoLureDash::kLureKey, value);
+    } else if (controlId == kRetreatCheckboxId && g_retreatCheckboxHwnd && IsWindow(g_retreatCheckboxHwnd)) {
+        const LONG value = SendMessageW(g_retreatCheckboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
+        InterlockedExchange(&AutoLureDash::g_fallbackSwitch, value);
+        InterlockedExchange(&AutoLureDash::g_configLastFallback, value);
+        InterlockedExchange(&AutoLureDash::g_showFlag, 0);
+        PersistSwitch(AutoLureDash::kFallbackKey, value);
+    }
+}
+
+LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_COMMAND) {
+        const UINT controlId = LOWORD(wParam);
+        if ((controlId == kRushCheckboxId || controlId == kRetreatCheckboxId) &&
+            HIWORD(wParam) == BN_CLICKED) {
+            SyncSwitchFromButton(controlId);
+        }
+    }
+
+    if (message == WM_TIMER && wParam == kTimerId) {
+        ApplyButtonStates();
+        return 1;
+    }
+
+    if (message == kPrivateMessage && wParam == 1) {
+        EnsureSwitchKey(AutoLureDash::kLureKey);
+        EnsureSwitchKey(AutoLureDash::kFallbackKey);
+        if (!g_rushCheckboxHwnd) {
+            g_rushCheckboxHwnd = CreateWindowExW(
+                0,
+                L"Button",
+                kRushText,
+                0x50018003,
+                g_rushX,
+                g_y,
+                g_w,
+                g_h,
+                g_parentHwnd,
+                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kRushCheckboxId)),
+                nullptr,
+                nullptr);
+        }
+        if (!g_retreatCheckboxHwnd) {
+            g_retreatCheckboxHwnd = CreateWindowExW(
+                0,
+                L"Button",
+                kRetreatText,
+                0x50018003,
+                g_rushX + g_w + 6,
+                g_y,
+                g_w,
+                g_h,
+                g_parentHwnd,
+                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kRetreatCheckboxId)),
+                nullptr,
+                nullptr);
+        }
+
+        HFONT font = reinterpret_cast<HFONT>(SendMessageW(g_lureAnchorHwnd, WM_GETFONT, 0, 0));
+        if (font) {
+            if (g_rushCheckboxHwnd) {
+                SendMessageW(g_rushCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            }
+            if (g_retreatCheckboxHwnd) {
+                SendMessageW(g_retreatCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            }
+        }
+
+        ApplyButtonStates();
+        if (g_rushCheckboxHwnd) {
+            ShowWindow(g_rushCheckboxHwnd, SW_SHOW);
+        }
+        if (g_retreatCheckboxHwnd) {
+            ShowWindow(g_retreatCheckboxHwnd, SW_SHOW);
+        }
+        SetTimer(g_parentHwnd, kTimerId, 1000, nullptr);
+        return 1;
+    }
+
+    return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam)
+                     : DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+BOOL CALLBACK EnumChildProc(HWND hwnd, LPARAM)
+{
+    wchar_t text[64]{};
+    GetWindowTextW(hwnd, text, static_cast<int>(sizeof(text) / sizeof(text[0])));
+    if (std::wcscmp(text, kLureAnchorText) == 0) {
+        g_lureAnchorHwnd = hwnd;
+    } else if (std::wcscmp(text, kKillBoxAnchorText) == 0) {
+        g_killBoxAnchorHwnd = hwnd;
+    }
+    return TRUE;
+}
+
+bool FindAndInstall()
+{
+    g_settingsHwnd = FindWindowW(nullptr, kSettingsTitle);
+    if (!g_settingsHwnd) {
+        return false;
+    }
+
+    g_lureAnchorHwnd = nullptr;
+    g_killBoxAnchorHwnd = nullptr;
+    EnumChildWindows(g_settingsHwnd, EnumChildProc, 0);
+    if (!g_lureAnchorHwnd) {
+        return false;
+    }
+
+    g_parentHwnd = GetParent(g_lureAnchorHwnd);
+    if (!g_parentHwnd) {
+        return false;
+    }
+
+    RECT lureRect{};
+    if (!GetWindowRect(g_lureAnchorHwnd, &lureRect)) {
+        return false;
+    }
+    POINT lurePoint{ lureRect.left, lureRect.top };
+    ScreenToClient(g_parentHwnd, &lurePoint);
+    g_y = lurePoint.y;
+    g_w = lureRect.right - lureRect.left;
+    g_h = lureRect.bottom - lureRect.top;
+    g_rushX = lurePoint.x + g_w + 6;
+
+    if (g_killBoxAnchorHwnd) {
+        RECT killBoxRect{};
+        if (GetWindowRect(g_killBoxAnchorHwnd, &killBoxRect)) {
+            POINT killBoxPoint{ killBoxRect.left, killBoxRect.top };
+            ScreenToClient(g_parentHwnd, &killBoxPoint);
+            g_rushX = killBoxPoint.x;
+        }
+    }
+
+    g_oldProc = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrW(g_parentHwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(ParentWndProc)));
+    if (!g_oldProc) {
+        return false;
+    }
+
+    SendMessageW(g_parentHwnd, kPrivateMessage, 1, 0);
+    return g_rushCheckboxHwnd && g_retreatCheckboxHwnd;
+}
+
+DWORD WINAPI SetupThread(LPVOID)
+{
+    for (int i = 0; i < 50; ++i) {
+        if (FindAndInstall()) {
+            return 0;
+        }
+        Sleep(100);
+    }
+    return 0;
+}
+
+void Start()
+{
+    if (InterlockedCompareExchange(&g_started, 1, 0) != 0) {
+        return;
+    }
+    HANDLE thread = CreateThread(nullptr, 0, SetupThread, nullptr, 0, nullptr);
+    if (thread) {
+        CloseHandle(thread);
+    }
 }
 
 }
@@ -4286,6 +4736,15 @@ void Send4296()
     SendPacket(0x4296, g_bufTeam4, sizeof(g_bufTeam4));
 }
 
+void Send4296ById(uint32_t teamId)
+{
+    g_bufTeam4[0] = static_cast<BYTE>((teamId >> 24) & 0xFF);
+    g_bufTeam4[1] = static_cast<BYTE>((teamId >> 16) & 0xFF);
+    g_bufTeam4[2] = static_cast<BYTE>((teamId >> 8) & 0xFF);
+    g_bufTeam4[3] = static_cast<BYTE>(teamId & 0xFF);
+    SendPacket(0x4296, g_bufTeam4, sizeof(g_bufTeam4));
+}
+
 bool SaveExpectedOrder(const BYTE* member0, uint32_t len0, const BYTE* member1, uint32_t len1, const BYTE* member2, uint32_t len2)
 {
     const BYTE* members[] = { member2, member0, member1 };
@@ -4403,6 +4862,7 @@ void ResetState()
     InterlockedExchange(&g_teamOrderSent, 0);
     InterlockedExchange(&g_teamOrderRetries, 0);
     InterlockedExchange(&g_createTeamMissCount, 0);
+    InterlockedExchange(&g_restoredTeamId, 0);
     std::memset(g_orderExpected, 0, sizeof(g_orderExpected));
     std::memset(g_orderExpectedLens, 0, sizeof(g_orderExpectedLens));
 }
@@ -4496,6 +4956,43 @@ bool SkipUtf(const BYTE*& cursor, const BYTE* end)
     return true;
 }
 
+bool TryRead42A1TeamId(const BYTE* payload, uint32_t payloadLength, uint32_t& teamId)
+{
+    teamId = 0;
+    if (!payload || payloadLength < 2) {
+        return false;
+    }
+
+    const BYTE* cursor = payload;
+    const BYTE* end = payload + payloadLength;
+    const uint16_t count = ReadBe16(cursor);
+    cursor += 2;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (i >= 0x20 || cursor + 4 > end) {
+            return false;
+        }
+        cursor += 4;
+        if (!SkipUtf(cursor, end) || cursor + 0x10 > end) {
+            return false;
+        }
+        cursor += 0x10;
+        if (!SkipUtf(cursor, end)) {
+            return false;
+        }
+    }
+
+    if (cursor + 8 > end) {
+        return false;
+    }
+    cursor += 8;
+    if (!SkipUtf(cursor, end) || cursor + 4 > end) {
+        return false;
+    }
+
+    teamId = ReadBe32(cursor);
+    return true;
+}
+
 bool TryApply42A1TimeBlock(const BYTE* payload, uint32_t payloadLength)
 {
     InterlockedExchange(&g_timeBlocked, 0);
@@ -4570,7 +5067,25 @@ void Handle42A1(const BYTE* payload, uint32_t payloadLength)
         return;
     }
 
+    uint32_t serverTeamId = 0;
+    if (TryRead42A1TeamId(payload, payloadLength, serverTeamId)) {
+        if (serverTeamId != 0) {
+            InterlockedExchange(&g_teamId, static_cast<LONG>(serverTeamId));
+            InterlockedExchange(&g_battleMode, 3);
+            if (g_restoredTeamId != static_cast<LONG>(serverTeamId)) {
+                InterlockedExchange(&g_restoredTeamId, static_cast<LONG>(serverTeamId));
+                Send4296ById(serverTeamId);
+                Send4293();
+                WriteJoinLog();
+            }
+            Finish();
+            return;
+        }
+        InterlockedExchange(&g_restoredTeamId, 0);
+    }
+
     LONG matchIndex = 0;
+    LONG ownTeamIndex = -1;
     for (uint32_t offset = 0; offset + 8 <= payloadLength; ++offset) {
         if (ReadLe32(payload + offset) != 0x7D7B0200) {
             continue;
@@ -4586,11 +5101,36 @@ void Handle42A1(const BYTE* payload, uint32_t payloadLength)
             Finish();
             return;
         }
-        if (payload[offset - 9] == 0x08) {
+        const BYTE status = payload[offset - 9];
+        if (status == 0x08 || status == 0x09) {
             StartStatus08Battle(matchIndex);
             return;
         }
+        if (status == 0x07) {
+            InterlockedExchange(&g_battleMode, 3);
+            Finish();
+            return;
+        }
+        if (status == 0x04 && ownTeamIndex < 0) {
+            ownTeamIndex = matchIndex;
+        }
         ++matchIndex;
+    }
+
+    if (ownTeamIndex >= 0) {
+        InterlockedExchange(&g_logIndex, ownTeamIndex);
+        InterlockedExchange(&g_pendingId, GetIdByIndex(ownTeamIndex));
+        InterlockedExchange(&g_currentId, g_pendingId);
+        InterlockedExchange(&g_battleMode, 3);
+        Send4294();
+        InterlockedExchange(&g_state, 2);
+        InterlockedExchange(&g_teamOrderSent, 0);
+        InterlockedExchange(&g_teamOrderRetries, 0);
+        InterlockedExchange(&g_createTeamMissCount, 0);
+        std::memset(g_orderExpected, 0, sizeof(g_orderExpected));
+        std::memset(g_orderExpectedLens, 0, sizeof(g_orderExpectedLens));
+        InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+        return;
     }
 
     matchIndex = 0;
@@ -5312,9 +5852,10 @@ LRESULT CALLBACK MessageBoxHook(int code, WPARAM wParam, LPARAM lParam)
             GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitorInfo)) {
             const int width = windowRect.right - windowRect.left;
             const int height = windowRect.bottom - windowRect.top;
-            const int margin = 20;
-            const int x = monitorInfo.rcWork.right - width - margin;
-            const int y = monitorInfo.rcWork.bottom - height - margin;
+            const int workWidth = monitorInfo.rcWork.right - monitorInfo.rcWork.left;
+            const int workHeight = monitorInfo.rcWork.bottom - monitorInfo.rcWork.top;
+            const int x = monitorInfo.rcWork.left + (workWidth - width) / 2;
+            const int y = monitorInfo.rcWork.top + (workHeight - height) / 2;
 
             SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
@@ -5331,6 +5872,365 @@ LRESULT CALLBACK MessageBoxHook(int code, WPARAM wParam, LPARAM lParam)
     }
 
     return CallNextHookEx(currentHook, code, wParam, lParam);
+}
+
+void ShowAutoCloseMessage(const wchar_t* message, const wchar_t* title)
+{
+    g_msgBoxHook = SetWindowsHookExA(WH_CBT, MessageBoxHook, nullptr, GetCurrentThreadId());
+    MessageBoxW(nullptr, message, title, MB_OK | MB_ICONINFORMATION);
+    if (g_msgBoxHook) {
+        UnhookWindowsHookEx(g_msgBoxHook);
+        g_msgBoxHook = nullptr;
+    }
+}
+
+void NotifyLauncherOnlineStopped()
+{
+    if (g_mainBase == 0) {
+        return;
+    }
+
+    HWND launcherHwnd = *reinterpret_cast<HWND volatile*>(g_mainBase + 0x230080);
+    if (!launcherHwnd || !IsWindow(launcherHwnd)) {
+        return;
+    }
+
+    const UINT onlineStateMessage = RegisterWindowMessageW(L"MSG_ONLINESTATE");
+    if (onlineStateMessage == 0) {
+        return;
+    }
+
+    DWORD_PTR messageResult = 0;
+    SendMessageTimeoutW(
+        launcherHwnd,
+        onlineStateMessage,
+        static_cast<WPARAM>(GetCurrentProcessId()),
+        0,
+        SMTO_ABORTIFHUNG | SMTO_BLOCK,
+        1000,
+        &messageResult);
+}
+
+void ExitOnlineAndNotifyLauncher()
+{
+    NotifyLauncherOnlineStopped();
+    ExitProcess(0);
+}
+
+namespace LicenseAuth
+{
+constexpr wchar_t kHost[] = L"mypatch-license-auth.wasd11334342.workers.dev";
+constexpr wchar_t kPath[] = L"/";
+constexpr char kClientApiKey[] = "7ca30c81d310863317025e7c37701f35ab050af6c0443266ba5a99df39feece8";
+
+__declspec(align(8)) volatile LONG64 g_expireTick = 0;
+volatile LONG g_exitStarted = 0;
+
+enum class Result
+{
+    Valid,
+    Expired,
+    NotFound,
+    MissingFile,
+    InvalidFile,
+    NetworkError,
+    ServiceError
+};
+
+struct CheckResult
+{
+    Result result = Result::ServiceError;
+    unsigned long long remainingSeconds = 0;
+};
+
+bool GetLicensePath(wchar_t* path, size_t capacity)
+{
+    if (!path || capacity == 0 || !g_selfModule) {
+        return false;
+    }
+    DWORD length = GetModuleFileNameW(g_selfModule, path, static_cast<DWORD>(capacity));
+    if (length == 0 || length >= capacity) {
+        return false;
+    }
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (!slash) {
+        return false;
+    }
+    *(slash + 1) = L'\0';
+    const wchar_t fileName[] = L"license.txt";
+    const size_t used = wcslen(path);
+    if (used + (sizeof(fileName) / sizeof(fileName[0])) > capacity) {
+        return false;
+    }
+    wcscat_s(path, capacity, fileName);
+    return true;
+}
+
+Result ReadLicense(std::string& license)
+{
+    wchar_t path[MAX_PATH]{};
+    if (!GetLicensePath(path, sizeof(path) / sizeof(path[0]))) {
+        return Result::MissingFile;
+    }
+
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return Result::MissingFile;
+    }
+
+    char buffer[513]{};
+    DWORD read = 0;
+    const BOOL ok = ReadFile(file, buffer, 512, &read, nullptr);
+    CloseHandle(file);
+    if (!ok || read == 0 || read > 512) {
+        return Result::InvalidFile;
+    }
+
+    size_t begin = 0;
+    if (read >= 3 && static_cast<unsigned char>(buffer[0]) == 0xEF &&
+        static_cast<unsigned char>(buffer[1]) == 0xBB &&
+        static_cast<unsigned char>(buffer[2]) == 0xBF) {
+        begin = 3;
+    }
+    size_t end = read;
+    while (begin < end && (buffer[begin] == ' ' || buffer[begin] == '\t' || buffer[begin] == '\r' || buffer[begin] == '\n')) {
+        ++begin;
+    }
+    while (end > begin && (buffer[end - 1] == ' ' || buffer[end - 1] == '\t' || buffer[end - 1] == '\r' || buffer[end - 1] == '\n')) {
+        --end;
+    }
+    if (begin == end || end - begin > 128) {
+        return Result::InvalidFile;
+    }
+
+    license.assign(buffer + begin, buffer + end);
+    for (char ch : license) {
+        const bool allowed = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-';
+        if (!allowed) {
+            license.clear();
+            return Result::InvalidFile;
+        }
+    }
+    return Result::Valid;
+}
+
+bool ReadResponse(HINTERNET request, std::string& response)
+{
+    response.clear();
+    for (;;) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request, &available)) {
+            return false;
+        }
+        if (available == 0) {
+            return true;
+        }
+        if (response.size() + available > 16384) {
+            return false;
+        }
+        const size_t oldSize = response.size();
+        response.resize(oldSize + available);
+        DWORD read = 0;
+        if (!WinHttpReadData(request, &response[oldSize], available, &read)) {
+            return false;
+        }
+        response.resize(oldSize + read);
+    }
+}
+
+bool ParseUnsigned(const std::string& text, const char* field, unsigned long long& value)
+{
+    const size_t pos = text.find(field);
+    if (pos == std::string::npos) {
+        return false;
+    }
+    size_t cursor = pos + std::strlen(field);
+    value = 0;
+    bool hasDigit = false;
+    while (cursor < text.size() && text[cursor] >= '0' && text[cursor] <= '9') {
+        hasDigit = true;
+        const unsigned digit = static_cast<unsigned>(text[cursor] - '0');
+        if (value > (ULLONG_MAX - digit) / 10ULL) {
+            return false;
+        }
+        value = value * 10ULL + digit;
+        ++cursor;
+    }
+    return hasDigit;
+}
+
+CheckResult Query(const std::string& license)
+{
+    CheckResult result{};
+    HINTERNET session = WinHttpOpen(L"MyPatch-License/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        result.result = Result::NetworkError;
+        return result;
+    }
+    WinHttpSetTimeouts(session, 5000, 5000, 7000, 7000);
+
+    HINTERNET connection = WinHttpConnect(session, kHost, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"POST", kPath, nullptr,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
+    if (!request) {
+        if (connection) WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        result.result = Result::NetworkError;
+        return result;
+    }
+
+    std::wstring headers = L"Content-Type: application/json\r\nx-api-key: ";
+    for (const char* p = kClientApiKey; *p; ++p) {
+        headers.push_back(static_cast<wchar_t>(*p));
+    }
+    const std::string body = std::string("{\"license\":\"") + license + "\"}";
+    const BOOL sent = WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(-1L),
+        const_cast<char*>(body.data()), static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0);
+    const BOOL received = sent ? WinHttpReceiveResponse(request, nullptr) : FALSE;
+
+    DWORD status = 0;
+    DWORD statusSize = sizeof(status);
+    std::string response;
+    const bool readOk = received && WinHttpQueryHeaders(request,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
+        &status, &statusSize, WINHTTP_NO_HEADER_INDEX) && ReadResponse(request, response);
+
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+
+    if (!readOk) {
+        result.result = Result::NetworkError;
+        return result;
+    }
+    if (status != 200) {
+        result.result = Result::ServiceError;
+        return result;
+    }
+    if (response.find("\"valid\":true") != std::string::npos) {
+        unsigned long long remaining = 0;
+        if (!ParseUnsigned(response, "\"remaining_seconds\":", remaining) || remaining == 0) {
+            result.result = Result::ServiceError;
+            return result;
+        }
+        result.result = Result::Valid;
+        result.remainingSeconds = remaining;
+        return result;
+    }
+    if (response.find("\"code\":\"expired\"") != std::string::npos) {
+        result.result = Result::Expired;
+    } else if (response.find("\"code\":\"not_found\"") != std::string::npos) {
+        result.result = Result::NotFound;
+    } else {
+        result.result = Result::ServiceError;
+    }
+    return result;
+}
+
+CheckResult Check()
+{
+    std::string license;
+    const Result fileResult = ReadLicense(license);
+    if (fileResult != Result::Valid) {
+        return { fileResult, 0 };
+    }
+    return Query(license);
+}
+
+void FormatRemaining(unsigned long long totalSeconds, wchar_t* buffer, size_t capacity)
+{
+    const unsigned long long days = totalSeconds / 86400ULL;
+    totalSeconds %= 86400ULL;
+    const unsigned long long hours = totalSeconds / 3600ULL;
+    const unsigned long long minutes = (totalSeconds % 3600ULL) / 60ULL;
+    swprintf_s(buffer, capacity, L"授權有效，剩餘 %llu天 %llu小時 %llu分鐘", days, hours, minutes);
+}
+
+const wchar_t* FailureMessage(Result result)
+{
+    if (result == Result::Expired) {
+        return L"該卡號已過期";
+    }
+    if (result == Result::NotFound) {
+        return L"卡號不存在或尚未啟用";
+    }
+    if (result == Result::MissingFile) {
+        return L"找不到 license.txt";
+    }
+    if (result == Result::InvalidFile) {
+        return L"license.txt 格式錯誤";
+    }
+    if (result == Result::NetworkError) {
+        return L"授權伺服器連線失敗";
+    }
+    return L"授權驗證失敗";
+}
+
+void SetDeadline(unsigned long long remainingSeconds)
+{
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG maxSeconds = (ULLONG_MAX - now) / 1000ULL;
+    const ULONGLONG safeSeconds = remainingSeconds < maxSeconds ? remainingSeconds : maxSeconds;
+    InterlockedExchange64(&g_expireTick, static_cast<LONG64>(now + safeSeconds * 1000ULL));
+}
+
+void FailAndExit(Result result)
+{
+    if (InterlockedCompareExchange(&g_exitStarted, 1, 0) != 0) {
+        return;
+    }
+    ShowAutoCloseMessage(FailureMessage(result), L"MyPatch 授權");
+    ExitOnlineAndNotifyLauncher();
+}
+
+DWORD WINAPI DeadlineThread(LPVOID)
+{
+    for (;;) {
+        const ULONGLONG now = GetTickCount64();
+        const ULONGLONG deadline = static_cast<ULONGLONG>(
+            InterlockedCompareExchange64(&g_expireTick, 0, 0));
+        if (deadline != 0 && now >= deadline) {
+            FailAndExit(Result::Expired);
+            return 0;
+        }
+        DWORD sleepMs = 1000;
+        if (deadline > now && deadline - now < sleepMs) {
+            sleepMs = static_cast<DWORD>(deadline - now);
+        }
+        Sleep(sleepMs == 0 ? 1 : sleepMs);
+    }
+}
+
+DWORD WINAPI RemoteMonitorThread(LPVOID)
+{
+    for (;;) {
+        Sleep(60000);
+        const CheckResult check = Check();
+        if (check.result == Result::Valid) {
+            SetDeadline(check.remainingSeconds);
+            continue;
+        }
+        FailAndExit(check.result);
+        return 0;
+    }
+}
+
+bool StartMonitor(unsigned long long remainingSeconds)
+{
+    SetDeadline(remainingSeconds);
+    HANDLE deadlineThread = CreateThread(nullptr, 0, DeadlineThread, nullptr, 0, nullptr);
+    HANDLE remoteThread = CreateThread(nullptr, 0, RemoteMonitorThread, nullptr, 0, nullptr);
+    if (!deadlineThread || !remoteThread) {
+        if (deadlineThread) CloseHandle(deadlineThread);
+        if (remoteThread) CloseHandle(remoteThread);
+        return false;
+    }
+    CloseHandle(deadlineThread);
+    CloseHandle(remoteThread);
+    return true;
+}
 }
 
 bool IsPatchApplied(const PatchResult* results, size_t count, const char* name)
@@ -5361,6 +6261,41 @@ void AppendFeatureStatus(wchar_t* message, size_t capacity, size_t& used, const 
     std::swprintf(line, sizeof(line) / sizeof(line[0]), L"%s %s\n", name, ok ? L"OK" : L"FAILED");
     used = AppendWideMessage(message, capacity, used, line);
 }
+
+DWORD WINAPI AuthorizationThread(LPVOID)
+{
+    while (!IsNativeEntryReady()) {
+        Sleep(100);
+    }
+    Sleep(100);
+
+    const LicenseAuth::CheckResult license = LicenseAuth::Check();
+    if (license.result != LicenseAuth::Result::Valid) {
+        LicenseAuth::FailAndExit(license.result);
+        return 0;
+    }
+
+    wchar_t licenseMessage[192]{};
+    LicenseAuth::FormatRemaining(
+        license.remainingSeconds,
+        licenseMessage,
+        sizeof(licenseMessage) / sizeof(licenseMessage[0]));
+    ShowAutoCloseMessage(licenseMessage, L"MyPatch 授權");
+    if (!LicenseAuth::StartMonitor(license.remainingSeconds)) {
+        ShowAutoCloseMessage(L"授權監控啟動失敗", L"MyPatch 授權");
+        ExitOnlineAndNotifyLauncher();
+        return 0;
+    }
+
+    g_msgBoxHook = SetWindowsHookExA(WH_CBT, MessageBoxHook, nullptr, GetCurrentThreadId());
+    MessageBoxW(nullptr, g_patchStatusMessage, L"MyPatch", MB_OK);
+    if (g_msgBoxHook) {
+        UnhookWindowsHookEx(g_msgBoxHook);
+        g_msgBoxHook = nullptr;
+    }
+    return 0;
+}
+
 }
 
 DWORD WINAPI MainThread(LPVOID)
@@ -5369,6 +6304,7 @@ DWORD WINAPI MainThread(LPVOID)
     uintptr_t base = reinterpret_cast<uintptr_t>(mainModule);
     g_mainBase = base;
     TaskDispatchUi::Start();
+    LureSwitchUi::Start();
     PatchResult results[kPatchCount]{};
     JumpPatchResult jumpResults[kJumpPatchCount]{};
 
@@ -5389,7 +6325,8 @@ DWORD WINAPI MainThread(LPVOID)
     }
 
     const DWORD pid = GetCurrentProcessId();
-    wchar_t message[2048]{};
+    wchar_t (&message)[2048] = g_patchStatusMessage;
+    std::memset(message, 0, sizeof(message));
     const int headerLength = std::swprintf(
         message,
         sizeof(message) / sizeof(message[0]),
@@ -5457,18 +6394,20 @@ DWORD WINAPI MainThread(LPVOID)
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x81EA\x52D5\x7A81\x9032", autoLureDashOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x4E3B\x5FAA\x74B0\x52A0\x901F", mainLoopSpeedOk);
 
-    g_msgBoxHook = SetWindowsHookExA(WH_CBT, MessageBoxHook, nullptr, GetCurrentThreadId());
-    MessageBoxW(nullptr, message, L"MyPatch", MB_OK);
-    if (g_msgBoxHook) {
-        UnhookWindowsHookEx(g_msgBoxHook);
-        g_msgBoxHook = nullptr;
+    HANDLE authorizationThread = CreateThread(nullptr, 0, AuthorizationThread, nullptr, 0, nullptr);
+    if (!authorizationThread) {
+        LicenseAuth::FailAndExit(LicenseAuth::Result::ServiceError);
+        return 0;
     }
+    CloseHandle(authorizationThread);
+
     return 0;
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
+        g_selfModule = hModule;
         DisableThreadLibraryCalls(hModule);
         CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     }
