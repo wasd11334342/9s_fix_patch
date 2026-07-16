@@ -1,5 +1,4 @@
 #include <windows.h>
-#include <winhttp.h>
 #include <climits>
 #include <cstdio>
 #include <cstdint>
@@ -7,6 +6,8 @@
 #include <cwchar>
 #include <string>
 #include <vector>
+
+#include "license_tls_client.h"
 
 namespace
 {
@@ -403,12 +404,21 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
 bool HasRushAdvantage();
 }
 
+namespace WorldCityBattle
+{
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+bool IsFighting(uint32_t cityId, bool& known);
+}
+
 namespace AutoLureDash
 {
 constexpr bool kEnableDashDiagLog = false;
 constexpr DWORD kPhaseGapMs = 100;
 constexpr DWORD kFallbackCheckMs = 500;
 constexpr DWORD kIdleScanMs = 1000;
+constexpr DWORD kIndependentScanMs = 500;
+constexpr UINT_PTR kIndependentTimerId = 0x87D5;
+constexpr int32_t kMaxTargetNodes = 4096;
 constexpr size_t kMaxGroups = 8;
 constexpr size_t kMaxPayloadsPerGroup = 5;
 constexpr size_t kGroupStride = 0x80;
@@ -425,6 +435,12 @@ volatile LONG g_hasWaiting = 0;
 volatile LONG g_hasMoveReady = 0;
 volatile LONG g_waitingNoRush = 0;
 volatile LONG g_stateFixTick = 0;
+volatile LONG g_invalidTargetCount = 0;
+volatile LONG g_targetReadFaults = 0;
+volatile LONG g_dashTickRunning = 0;
+volatile LONG g_dashTickSkipped = 0;
+volatile LONG g_dashTickLastDurationMs = 0;
+volatile LONG g_dashTickMaxDurationMs = 0;
 volatile LONG g_stateFixWrite = 0;
 volatile LONG g_stateFixLastIndex = 0;
 volatile LONG g_stateFixLastEntry = 0;
@@ -439,15 +455,19 @@ BYTE g_groups[kMaxGroups * kGroupStride]{};
 BYTE g_dashBuffer[256]{};
 volatile LONG g_lureSwitch = 0;
 volatile LONG g_fallbackSwitch = 0;
+volatile LONG g_slowLureSwitch = 1;
 volatile LONG g_showFlag = 0;
 volatile LONG g_configReadHits = 0;
 volatile LONG g_configLastStrike = 0;
 volatile LONG g_configLastLure = 0;
 volatile LONG g_configLastFallback = 0;
+volatile LONG g_configLastSlowLure = 1;
+HWND g_independentTimerHwnd = nullptr;
 
 const wchar_t kConfigSection[] = L"WorldWar";
 const wchar_t kLureKey[] = L"bLure";
 const wchar_t kFallbackKey[] = L"bFallback";
+const wchar_t kSlowLureKey[] = L"bSlowLure";
 const wchar_t kLogFormat[] = L"%s";
 const wchar_t kLogLureOffFallbackOff[] = {
     0x51FA, 0x64CA, 0x8A98, 0x6575, 0x0020, 0x7A81, 0x9032, 0x003D,
@@ -468,6 +488,7 @@ const wchar_t kLogLureOnFallbackOn[] = {
 
 bool BuildMainCode(uintptr_t base, CodeBuffer& code);
 bool BuildGuardCode(uintptr_t base, CodeBuffer& code);
+bool BuildTimerDispatchCode(uintptr_t base, CodeBuffer& code);
 bool BuildTimerCode(uintptr_t base, CodeBuffer& code);
 bool BuildConfigCode(uintptr_t base, CodeBuffer& code);
 bool BuildTotalOnCode(uintptr_t base, CodeBuffer& code);
@@ -641,7 +662,8 @@ const JumpPatch kJumpPatches[] = {
     { "LGF 3970 guard", 0x4AC90, 6, 128, LgfGuard::Build3970Code },
     { "AutoLure dash main", 0x351F0, 6, 128, AutoLureDash::BuildMainCode },
     { "AutoLure dash guard", 0x3B7A0, 6, 128, AutoLureDash::BuildGuardCode },
-    { "AutoLure dash timer", 0x403A3, 12, 128, AutoLureDash::BuildTimerCode },
+    { "AutoLure dash timer dispatch", 0x40320, 5, 128, AutoLureDash::BuildTimerDispatchCode },
+    { "AutoLure dash timer bootstrap", 0x403A3, 12, 128, AutoLureDash::BuildTimerCode },
     { "AutoLure dash config", 0x4B79B, 7, 160, AutoLureDash::BuildConfigCode },
     { "AutoLure dash total on", 0x401E0, 5, 64, AutoLureDash::BuildTotalOnCode },
     { "AutoLure dash resume", 0x412F0, 5, 64, AutoLureDash::BuildResumeCode },
@@ -1028,6 +1050,116 @@ void Write(const wchar_t* format, Args... args)
     }
 
     RefreshExpected(snapshot);
+}
+
+}
+
+namespace AutoBattleOff
+{
+constexpr DWORD kSendIntervalMs = 10000;
+constexpr DWORD kTimerIntervalMs = 10000;
+constexpr UINT_PTR kTimerId = 0x87D6;
+
+volatile LONG g_enabled = 0;
+volatile LONG g_lastSendTick = 0;
+volatile LONG g_timerArmed = 0;
+HWND g_timerHwnd = nullptr;
+BYTE g_payload = 0;
+
+const wchar_t kConfigKey[] = L"bCloseAuto";
+const wchar_t kLogFormat[] = L"%s";
+const wchar_t kLogText[] = {
+    0x81EA, 0x52D5, 0x6230, 0x8853, 0x0020, 0x95DC, 0x9589, 0x0000
+};
+
+void ResetSchedule()
+{
+    InterlockedExchange(&g_lastSendTick, 0);
+}
+
+void StartTimer()
+{
+    if (g_enabled == 0 || g_timerArmed != 0 || !g_timerHwnd || !IsWindow(g_timerHwnd)) {
+        return;
+    }
+
+    if (SetTimer(g_timerHwnd, kTimerId, kTimerIntervalMs, nullptr) != 0) {
+        InterlockedExchange(&g_timerArmed, 1);
+    }
+}
+
+void StopTimer()
+{
+    if (g_timerHwnd && IsWindow(g_timerHwnd) && g_timerArmed != 0) {
+        KillTimer(g_timerHwnd, kTimerId);
+    }
+    InterlockedExchange(&g_timerArmed, 0);
+    ResetSchedule();
+}
+
+__declspec(noinline) void __stdcall EnsureTimer(void* owner)
+{
+    if (!owner) {
+        return;
+    }
+
+    HWND hwnd = *reinterpret_cast<HWND*>(reinterpret_cast<uintptr_t>(owner) + 0x20);
+    if (!hwnd || !IsWindow(hwnd)) {
+        return;
+    }
+
+    if (g_timerHwnd == hwnd) {
+        StartTimer();
+        return;
+    }
+
+    if (g_timerHwnd && IsWindow(g_timerHwnd) && g_timerArmed != 0) {
+        KillTimer(g_timerHwnd, kTimerId);
+    }
+
+    InterlockedExchange(&g_timerArmed, 0);
+    g_timerHwnd = hwnd;
+    StartTimer();
+}
+
+__declspec(noinline) void __stdcall Tick()
+{
+    if (g_enabled == 0) {
+        ResetSchedule();
+        return;
+    }
+
+    const DWORD now = GetGameTick();
+    const DWORD lastSendTick = static_cast<DWORD>(g_lastSendTick);
+    if (lastSendTick != 0 && now - lastSendTick < kSendIntervalMs) {
+        return;
+    }
+
+    InterlockedExchange(&g_lastSendTick, static_cast<LONG>(now));
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket = reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(0x147D, &g_payload, sizeof(g_payload));
+    GameLog::Write(kLogFormat, kLogText);
+}
+
+__declspec(noinline) void __stdcall TimerTick(void* owner)
+{
+    if (!owner) {
+        return;
+    }
+
+    HWND hwnd = *reinterpret_cast<HWND*>(reinterpret_cast<uintptr_t>(owner) + 0x20);
+    if (!hwnd || !IsWindow(hwnd)) {
+        InterlockedExchange(&g_timerArmed, 0);
+        g_timerHwnd = nullptr;
+        return;
+    }
+
+    KillTimer(hwnd, kTimerId);
+    InterlockedExchange(&g_timerArmed, 0);
+    Tick();
+    g_timerHwnd = hwnd;
+    StartTimer();
 }
 
 }
@@ -1460,6 +1592,174 @@ bool HasRushAdvantage()
 
 }
 
+namespace WorldCityBattle
+{
+constexpr size_t kCityStateCount = 0x10000;
+constexpr DWORD kCityStateFreshMs = 3000;
+constexpr BYTE kCityUnknown = 0;
+constexpr BYTE kCityIdle = 1;
+constexpr BYTE kCityFighting = 2;
+
+volatile BYTE g_cityStates[kCityStateCount]{};
+volatile LONG g_cityUpdateTicks[kCityStateCount]{};
+volatile LONG g_fullPacketCount = 0;
+volatile LONG g_fullParseFailures = 0;
+volatile LONG g_singlePacketCount = 0;
+volatile LONG g_lastUpdateCity = 0;
+volatile LONG g_lastUpdateFighting = 0;
+
+struct Reader
+{
+    const BYTE* cursor = nullptr;
+    const BYTE* end = nullptr;
+
+    bool CanRead(size_t bytes) const
+    {
+        return cursor && end && cursor <= end && bytes <= static_cast<size_t>(end - cursor);
+    }
+
+    bool ReadU16(uint32_t& value)
+    {
+        if (!CanRead(2)) {
+            return false;
+        }
+        value = ReadBe16Unaligned(cursor);
+        cursor += 2;
+        return true;
+    }
+
+    bool Skip(size_t bytes)
+    {
+        if (!CanRead(bytes)) {
+            return false;
+        }
+        cursor += bytes;
+        return true;
+    }
+
+    bool SkipString()
+    {
+        uint32_t length = 0;
+        return ReadU16(length) && Skip(length);
+    }
+};
+
+bool SkipBuff(Reader& reader)
+{
+    return reader.Skip(4) &&
+        reader.SkipString() &&
+        reader.Skip(4) &&
+        reader.SkipString() &&
+        reader.Skip(4) &&
+        reader.Skip(1) &&
+        reader.SkipString();
+}
+
+bool ParseCityList(Reader& reader, bool store, DWORD updateTick)
+{
+    uint32_t cityCount = 0;
+    if (!reader.ReadU16(cityCount)) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < cityCount; ++i) {
+        uint32_t cityId = 0;
+        if (!reader.ReadU16(cityId) || !reader.CanRead(4)) {
+            return false;
+        }
+
+        const BYTE fighting = reader.cursor[3];
+        reader.cursor += 4;
+
+        uint32_t buffCount = 0;
+        if (!reader.ReadU16(buffCount)) {
+            return false;
+        }
+        for (uint32_t j = 0; j < buffCount; ++j) {
+            if (!SkipBuff(reader)) {
+                return false;
+            }
+        }
+        if (!reader.SkipString()) {
+            return false;
+        }
+
+        if (store) {
+            g_cityStates[cityId] = fighting != 0 ? kCityFighting : kCityIdle;
+            g_cityUpdateTicks[cityId] = static_cast<LONG>(updateTick);
+        }
+    }
+    return true;
+}
+
+void HandleFullCityInfo(const BYTE* payload, uint32_t payloadLength)
+{
+    InterlockedIncrement(&g_fullPacketCount);
+    if (!payload || payloadLength < 2) {
+        InterlockedIncrement(&g_fullParseFailures);
+        return;
+    }
+
+    Reader validate{ payload, payload + payloadLength };
+    if (!ParseCityList(validate, false, 0)) {
+        InterlockedIncrement(&g_fullParseFailures);
+        return;
+    }
+
+    std::memset(const_cast<BYTE*>(g_cityStates), kCityUnknown, sizeof(g_cityStates));
+    std::memset(const_cast<LONG*>(g_cityUpdateTicks), 0, sizeof(g_cityUpdateTicks));
+    Reader store{ payload, payload + payloadLength };
+    ParseCityList(store, true, GetTickCount());
+}
+
+void HandleSingleCityUpdate(const BYTE* payload, uint32_t payloadLength)
+{
+    if (!payload || payloadLength < 6) {
+        return;
+    }
+
+    const uint32_t cityId = ReadBe16Unaligned(payload);
+    const BYTE fighting = payload[5];
+    g_cityStates[cityId] = fighting != 0 ? kCityFighting : kCityIdle;
+    g_cityUpdateTicks[cityId] = static_cast<LONG>(GetTickCount());
+    InterlockedIncrement(&g_singlePacketCount);
+    InterlockedExchange(&g_lastUpdateCity, static_cast<LONG>(cityId));
+    InterlockedExchange(&g_lastUpdateFighting, static_cast<LONG>(fighting));
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    switch (opcode & 0xFFFF) {
+    case 0x1B33:
+        HandleFullCityInfo(payload, payloadLength);
+        break;
+    case 0x1B36:
+        HandleSingleCityUpdate(payload, payloadLength);
+        break;
+    default:
+        break;
+    }
+}
+
+bool IsFighting(uint32_t cityId, bool& known)
+{
+    known = false;
+    if (cityId >= kCityStateCount) {
+        return false;
+    }
+
+    const DWORD updateTick = static_cast<DWORD>(g_cityUpdateTicks[cityId]);
+    if (updateTick == 0 || GetTickCount() - updateTick > kCityStateFreshMs) {
+        return false;
+    }
+
+    const BYTE state = g_cityStates[cityId];
+    known = state != kCityUnknown;
+    return state == kCityFighting;
+}
+
+}
+
 namespace AutoLureDash
 {
 
@@ -1584,6 +1884,7 @@ enum DashDiagReason : LONG
     kDiagSend1483 = 10,
     kDiagSend1482 = 11,
     kDiagSkip1482 = 12,
+    kDiagTargetFightingOrUnknown = 13,
 };
 
 const wchar_t* DashDiagReasonText(LONG reason)
@@ -1613,6 +1914,8 @@ const wchar_t* DashDiagReasonText(LONG reason)
         return L"send_1482";
     case kDiagSkip1482:
         return L"skip_1482";
+    case kDiagTargetFightingOrUnknown:
+        return L"target_fighting_or_unknown";
     default:
         return L"unknown";
     }
@@ -1668,7 +1971,7 @@ void ShowOptions()
     WriteDashLog(g_fallbackSwitch != 0 ? kLogLureOffFallbackOn : kLogLureOffFallbackOff);
 }
 
-bool GetTarget(uintptr_t entry, uint32_t& current, uint32_t& target)
+bool GetTargetImpl(uintptr_t entry, uint32_t& current, uint32_t& target)
 {
     current = ReadGameU16(entry + 0x30);
 
@@ -1689,7 +1992,10 @@ bool GetTarget(uintptr_t entry, uint32_t& current, uint32_t& target)
     }
 
     const int32_t count = static_cast<int32_t>(ReadGameU32(container + 0x0C));
-    if (count <= 0) {
+    if (count <= 0 || count > kMaxTargetNodes) {
+        if (count > kMaxTargetNodes) {
+            InterlockedIncrement(&g_invalidTargetCount);
+        }
         return false;
     }
 
@@ -1720,6 +2026,19 @@ bool GetTarget(uintptr_t entry, uint32_t& current, uint32_t& target)
     }
 
     return false;
+}
+
+bool GetTarget(uintptr_t entry, uint32_t& current, uint32_t& target)
+{
+    __try {
+        return GetTargetImpl(entry, current, target);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedIncrement(&g_targetReadFaults);
+        current = 0;
+        target = 0;
+        return false;
+    }
 }
 
 BYTE* FindGroup(uint32_t current)
@@ -1862,6 +2181,15 @@ void BuildGroups()
             continue;
         }
 
+        if (g_slowLureSwitch != 0) {
+            bool targetStateKnown = false;
+            const bool targetIsFighting = WorldCityBattle::IsFighting(target, targetStateKnown);
+            if (!targetStateKnown || targetIsFighting) {
+                WriteDashDiag(kDiagTargetFightingOrUnknown, current, target);
+                continue;
+            }
+        }
+
         const LONG lastCity = AlBattle::g_lastCity;
         if (lastCity != 0 && static_cast<uint32_t>(lastCity) != current) {
             WriteDashDiag(kDiagWrongCity, current, target);
@@ -1916,6 +2244,24 @@ void AllowOriginalThrottled()
     InterlockedExchange(&g_action, 1);
 }
 
+void ScheduleNextIdleScan()
+{
+    InterlockedExchange(
+        &g_scanNextTick,
+        static_cast<LONG>(GetTickCount() + kIndependentScanMs));
+}
+
+void AdvanceToNextGroup()
+{
+    const LONG nextIndex = g_groupIndex + 1;
+    InterlockedExchange(&g_groupIndex, nextIndex);
+    if (nextIndex >= g_groupCount) {
+        FinishAll();
+        return;
+    }
+    SetNextPhase(5);
+}
+
 void Send1483(BYTE* group)
 {
     RefreshMarchFreeLogState();
@@ -1923,6 +2269,18 @@ void Send1483(BYTE* group)
         WriteNoMarchFreeLogOnce();
         FinishAll();
         return;
+    }
+
+    const uint32_t current = ReadGroupU32(group, 0x00);
+    const uint32_t target = ReadGroupU32(group, 0x04);
+    if (g_slowLureSwitch != 0) {
+        bool targetStateKnown = false;
+        const bool targetIsFighting = WorldCityBattle::IsFighting(target, targetStateKnown);
+        if (!targetStateKnown || targetIsFighting) {
+            WriteDashDiag(kDiagTargetFightingOrUnknown, current, target);
+            AdvanceToNextGroup();
+            return;
+        }
     }
 
     std::memset(g_dashBuffer, 0, sizeof(g_dashBuffer));
@@ -1997,14 +2355,7 @@ void Check1482(BYTE* group)
         }
     }
 
-    LONG nextIndex = g_groupIndex + 1;
-    InterlockedExchange(&g_groupIndex, nextIndex);
-    if (nextIndex >= g_groupCount) {
-        FinishAll();
-        return;
-    }
-
-    SetNextPhase(5);
+    AdvanceToNextGroup();
 }
 
 void SendCurrentPhase()
@@ -2049,7 +2400,7 @@ void SendCurrentPhase()
     }
 }
 
-__declspec(noinline) void __stdcall DashTick()
+void DashTickImpl()
 {
     StateFix();
     InterlockedExchange(&g_action, 0);
@@ -2081,9 +2432,11 @@ __declspec(noinline) void __stdcall DashTick()
 
         BuildGroups();
         if (g_groupCount == 0) {
+            ScheduleNextIdleScan();
             if (g_waitingNoRush == 1 || g_hasWaiting == 1) {
                 WriteDashDiag(kDiagAllowOriginalWaiting, 0, 0);
                 ResetDashState();
+                ScheduleNextIdleScan();
                 InterlockedExchange(&g_action, 1);
                 return;
             }
@@ -2104,6 +2457,100 @@ __declspec(noinline) void __stdcall DashTick()
     }
 
     SendCurrentPhase();
+}
+
+void RecordDashTickDuration(DWORD elapsed)
+{
+    InterlockedExchange(&g_dashTickLastDurationMs, static_cast<LONG>(elapsed));
+    LONG observed = g_dashTickMaxDurationMs;
+    while (elapsed > static_cast<DWORD>(observed)) {
+        const LONG previous = InterlockedCompareExchange(
+            &g_dashTickMaxDurationMs,
+            static_cast<LONG>(elapsed),
+            observed);
+        if (previous == observed) {
+            break;
+        }
+        observed = previous;
+    }
+}
+
+__declspec(noinline) void __stdcall DashTick()
+{
+    if (InterlockedCompareExchange(&g_dashTickRunning, 1, 0) != 0) {
+        InterlockedIncrement(&g_dashTickSkipped);
+        return;
+    }
+
+    const DWORD started = GetTickCount();
+    __try {
+        DashTickImpl();
+    }
+    __finally {
+        RecordDashTickDuration(GetTickCount() - started);
+        InterlockedExchange(&g_dashTickRunning, 0);
+    }
+}
+
+DWORD IndependentTimerInterval()
+{
+    return g_phase != 0 ? kPhaseGapMs : kIndependentScanMs;
+}
+
+__declspec(noinline) void __stdcall EnsureIndependentTimer(void* owner)
+{
+    if (!owner) {
+        return;
+    }
+
+    HWND hwnd = *reinterpret_cast<HWND*>(reinterpret_cast<uintptr_t>(owner) + 0x20);
+    if (!hwnd || !IsWindow(hwnd)) {
+        return;
+    }
+
+    if (g_independentTimerHwnd == hwnd) {
+        return;
+    }
+
+    if (g_independentTimerHwnd && IsWindow(g_independentTimerHwnd)) {
+        KillTimer(g_independentTimerHwnd, kIndependentTimerId);
+    }
+
+    g_independentTimerHwnd = nullptr;
+    if (SetTimer(hwnd, kIndependentTimerId, kIndependentScanMs, nullptr) != 0) {
+        g_independentTimerHwnd = hwnd;
+    }
+}
+
+__declspec(noinline) void __stdcall IndependentTimerTick(void* owner)
+{
+    if (!owner) {
+        return;
+    }
+
+    HWND hwnd = *reinterpret_cast<HWND*>(reinterpret_cast<uintptr_t>(owner) + 0x20);
+    if (!hwnd || !IsWindow(hwnd)) {
+        g_independentTimerHwnd = nullptr;
+        return;
+    }
+
+    KillTimer(hwnd, kIndependentTimerId);
+    DashTick();
+
+    if (SetTimer(hwnd, kIndependentTimerId, IndependentTimerInterval(), nullptr) != 0) {
+        g_independentTimerHwnd = hwnd;
+    } else {
+        g_independentTimerHwnd = nullptr;
+    }
+}
+
+__declspec(noinline) void __stdcall IndependentTimerDispatch(void* owner, UINT_PTR timerId)
+{
+    if (timerId == kIndependentTimerId) {
+        IndependentTimerTick(owner);
+    } else if (timerId == AutoBattleOff::kTimerId) {
+        AutoBattleOff::TimerTick(owner);
+    }
 }
 
 bool BuildMainCode(uintptr_t base, CodeBuffer& code)
@@ -2133,19 +2580,40 @@ bool BuildGuardCode(uintptr_t base, CodeBuffer& code)
         AppendRel32Instruction(code, 0xE9, base + 0x3B7A6);
 }
 
+bool BuildTimerDispatchCode(uintptr_t base, CodeBuffer& code)
+{
+    return AppendByte(code, 0x81) && AppendByte(code, 0x7C) && AppendByte(code, 0x24) && AppendByte(code, 0x04) &&
+        AppendU32(code, static_cast<uint32_t>(kIndependentTimerId)) &&
+        AppendJeShort(code, 0x0A) &&
+        AppendByte(code, 0x81) && AppendByte(code, 0x7C) && AppendByte(code, 0x24) && AppendByte(code, 0x04) &&
+        AppendU32(code, static_cast<uint32_t>(AutoBattleOff::kTimerId)) &&
+        AppendJneShort(code, 0x13) &&
+        AppendByte(code, 0x9C) &&
+        AppendPushad(code) &&
+        AppendByte(code, 0xFF) && AppendByte(code, 0x74) && AppendByte(code, 0x24) && AppendByte(code, 0x28) &&
+        AppendByte(code, 0x51) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&IndependentTimerDispatch)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&
+        AppendByte(code, 0x33) && AppendByte(code, 0xC0) &&
+        AppendRetImm16(code, 0x04) &&
+        AppendOriginalFunctionPrologue(code) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x40325);
+}
+
 bool BuildTimerCode(uintptr_t base, CodeBuffer& code)
 {
-    const uint32_t phase = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_phase));
-    const uint32_t action = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_action));
     return AppendRel32Instruction(code, 0xE8, base + 0x351F0) &&
+        AppendByte(code, 0x9C) &&
+        AppendPushad(code) &&
+        AppendPushEdi(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&EnsureIndependentTimer)) &&
+        AppendPushEdi(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&AutoBattleOff::EnsureTimer)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&
         AppendByte(code, 0x6A) && AppendByte(code, 0x00) &&
-        AppendCmpDwordAbsImm8(code, phase, 0) &&
-        AppendJneShort(code, 0x13) &&
-        AppendCmpDwordAbsImm8(code, action, 0) &&
-        AppendJeShort(code, 0x0A) &&
         AppendPushImm32(code, 0x4E20) &&
-        AppendRel32Instruction(code, 0xE9, base + 0x403AF) &&
-        AppendPushImm32(code, kPhaseGapMs) &&
         AppendRel32Instruction(code, 0xE9, base + 0x403AF);
 }
 
@@ -2157,6 +2625,8 @@ bool BuildConfigCode(uintptr_t base, CodeBuffer& code)
     const uint32_t lastLure = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_configLastLure));
     const uint32_t fallbackSwitch = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_fallbackSwitch));
     const uint32_t lastFallback = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_configLastFallback));
+    const uint32_t slowLureSwitch = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_slowLureSwitch));
+    const uint32_t lastSlowLure = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_configLastSlowLure));
 
     return AppendByte(code, 0xFF) && AppendByte(code, 0xD6) &&
         AppendIncDwordPtrAbs(code, readHits) &&
@@ -2176,6 +2646,13 @@ bool BuildConfigCode(uintptr_t base, CodeBuffer& code)
         AppendByte(code, 0xFF) && AppendByte(code, 0xD6) &&
         AppendMovDwordPtrAbsEax(code, fallbackSwitch) &&
         AppendMovDwordPtrAbsEax(code, lastFallback) &&
+        AppendPushEdi(code) &&
+        AppendByte(code, 0x6A) && AppendByte(code, 0x01) &&
+        AppendPushImm32(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(kSlowLureKey))) &&
+        AppendPushImm32(code, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(kConfigSection))) &&
+        AppendByte(code, 0xFF) && AppendByte(code, 0xD6) &&
+        AppendMovDwordPtrAbsEax(code, slowLureSwitch) &&
+        AppendMovDwordPtrAbsEax(code, lastSlowLure) &&
         AppendMovEaxDwordPtrAbs(code, lastStrike) &&
         AppendPopEdi(code) &&
         AppendPopEsi(code) &&
@@ -2208,6 +2685,8 @@ namespace LureSwitchUi
 {
 constexpr UINT kRushCheckboxId = 0x7B01;
 constexpr UINT kRetreatCheckboxId = 0x7B02;
+constexpr UINT kSlowLureCheckboxId = 0x7B03;
+constexpr UINT kCloseAutoCheckboxId = 0x7B04;
 constexpr UINT kPrivateMessage = 0x87B1;
 constexpr UINT kTimerId = 0x87B3;
 
@@ -2215,15 +2694,20 @@ volatile LONG g_started = 0;
 volatile LONG g_writeHits = 0;
 volatile LONG g_writeFailures = 0;
 volatile LONG g_defaultCreateHits = 0;
+volatile LONG g_slowLureKeyReady = 0;
+volatile LONG g_closeAutoKeyReady = 0;
 HWND g_settingsHwnd = nullptr;
 HWND g_parentHwnd = nullptr;
 HWND g_lureAnchorHwnd = nullptr;
 HWND g_killBoxAnchorHwnd = nullptr;
 HWND g_rushCheckboxHwnd = nullptr;
 HWND g_retreatCheckboxHwnd = nullptr;
+HWND g_slowLureCheckboxHwnd = nullptr;
+HWND g_closeAutoCheckboxHwnd = nullptr;
 WNDPROC g_oldProc = nullptr;
 int g_rushX = 0;
 int g_y = 0;
+int g_killBoxY = 0;
 int g_w = 0;
 int g_h = 0;
 
@@ -2232,6 +2716,8 @@ const wchar_t kLureAnchorText[] = L"\x51FA\x64CA\x8A98\x6575";
 const wchar_t kKillBoxAnchorText[] = L"\x64CA\x6BBA\x5BF6\x7BB1";
 const wchar_t kRushText[] = L"\x7A81\x9032";
 const wchar_t kRetreatText[] = L"\x64A4\x9000";
+const wchar_t kSlowLureText[] = L"\x6162\x7A81\x9032";
+const wchar_t kCloseAutoText[] = L"\x95DC\x81EA\x52D5";
 
 bool TryGetConfigPath(const wchar_t** pathOut)
 {
@@ -2281,7 +2767,7 @@ bool PersistSwitch(const wchar_t* key, LONG value)
     return true;
 }
 
-bool EnsureSwitchKey(const wchar_t* key)
+bool EnsureSwitchKey(const wchar_t* key, LONG defaultValue)
 {
     const wchar_t* path = nullptr;
     if (!key || !TryGetConfigPath(&path)) {
@@ -2305,7 +2791,8 @@ bool EnsureSwitchKey(const wchar_t* key)
             return true;
         }
 
-        if (!WritePrivateProfileStringW(AutoLureDash::kConfigSection, key, L"0", path)) {
+        const wchar_t* defaultText = defaultValue != 0 ? L"1" : L"0";
+        if (!WritePrivateProfileStringW(AutoLureDash::kConfigSection, key, defaultText, path)) {
             InterlockedIncrement(&g_writeFailures);
             return false;
         }
@@ -2319,8 +2806,52 @@ bool EnsureSwitchKey(const wchar_t* key)
     return true;
 }
 
+void EnsureSlowLureKeyReady()
+{
+    if (g_slowLureKeyReady != 0) {
+        return;
+    }
+
+    if (EnsureSwitchKey(AutoLureDash::kSlowLureKey, 1)) {
+        InterlockedExchange(&g_slowLureKeyReady, 1);
+    }
+}
+
+void EnsureCloseAutoKeyReady()
+{
+    if (g_closeAutoKeyReady != 0) {
+        return;
+    }
+
+    if (!EnsureSwitchKey(AutoBattleOff::kConfigKey, 0)) {
+        return;
+    }
+
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) {
+        return;
+    }
+
+    const LONG value = GetPrivateProfileIntW(
+        AutoLureDash::kConfigSection,
+        AutoBattleOff::kConfigKey,
+        0,
+        path) != 0 ? 1 : 0;
+    InterlockedExchange(&AutoBattleOff::g_enabled, value);
+    AutoBattleOff::ResetSchedule();
+    if (value != 0) {
+        AutoBattleOff::StartTimer();
+    } else {
+        AutoBattleOff::StopTimer();
+    }
+    InterlockedExchange(&g_closeAutoKeyReady, 1);
+}
+
 void ApplyButtonStates()
 {
+    EnsureSlowLureKeyReady();
+    EnsureCloseAutoKeyReady();
+
     if (g_rushCheckboxHwnd && IsWindow(g_rushCheckboxHwnd)) {
         SendMessageW(
             g_rushCheckboxHwnd,
@@ -2333,6 +2864,20 @@ void ApplyButtonStates()
             g_retreatCheckboxHwnd,
             BM_SETCHECK,
             AutoLureDash::g_fallbackSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+            0);
+    }
+    if (g_slowLureCheckboxHwnd && IsWindow(g_slowLureCheckboxHwnd)) {
+        SendMessageW(
+            g_slowLureCheckboxHwnd,
+            BM_SETCHECK,
+            AutoLureDash::g_slowLureSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+            0);
+    }
+    if (g_closeAutoCheckboxHwnd && IsWindow(g_closeAutoCheckboxHwnd)) {
+        SendMessageW(
+            g_closeAutoCheckboxHwnd,
+            BM_SETCHECK,
+            AutoBattleOff::g_enabled != 0 ? BST_CHECKED : BST_UNCHECKED,
             0);
     }
 }
@@ -2351,6 +2896,25 @@ void SyncSwitchFromButton(UINT controlId)
         InterlockedExchange(&AutoLureDash::g_configLastFallback, value);
         InterlockedExchange(&AutoLureDash::g_showFlag, 0);
         PersistSwitch(AutoLureDash::kFallbackKey, value);
+    } else if (controlId == kSlowLureCheckboxId && g_slowLureCheckboxHwnd && IsWindow(g_slowLureCheckboxHwnd)) {
+        const LONG value = SendMessageW(g_slowLureCheckboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
+        InterlockedExchange(&AutoLureDash::g_slowLureSwitch, value);
+        InterlockedExchange(&AutoLureDash::g_configLastSlowLure, value);
+        if (PersistSwitch(AutoLureDash::kSlowLureKey, value)) {
+            InterlockedExchange(&g_slowLureKeyReady, 1);
+        }
+    } else if (controlId == kCloseAutoCheckboxId && g_closeAutoCheckboxHwnd && IsWindow(g_closeAutoCheckboxHwnd)) {
+        const LONG value = SendMessageW(g_closeAutoCheckboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
+        InterlockedExchange(&AutoBattleOff::g_enabled, value);
+        if (value != 0) {
+            AutoBattleOff::ResetSchedule();
+            AutoBattleOff::StartTimer();
+        } else {
+            AutoBattleOff::StopTimer();
+        }
+        if (PersistSwitch(AutoBattleOff::kConfigKey, value)) {
+            InterlockedExchange(&g_closeAutoKeyReady, 1);
+        }
     }
 }
 
@@ -2358,7 +2922,8 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
 {
     if (message == WM_COMMAND) {
         const UINT controlId = LOWORD(wParam);
-        if ((controlId == kRushCheckboxId || controlId == kRetreatCheckboxId) &&
+        if ((controlId == kRushCheckboxId || controlId == kRetreatCheckboxId ||
+             controlId == kSlowLureCheckboxId || controlId == kCloseAutoCheckboxId) &&
             HIWORD(wParam) == BN_CLICKED) {
             SyncSwitchFromButton(controlId);
         }
@@ -2370,8 +2935,10 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
     }
 
     if (message == kPrivateMessage && wParam == 1) {
-        EnsureSwitchKey(AutoLureDash::kLureKey);
-        EnsureSwitchKey(AutoLureDash::kFallbackKey);
+        EnsureSwitchKey(AutoLureDash::kLureKey, 0);
+        EnsureSwitchKey(AutoLureDash::kFallbackKey, 0);
+        EnsureSlowLureKeyReady();
+        EnsureCloseAutoKeyReady();
         if (!g_rushCheckboxHwnd) {
             g_rushCheckboxHwnd = CreateWindowExW(
                 0,
@@ -2402,6 +2969,36 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                 nullptr,
                 nullptr);
         }
+        if (!g_slowLureCheckboxHwnd) {
+            g_slowLureCheckboxHwnd = CreateWindowExW(
+                0,
+                L"Button",
+                kSlowLureText,
+                0x50018003,
+                g_rushX + (g_w + 6) * 2,
+                g_y,
+                g_w,
+                g_h,
+                g_parentHwnd,
+                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kSlowLureCheckboxId)),
+                nullptr,
+                nullptr);
+        }
+        if (!g_closeAutoCheckboxHwnd) {
+            g_closeAutoCheckboxHwnd = CreateWindowExW(
+                0,
+                L"Button",
+                kCloseAutoText,
+                0x50018003,
+                g_rushX + g_w + 6,
+                g_killBoxY,
+                g_w,
+                g_h,
+                g_parentHwnd,
+                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kCloseAutoCheckboxId)),
+                nullptr,
+                nullptr);
+        }
 
         HFONT font = reinterpret_cast<HFONT>(SendMessageW(g_lureAnchorHwnd, WM_GETFONT, 0, 0));
         if (font) {
@@ -2411,6 +3008,12 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             if (g_retreatCheckboxHwnd) {
                 SendMessageW(g_retreatCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
             }
+            if (g_slowLureCheckboxHwnd) {
+                SendMessageW(g_slowLureCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            }
+            if (g_closeAutoCheckboxHwnd) {
+                SendMessageW(g_closeAutoCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+            }
         }
 
         ApplyButtonStates();
@@ -2419,6 +3022,12 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         }
         if (g_retreatCheckboxHwnd) {
             ShowWindow(g_retreatCheckboxHwnd, SW_SHOW);
+        }
+        if (g_slowLureCheckboxHwnd) {
+            ShowWindow(g_slowLureCheckboxHwnd, SW_SHOW);
+        }
+        if (g_closeAutoCheckboxHwnd) {
+            ShowWindow(g_closeAutoCheckboxHwnd, SW_SHOW);
         }
         SetTimer(g_parentHwnd, kTimerId, 1000, nullptr);
         return 1;
@@ -2469,6 +3078,7 @@ bool FindAndInstall()
     g_w = lureRect.right - lureRect.left;
     g_h = lureRect.bottom - lureRect.top;
     g_rushX = lurePoint.x + g_w + 6;
+    g_killBoxY = g_y + g_h + 6;
 
     if (g_killBoxAnchorHwnd) {
         RECT killBoxRect{};
@@ -2476,6 +3086,7 @@ bool FindAndInstall()
             POINT killBoxPoint{ killBoxRect.left, killBoxRect.top };
             ScreenToClient(g_parentHwnd, &killBoxPoint);
             g_rushX = killBoxPoint.x;
+            g_killBoxY = killBoxPoint.y;
         }
     }
 
@@ -5762,6 +6373,7 @@ namespace SharedRecvRouter
 __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
 {
     InterlockedExchange(&g_clearStackArg, 0);
+    WorldCityBattle::HandleRecvPacket(opcode, payload, payloadLength);
     DailySign::HandleRecvPacket(opcode, payload);
     PrizePool::HandleRecvPacket(opcode, payload);
     WeeklyReward::HandleRecvPacket(opcode, payload, payloadLength);
@@ -5919,9 +6531,10 @@ void ExitOnlineAndNotifyLauncher()
 
 namespace LicenseAuth
 {
-constexpr wchar_t kHost[] = L"mypatch-license-auth.wasd11334342.workers.dev";
-constexpr wchar_t kPath[] = L"/";
+constexpr char kHost[] = "mypatch-license-auth.wasd11334342.workers.dev";
+constexpr char kPath[] = "/";
 constexpr char kClientApiKey[] = "7ca30c81d310863317025e7c37701f35ab050af6c0443266ba5a99df39feece8";
+constexpr unsigned kMaxConsecutiveNetworkErrors = 5;
 
 __declspec(align(8)) volatile LONG64 g_expireTick = 0;
 volatile LONG g_exitStarted = 0;
@@ -6015,30 +6628,6 @@ Result ReadLicense(std::string& license)
     return Result::Valid;
 }
 
-bool ReadResponse(HINTERNET request, std::string& response)
-{
-    response.clear();
-    for (;;) {
-        DWORD available = 0;
-        if (!WinHttpQueryDataAvailable(request, &available)) {
-            return false;
-        }
-        if (available == 0) {
-            return true;
-        }
-        if (response.size() + available > 16384) {
-            return false;
-        }
-        const size_t oldSize = response.size();
-        response.resize(oldSize + available);
-        DWORD read = 0;
-        if (!WinHttpReadData(request, &response[oldSize], available, &read)) {
-            return false;
-        }
-        response.resize(oldSize + read);
-    }
-}
-
 bool ParseUnsigned(const std::string& text, const char* field, unsigned long long& value)
 {
     const size_t pos = text.find(field);
@@ -6063,52 +6652,18 @@ bool ParseUnsigned(const std::string& text, const char* field, unsigned long lon
 CheckResult Query(const std::string& license)
 {
     CheckResult result{};
-    HINTERNET session = WinHttpOpen(L"MyPatch-License/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) {
-        result.result = Result::NetworkError;
-        return result;
-    }
-    WinHttpSetTimeouts(session, 5000, 5000, 7000, 7000);
-
-    HINTERNET connection = WinHttpConnect(session, kHost, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    HINTERNET request = connection ? WinHttpOpenRequest(connection, L"POST", kPath, nullptr,
-        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
-    if (!request) {
-        if (connection) WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
-        result.result = Result::NetworkError;
-        return result;
-    }
-
-    std::wstring headers = L"Content-Type: application/json\r\nx-api-key: ";
-    for (const char* p = kClientApiKey; *p; ++p) {
-        headers.push_back(static_cast<wchar_t>(*p));
-    }
     const std::string body = std::string("{\"license\":\"") + license + "\"}";
-    const BOOL sent = WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(-1L),
-        const_cast<char*>(body.data()), static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0);
-    const BOOL received = sent ? WinHttpReceiveResponse(request, nullptr) : FALSE;
-
-    DWORD status = 0;
-    DWORD statusSize = sizeof(status);
-    std::string response;
-    const bool readOk = received && WinHttpQueryHeaders(request,
-        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
-        &status, &statusSize, WINHTTP_NO_HEADER_INDEX) && ReadResponse(request, response);
-
-    WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connection);
-    WinHttpCloseHandle(session);
-
-    if (!readOk) {
+    const LicenseTlsClient::Response tlsResponse =
+        LicenseTlsClient::PostJson(kHost, kPath, kClientApiKey, body);
+    if (!tlsResponse.Ok()) {
         result.result = Result::NetworkError;
         return result;
     }
-    if (status != 200) {
+    if (tlsResponse.statusCode != 200) {
         result.result = Result::ServiceError;
         return result;
     }
+    const std::string& response = tlsResponse.body;
     if (response.find("\"valid\":true") != std::string::npos) {
         unsigned long long remaining = 0;
         if (!ParseUnsigned(response, "\"remaining_seconds\":", remaining) || remaining == 0) {
@@ -6205,12 +6760,20 @@ DWORD WINAPI DeadlineThread(LPVOID)
 
 DWORD WINAPI RemoteMonitorThread(LPVOID)
 {
+    unsigned consecutiveNetworkErrors = 0;
     for (;;) {
         Sleep(60000);
         const CheckResult check = Check();
         if (check.result == Result::Valid) {
+            consecutiveNetworkErrors = 0;
             SetDeadline(check.remainingSeconds);
             continue;
+        }
+        if (check.result == Result::NetworkError) {
+            ++consecutiveNetworkErrors;
+            if (consecutiveNetworkErrors < kMaxConsecutiveNetworkErrors) {
+                continue;
+            }
         }
         FailAndExit(check.result);
         return 0;
@@ -6370,7 +6933,8 @@ DWORD WINAPI MainThread(LPVOID)
     const bool fastDailyBattleOk = IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Fast Daily Battle");
     const bool autoLureDashOk = IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash main") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash guard") &&
-        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash timer") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash timer dispatch") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash timer bootstrap") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash config") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash total on") &&
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash resume");
