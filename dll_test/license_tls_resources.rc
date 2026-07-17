@@ -1,3 +1,36 @@
 #include "license_tls_resources.h"
+#include <winver.h>
 
 IDR_LICENSE_CA_BUNDLE RCDATA "third_party/cacert/cacert.pem"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 0,11,0,0
+ PRODUCTVERSION 0,11,0,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS VS_FF_DEBUG
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040404B0"
+        BEGIN
+            VALUE "CompanyName", "MyPatch\0"
+            VALUE "FileDescription", "MyPatch DLL\0"
+            VALUE "FileVersion", "0.11b\0"
+            VALUE "InternalName", "MyPatch\0"
+            VALUE "OriginalFilename", "MyPatch.dll\0"
+            VALUE "ProductName", "MyPatch\0"
+            VALUE "ProductVersion", "0.11b\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0404, 1200
+    END
+END

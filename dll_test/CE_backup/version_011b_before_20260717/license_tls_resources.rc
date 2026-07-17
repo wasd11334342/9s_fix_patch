@@ -1,0 +1,3 @@
+#include "license_tls_resources.h"
+
+IDR_LICENSE_CA_BUNDLE RCDATA "third_party/cacert/cacert.pem"
