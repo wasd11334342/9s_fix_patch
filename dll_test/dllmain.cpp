@@ -15,7 +15,7 @@ HHOOK g_msgBoxHook = nullptr;
 HMODULE g_selfModule = nullptr;
 wchar_t g_patchStatusMessage[2048]{};
 constexpr DWORD kMessageBoxAutoCloseMs = 3000;
-constexpr wchar_t kMyPatchVersion[] = L"0.11b";
+constexpr wchar_t kMyPatchVersion[] = L"0.12b";
 
 struct MemoryPatch
 {
@@ -286,23 +286,41 @@ void SendTick();
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
 }
 
+namespace BattleToken
+{
+void Tick();
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+void OnEnabledChanged(LONG enabled);
+}
+
 namespace TaskDispatchUi
 {
 constexpr UINT kCheckboxId = 0x0439;
+constexpr UINT kBattleTokenCheckboxId = 0x7B05;
 constexpr UINT kPrivateMessage = 0x8439;
 constexpr UINT kTimerId = 0x843A;
+const wchar_t kBattleTokenConfigSection[] = L"MAIN";
+const wchar_t kTaskDispatchConfigKey[] = L"bTaskDispatch";
+const wchar_t kBattleTokenConfigKey[] = L"bBattleToken";
 
 volatile LONG g_started = 0;
 volatile LONG g_switch = 0;
+volatile LONG g_battleTokenSwitch = 1;
 volatile LONG g_lastValue = 0;
 volatile LONG g_hitCount = 0;
 volatile LONG g_status = 0;
+volatile LONG g_taskDispatchKeyReady = 0;
+volatile LONG g_battleTokenKeyReady = 0;
+volatile LONG g_taskDispatchDirty = 0;
+volatile LONG g_battleTokenDirty = 0;
 HWND g_settingsHwnd = nullptr;
 HWND g_parentHwnd = nullptr;
 HWND g_checkboxHwnd = nullptr;
+HWND g_battleTokenCheckboxHwnd = nullptr;
 HWND g_weeklyHwnd = nullptr;
 HWND g_dailyHwnd = nullptr;
 WNDPROC g_oldProc = nullptr;
+WNDPROC g_settingsOldProc = nullptr;
 int g_x = 0;
 int g_y = 0;
 int g_w = 0;
@@ -310,6 +328,7 @@ int g_h = 0;
 
 const wchar_t kSettingsTitle[] = L"\x8A2D\x7F6E";
 const wchar_t kCheckboxText[] = L"\x4EFB\x52D9\x6D3E\x9063";
+const wchar_t kBattleTokenCheckboxText[] = L"\x6230\x4EE4";
 
 void Start();
 }
@@ -326,6 +345,19 @@ constexpr size_t kMaxTeams = 10;
 constexpr size_t kOrderMemberMaxBytes = 128;
 constexpr LONG kOrderRetryMax = 3;
 constexpr LONG kCreateTeamMissMax = 6;
+constexpr DWORD kCreateGateLeaseMs = 8000;
+constexpr DWORD kCreateGateMagic = 0x4C444731;
+constexpr DWORD kSoloPanelQueryDelayMs = 3000;
+constexpr DWORD kSoloPanelQueryIntervalMs = 3000;
+constexpr DWORD kSoloResumeWindowMs = 120000;
+
+struct SharedCreateGate
+{
+    DWORD magic;
+    DWORD ownerProcessId;
+    DWORD dungeonId;
+    DWORD expiresAt;
+};
 
 volatile LONG g_state = 0;
 volatile LONG g_currentId = 0;
@@ -356,15 +388,23 @@ volatile LONG g_payloadTeamCount = 0;
 volatile LONG g_teamOrderSent = 0;
 volatile LONG g_teamOrderRetries = 0;
 volatile LONG g_createTeamMissCount = 0;
+volatile LONG g_createFinalCheck = 0;
+volatile LONG g_createGateOwned = 0;
 volatile LONG g_restoredTeamId = 0;
 volatile LONG g_unlimitPassedOnce = 0;
 volatile LONG g_battleMode = 0;
+volatile LONG g_soloBattleDungeonId = 0;
+volatile LONG g_soloFastRetrySent = 0;
+volatile LONG g_soloBattleStartTick = 0;
+volatile LONG g_soloPanelNextTick = 0;
 volatile LONG g_unlimitCount = 0;
 uint32_t g_unlimitId = 0;
-uint16_t g_teamIds[kMaxTeams]{};
+uint32_t g_teamIds[kMaxTeams]{};
 uint16_t g_teamDungeonIds[kMaxTeams]{};
-uint32_t g_teamOffsets[kMaxTeams]{};
 BYTE g_teamPeople[kMaxTeams]{};
+HANDLE g_createGateMutex = nullptr;
+HANDLE g_createGateMapping = nullptr;
+SharedCreateGate* g_sharedCreateGate = nullptr;
 uint32_t g_bufZero4 = 0;
 BYTE g_bufId4[4]{};
 BYTE g_bufId6[6]{};
@@ -568,6 +608,11 @@ const BYTE kLgfSuppressActionLogBytes[] = {
     0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90
 };
 const BYTE kMainLoopSpeed1000MsBytes[] = { 0xE8, 0x03, 0x00, 0x00 };
+const BYTE kNativeWashFixedTotalRuleBytes[] = {
+    0x83, 0xF8, 0x0C, 0x72, 0x08, 0x83, 0xF8, 0x0F, 0x75, 0x76, 0x90, 0x90, 0x90
+};
+const BYTE kNativeWashCandidateOrderBytes[] = { 0xE9, 0x11, 0x00, 0x00, 0x00, 0x90, 0x90 };
+const BYTE kNativeWashMissingOwnerBytes[] = { 0x0F, 0x84, 0xB9, 0xFF, 0xFF, 0xFF };
 
 const MemoryPatch kPatches[] = {
     { "Dragon vein fix", 0x4AA10, kDragonVeinPatchBytes, sizeof(kDragonVeinPatchBytes) },
@@ -576,6 +621,9 @@ const MemoryPatch kPatches[] = {
     { "LGF suppress action log", 0x37385, kLgfSuppressActionLogBytes, sizeof(kLgfSuppressActionLogBytes) },
     { "Main loop speed 3AC2F", 0x3AC2F, kMainLoopSpeed1000MsBytes, sizeof(kMainLoopSpeed1000MsBytes) },
     { "Main loop speed 403E5", 0x403E5, kMainLoopSpeed1000MsBytes, sizeof(kMainLoopSpeed1000MsBytes) },
+    { "Native wash fixed total rule", 0x3C1B3, kNativeWashFixedTotalRuleBytes, sizeof(kNativeWashFixedTotalRuleBytes) },
+    { "Native wash candidate order", 0x3C1C8, kNativeWashCandidateOrderBytes, sizeof(kNativeWashCandidateOrderBytes) },
+    { "Native wash missing owner", 0x3C2C9, kNativeWashMissingOwnerBytes, sizeof(kNativeWashMissingOwnerBytes) },
 };
 constexpr size_t kPatchCount = sizeof(kPatches) / sizeof(kPatches[0]);
 
@@ -651,6 +699,13 @@ namespace LoginCredentialPrompt
 bool BuildCode(uintptr_t base, CodeBuffer& code);
 }
 
+namespace NativeWash
+{
+bool BuildCycleCode(uintptr_t base, CodeBuffer& code);
+bool BuildAfterSendCode(uintptr_t base, CodeBuffer& code);
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+}
+
 const JumpPatch kJumpPatches[] = {
     { "Login credential prompt", 0x40DEA, 7, 128, LoginCredentialPrompt::BuildCode },
     { "Fast Daily Battle", 0x4A785, 11, 128, FastDailyBattle::BuildSend37A4Code },
@@ -674,6 +729,8 @@ const JumpPatch kJumpPatches[] = {
     { "AutoLure dash config", 0x4B79B, 7, 160, AutoLureDash::BuildConfigCode },
     { "AutoLure dash total on", 0x401E0, 5, 64, AutoLureDash::BuildTotalOnCode },
     { "AutoLure dash resume", 0x412F0, 5, 64, AutoLureDash::BuildResumeCode },
+    { "Native wash cycle gate", 0x3C0C0, 5, 128, NativeWash::BuildCycleCode },
+    { "Native wash after send refresh", 0x3C2F2, 9, 128, NativeWash::BuildAfterSendCode },
 };
 constexpr size_t kJumpPatchCount = sizeof(kJumpPatches) / sizeof(kJumpPatches[0]);
 
@@ -1154,6 +1211,7 @@ constexpr UINT_PTR kTimerId = 0x87D6;
 volatile LONG g_enabled = 0;
 volatile LONG g_lastSendTick = 0;
 volatile LONG g_timerArmed = 0;
+volatile LONG g_logShown = 0;
 HWND g_timerHwnd = nullptr;
 BYTE g_payload = 0;
 
@@ -1166,6 +1224,7 @@ const wchar_t kLogText[] = {
 void ResetSchedule()
 {
     InterlockedExchange(&g_lastSendTick, 0);
+    InterlockedExchange(&g_logShown, 0);
 }
 
 void StartTimer()
@@ -1230,7 +1289,9 @@ __declspec(noinline) void __stdcall Tick()
     using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
     SendPacketFn sendPacket = reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
     sendPacket(0x147D, &g_payload, sizeof(g_payload));
-    GameLog::Write(kLogFormat, kLogText);
+    if (InterlockedCompareExchange(&g_logShown, 1, 0) == 0) {
+        GameLog::Write(kLogFormat, kLogText);
+    }
 }
 
 __declspec(noinline) void __stdcall TimerTick(void* owner)
@@ -1251,6 +1312,150 @@ __declspec(noinline) void __stdcall TimerTick(void* owner)
     Tick();
     g_timerHwnd = hwnd;
     StartTimer();
+}
+
+}
+
+namespace NativeWash
+{
+constexpr uint32_t kBagUpdateV2Opcode = 0x0BCB;
+constexpr uint32_t kRequestBagInfoOpcode = 0x0B8A;
+constexpr uint16_t kStorageBagId = 1;
+constexpr uint32_t kV2HeaderSize = 0x14;
+constexpr uint32_t kLegacyHeaderSize = 0x0C;
+constexpr uint32_t kSkippedPagingBytes = kV2HeaderSize - kLegacyHeaderSize;
+constexpr uint32_t kMinV2PayloadSize = 0x16;
+
+volatile LONG g_refreshCounter = 0;
+volatile LONG g_bagDataReady = 0;
+volatile LONG g_v2ParserBusy = 0;
+BYTE g_legacyBagBuffer[65536]{};
+BYTE g_bagRequestPayload[10] = { 0x00, 0x01 };
+
+void SendPacketWithEcx(uint32_t ecxValue, uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    const uintptr_t sendAddress = g_mainBase + 0x4A360;
+    __asm {
+        mov ecx, ecxValue
+        push payloadLength
+        push payload
+        push opcode
+        call sendAddress
+    }
+}
+
+void RequestBag1()
+{
+    if (g_mainBase == 0 || ReadGameU32(g_mainBase + 0x230648) == 0) {
+        return;
+    }
+
+    const uintptr_t heroList = static_cast<uintptr_t>(ReadGameU32(g_mainBase + 0x230644));
+    if (heroList == 0) {
+        return;
+    }
+
+    const uintptr_t firstHero = static_cast<uintptr_t>(ReadGameU32(heroList));
+    if (firstHero == 0) {
+        return;
+    }
+
+    std::memcpy(g_bagRequestPayload + 2, reinterpret_cast<const void*>(firstHero), 8);
+    SendPacketWithEcx(
+        static_cast<uint32_t>(firstHero),
+        kRequestBagInfoOpcode,
+        g_bagRequestPayload,
+        sizeof(g_bagRequestPayload));
+}
+
+__declspec(noinline) LONG __stdcall BeforeCycle()
+{
+    if (*reinterpret_cast<volatile BYTE*>(g_mainBase + 0x230438) == 0) {
+        return 0;
+    }
+
+    if (InterlockedCompareExchange(&g_bagDataReady, 0, 0) == 0) {
+        RequestBag1();
+        return 1;
+    }
+
+    const LONG counter = InterlockedCompareExchange(&g_refreshCounter, 0, 0);
+    if (counter == 0) {
+        InterlockedExchange(&g_refreshCounter, 4);
+        InterlockedExchange(&g_bagDataReady, 0);
+        RequestBag1();
+        return 1;
+    }
+
+    InterlockedDecrement(&g_refreshCounter);
+    return 0;
+}
+
+__declspec(noinline) void __stdcall AfterSend()
+{
+    InterlockedExchange(&g_bagDataReady, 0);
+    InterlockedExchange(&g_refreshCounter, 4);
+    RequestBag1();
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    if (opcode != kBagUpdateV2Opcode || !payload || payloadLength < kMinV2PayloadSize ||
+        payloadLength > sizeof(g_legacyBagBuffer) + kSkippedPagingBytes) {
+        return;
+    }
+    if (ReadBe16Unaligned(payload + 8) != kStorageBagId) {
+        return;
+    }
+    if (InterlockedCompareExchange(&g_v2ParserBusy, 1, 0) != 0) {
+        return;
+    }
+
+    const bool finalPage = ReadU32Unaligned(payload + 0x0C) == ReadU32Unaligned(payload + 0x10);
+    std::memcpy(g_legacyBagBuffer, payload, kLegacyHeaderSize);
+    std::memcpy(
+        g_legacyBagBuffer + kLegacyHeaderSize,
+        payload + kV2HeaderSize,
+        payloadLength - kV2HeaderSize);
+
+    const uint32_t legacyPayloadLength = payloadLength - kSkippedPagingBytes;
+    using ParseLegacyBagFn = int(__fastcall*)(const BYTE*, int);
+    ParseLegacyBagFn parseLegacyBag = reinterpret_cast<ParseLegacyBagFn>(g_mainBase + 0x457C0);
+    parseLegacyBag(g_legacyBagBuffer, static_cast<int>(legacyPayloadLength));
+
+    if (finalPage) {
+        InterlockedExchange(&g_bagDataReady, 1);
+    }
+    InterlockedExchange(&g_v2ParserBusy, 0);
+}
+
+bool BuildCycleCode(uintptr_t base, CodeBuffer& code)
+{
+    return AppendByte(code, 0x9C) &&
+        AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&BeforeCycle)) &&
+        AppendByte(code, 0x85) && AppendByte(code, 0xC0) &&
+        AppendJeShort(code, 0x03) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&
+        AppendByte(code, 0xC3) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&
+        AppendOriginalFunctionPrologue(code) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x3C0C5);
+}
+
+bool BuildAfterSendCode(uintptr_t base, CodeBuffer& code)
+{
+    return AppendByte(code, 0x9C) &&
+        AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&AfterSend)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&
+        AppendByte(code, 0x6A) && AppendByte(code, 0x00) &&
+        AppendByte(code, 0x6A) && AppendByte(code, 0x00) &&
+        AppendPushImm32(code, 0x0BAD) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x3C2FB);
 }
 
 }
@@ -2627,6 +2832,7 @@ __declspec(noinline) void __stdcall IndependentTimerTick(void* owner)
 
     KillTimer(hwnd, kIndependentTimerId);
     DashTick();
+    BattleToken::Tick();
 
     if (SetTimer(hwnd, kIndependentTimerId, IndependentTimerInterval(), nullptr) != 0) {
         g_independentTimerHwnd = hwnd;
@@ -2650,6 +2856,7 @@ bool BuildMainCode(uintptr_t base, CodeBuffer& code)
     return AppendByte(code, 0x9C) &&
         AppendPushad(code) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&TaskDispatch::SendTick)) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&BattleToken::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&DashTick)) &&
         AppendPopad(code) &&
         AppendByte(code, 0x9D) &&
@@ -5002,6 +5209,154 @@ void SendTick()
 namespace TaskDispatchUi
 {
 
+bool TryGetConfigPath(const wchar_t** pathOut)
+{
+    if (g_mainBase == 0 || !pathOut) {
+        return false;
+    }
+
+    const uint32_t pathAddress = ReadGameU32(g_mainBase + 0x230280);
+    if (pathAddress == 0) {
+        return false;
+    }
+
+    const wchar_t* path = reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(pathAddress));
+    __try {
+        const uint32_t pathLength = *(reinterpret_cast<const uint32_t*>(path) - 3);
+        if (pathLength == 0 || pathLength >= 1024 || path[pathLength] != L'\0') {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    *pathOut = path;
+    return true;
+}
+
+bool PersistBattleTokenSwitch(LONG value)
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) {
+        return false;
+    }
+
+    __try {
+        if (!WritePrivateProfileStringW(
+                kBattleTokenConfigSection,
+                kBattleTokenConfigKey,
+                value != 0 ? L"1" : L"0",
+                path)) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    InterlockedExchange(&g_battleTokenKeyReady, 1);
+    InterlockedExchange(&g_battleTokenDirty, 0);
+    return true;
+}
+
+bool PersistTaskDispatchSwitch(LONG value)
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) {
+        return false;
+    }
+
+    __try {
+        if (!WritePrivateProfileStringW(
+                kBattleTokenConfigSection,
+                kTaskDispatchConfigKey,
+                value != 0 ? L"1" : L"0",
+                path)) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    InterlockedExchange(&g_taskDispatchKeyReady, 1);
+    InterlockedExchange(&g_taskDispatchDirty, 0);
+    return true;
+}
+
+bool LoadTaskDispatchSwitch()
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) {
+        return false;
+    }
+
+    __try {
+        wchar_t value[16]{};
+        const wchar_t missingMarker[] = { 0xFFFF, 0x0000 };
+        const DWORD length = GetPrivateProfileStringW(
+            kBattleTokenConfigSection,
+            kTaskDispatchConfigKey,
+            missingMarker,
+            value,
+            static_cast<DWORD>(sizeof(value) / sizeof(value[0])),
+            path);
+        const bool missing = length == 0 ||
+            (length == 1 && value[0] == missingMarker[0] && value[1] == L'\0');
+        if (missing) {
+            InterlockedExchange(&g_switch, 1);
+            return PersistTaskDispatchSwitch(1);
+        }
+
+        const LONG enabled = GetPrivateProfileIntW(
+            kBattleTokenConfigSection,
+            kTaskDispatchConfigKey,
+            1,
+            path) != 0 ? 1 : 0;
+        InterlockedExchange(&g_switch, enabled);
+        InterlockedExchange(&g_taskDispatchKeyReady, 1);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool LoadBattleTokenSwitch()
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) {
+        return false;
+    }
+
+    __try {
+        wchar_t value[16]{};
+        const wchar_t missingMarker[] = { 0xFFFF, 0x0000 };
+        const DWORD length = GetPrivateProfileStringW(
+            kBattleTokenConfigSection,
+            kBattleTokenConfigKey,
+            missingMarker,
+            value,
+            static_cast<DWORD>(sizeof(value) / sizeof(value[0])),
+            path);
+        const bool missing = length == 0 ||
+            (length == 1 && value[0] == missingMarker[0] && value[1] == L'\0');
+        if (missing) {
+            InterlockedExchange(&g_battleTokenSwitch, 1);
+            return PersistBattleTokenSwitch(1);
+        }
+
+        const LONG enabled = GetPrivateProfileIntW(
+            kBattleTokenConfigSection,
+            kBattleTokenConfigKey,
+            1,
+            path) != 0 ? 1 : 0;
+        InterlockedExchange(&g_battleTokenSwitch, enabled);
+        BattleToken::OnEnabledChanged(enabled);
+        InterlockedExchange(&g_battleTokenKeyReady, 1);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void WriteSwitch(uint32_t value)
 {
     if (g_mainBase == 0) {
@@ -5036,20 +5391,86 @@ void SyncSwitch()
     InterlockedExchange(&g_lastValue, value);
 }
 
+void SyncBattleTokenSwitch()
+{
+    if (!g_battleTokenCheckboxHwnd || !IsWindow(g_battleTokenCheckboxHwnd)) {
+        return;
+    }
+
+    const LONG value = SendMessageW(g_battleTokenCheckboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
+    InterlockedExchange(&g_battleTokenSwitch, value);
+    BattleToken::OnEnabledChanged(value);
+    InterlockedExchange(&g_battleTokenDirty, 1);
+    PersistBattleTokenSwitch(value);
+}
+
+void RefreshPersistentSwitches()
+{
+    if (g_taskDispatchKeyReady == 0) {
+        bool ready = false;
+        if (g_taskDispatchDirty != 0) {
+            ready = PersistTaskDispatchSwitch(g_switch);
+        } else {
+            ready = LoadTaskDispatchSwitch();
+        }
+        if (ready && g_checkboxHwnd && IsWindow(g_checkboxHwnd)) {
+            SendMessageW(g_checkboxHwnd, BM_SETCHECK, g_switch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
+            SyncSwitch();
+        }
+    }
+
+    if (g_battleTokenKeyReady == 0) {
+        bool ready = false;
+        if (g_battleTokenDirty != 0) {
+            ready = PersistBattleTokenSwitch(g_battleTokenSwitch);
+        } else {
+            ready = LoadBattleTokenSwitch();
+        }
+        if (ready && g_battleTokenCheckboxHwnd && IsWindow(g_battleTokenCheckboxHwnd)) {
+            SendMessageW(
+                g_battleTokenCheckboxHwnd,
+                BM_SETCHECK,
+                g_battleTokenSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+                0);
+        }
+    }
+}
+
+LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if ((message == WM_SHOWWINDOW && wParam == FALSE) || message == WM_DESTROY) {
+        PersistTaskDispatchSwitch(g_switch);
+        PersistBattleTokenSwitch(g_battleTokenSwitch);
+    }
+
+    return g_settingsOldProc
+        ? CallWindowProcW(g_settingsOldProc, hwnd, message, wParam, lParam)
+        : DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
 LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (message == WM_COMMAND && (LOWORD(wParam) == kCheckboxId)) {
         SyncSwitch();
+        InterlockedExchange(&g_taskDispatchDirty, 1);
+        PersistTaskDispatchSwitch(g_switch);
+        return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+    if (message == WM_COMMAND && LOWORD(wParam) == kBattleTokenCheckboxId && HIWORD(wParam) == BN_CLICKED) {
+        SyncBattleTokenSwitch();
         return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
     }
 
     if (message == WM_TIMER && wParam == kTimerId) {
+        RefreshPersistentSwitches();
         SyncSwitch();
         return 1;
     }
 
     if (message == kPrivateMessage) {
         if (wParam == 1) {
+            LoadTaskDispatchSwitch();
+            LoadBattleTokenSwitch();
             if (!g_checkboxHwnd) {
                 g_checkboxHwnd = CreateWindowExW(
                     0,
@@ -5065,13 +5486,39 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                     nullptr,
                     nullptr);
             }
+            if (!g_battleTokenCheckboxHwnd) {
+                g_battleTokenCheckboxHwnd = CreateWindowExW(
+                    0,
+                    L"Button",
+                    kBattleTokenCheckboxText,
+                    0x50018003,
+                    g_x,
+                    g_y + g_h,
+                    g_w,
+                    g_h,
+                    g_parentHwnd,
+                    reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kBattleTokenCheckboxId)),
+                    nullptr,
+                    nullptr);
+            }
 
             if (g_checkboxHwnd) {
                 HFONT font = reinterpret_cast<HFONT>(SendMessageW(g_weeklyHwnd, WM_GETFONT, 0, 0));
                 if (font) {
                     SendMessageW(g_checkboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+                    if (g_battleTokenCheckboxHwnd) {
+                        SendMessageW(g_battleTokenCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+                    }
                 }
                 ShowWindow(g_checkboxHwnd, SW_SHOW);
+                if (g_battleTokenCheckboxHwnd) {
+                    SendMessageW(
+                        g_battleTokenCheckboxHwnd,
+                        BM_SETCHECK,
+                        g_battleTokenSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+                        0);
+                    ShowWindow(g_battleTokenCheckboxHwnd, SW_SHOW);
+                }
                 SetTimer(g_parentHwnd, kTimerId, 1000, nullptr);
                 SendMessageW(g_checkboxHwnd, BM_SETCHECK, g_switch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
                 SyncSwitch();
@@ -5081,11 +5528,17 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         }
 
         if (wParam == 2) {
+            PersistTaskDispatchSwitch(g_switch);
+            PersistBattleTokenSwitch(g_battleTokenSwitch);
             KillTimer(g_parentHwnd, kTimerId);
             if (g_checkboxHwnd && IsWindow(g_checkboxHwnd)) {
                 DestroyWindow(g_checkboxHwnd);
             }
+            if (g_battleTokenCheckboxHwnd && IsWindow(g_battleTokenCheckboxHwnd)) {
+                DestroyWindow(g_battleTokenCheckboxHwnd);
+            }
             g_checkboxHwnd = nullptr;
+            g_battleTokenCheckboxHwnd = nullptr;
             WriteSwitch(0);
             InterlockedExchange(&g_status, 8);
             return 1;
@@ -5180,8 +5633,15 @@ bool FindAndInstall()
     g_y = weeklyPoint.y;
     InterlockedExchange(&g_status, 4);
 
+    g_settingsOldProc = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrW(g_settingsHwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(SettingsWndProc)));
+    if (!g_settingsOldProc) {
+        return false;
+    }
     g_oldProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(g_parentHwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(ParentWndProc)));
     if (!g_oldProc) {
+        SetWindowLongPtrW(g_settingsHwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_settingsOldProc));
+        g_settingsOldProc = nullptr;
         return false;
     }
     InterlockedExchange(&g_status, 5);
@@ -5222,6 +5682,597 @@ void Start()
     HANDLE thread = CreateThread(nullptr, 0, SetupThread, nullptr, 0, nullptr);
     if (thread) {
         CloseHandle(thread);
+    }
+}
+
+}
+
+namespace BattleToken
+{
+constexpr DWORD kSendGapMs = 400;
+constexpr DWORD kResponseTimeoutMs = 10000;
+constexpr DWORD kCycleIntervalMs = 30000;
+constexpr size_t kMaxTaskRewards = 128;
+constexpr size_t kMaxLevelRewards = 256;
+constexpr size_t kTaskDescriptionLength = 256;
+
+struct TaskReward
+{
+    uint32_t week = 0;
+    uint32_t taskId = 0;
+    wchar_t description[kTaskDescriptionLength]{};
+};
+
+struct LevelReward
+{
+    uint32_t type = 0;
+    uint32_t level = 0;
+};
+
+struct PacketReader
+{
+    const BYTE* cursor = nullptr;
+    const BYTE* end = nullptr;
+
+    bool ReadByte(BYTE& value)
+    {
+        if (!cursor || cursor >= end) {
+            return false;
+        }
+        value = *cursor++;
+        return true;
+    }
+
+    bool ReadU16(uint16_t& value)
+    {
+        if (!cursor || cursor + 2 > end) {
+            return false;
+        }
+        value = ReadBe16Unaligned(cursor);
+        cursor += 2;
+        return true;
+    }
+
+    bool ReadU32(uint32_t& value)
+    {
+        if (!cursor || cursor + 4 > end) {
+            return false;
+        }
+        value = ReadBe32Unaligned(cursor);
+        cursor += 4;
+        return true;
+    }
+
+    bool Skip(size_t length)
+    {
+        if (!cursor || length > static_cast<size_t>(end - cursor)) {
+            return false;
+        }
+        cursor += length;
+        return true;
+    }
+
+    bool SkipUtf()
+    {
+        uint16_t length = 0;
+        return ReadU16(length) && Skip(length);
+    }
+
+    bool ReadUtf(wchar_t* output, size_t capacity)
+    {
+        uint16_t length = 0;
+        if (!ReadU16(length) || length > static_cast<size_t>(end - cursor)) {
+            return false;
+        }
+
+        if (output && capacity != 0) {
+            output[0] = L'\0';
+            if (length != 0) {
+                const int converted = MultiByteToWideChar(
+                    CP_UTF8,
+                    0,
+                    reinterpret_cast<const char*>(cursor),
+                    length,
+                    output,
+                    static_cast<int>(capacity - 1));
+                if (converted > 0) {
+                    output[converted] = L'\0';
+                }
+            }
+        }
+
+        cursor += length;
+        return true;
+    }
+};
+
+volatile LONG g_state = 0;
+volatile LONG g_lastSendTick = 0;
+volatile LONG g_deadlineTick = 0;
+volatile LONG g_cycleTick = 0;
+volatile LONG g_currentLevel = 0;
+volatile LONG g_parseError = 0;
+volatile LONG g_taskCount = 0;
+volatile LONG g_taskIndex = 0;
+volatile LONG g_levelRewardCount = 0;
+volatile LONG g_levelRewardIndex = 0;
+volatile LONG g_pendingLevel = 0;
+volatile LONG g_pendingType = 0;
+volatile LONG g_pendingLevelValid = 0;
+volatile LONG g_lastTaskAck = -1;
+volatile LONG g_lastLevelAck = -1;
+volatile LONG g_tickRunning = 0;
+volatile LONG g_pendingTaskLog = 0;
+volatile LONG g_pendingTaskLogWeek = 0;
+volatile LONG g_pendingLevelLog = 0;
+volatile LONG g_pendingLevelLogLevel = 0;
+TaskReward g_taskRewards[kMaxTaskRewards]{};
+LevelReward g_levelRewards[kMaxLevelRewards]{};
+WCHAR g_pendingTaskLogDescription[kTaskDescriptionLength]{};
+BYTE g_taskPayload[8]{};
+BYTE g_levelPayload[8]{};
+
+const wchar_t kTaskRewardLog[] = L"\x6230\x4EE4\xFF1A\x9818\x53D6\x7B2C%d\x9031\x300C%s\x300D\x4EFB\x52D9\x734E\x52F5";
+const wchar_t kLevelRewardLog[] = L"\x6230\x4EE4\xFF1A\x9818\x53D6\x7B2C%d\x7D1A\x6230\x4EE4\x734E\x52F5";
+
+void RefreshBattleTokenLog()
+{
+    using RefreshLogFn = void(__stdcall*)(uint32_t, uint32_t, uint32_t, uint32_t);
+    RefreshLogFn refreshLog = *reinterpret_cast<RefreshLogFn*>(g_mainBase + 0x1C46B0);
+    if (refreshLog) {
+        refreshLog(
+            ReadGameU32(g_mainBase + 0x2300A4),
+            ReadGameU32(g_mainBase + 0x2304D8),
+            0,
+            0);
+    }
+}
+
+void WriteTaskRewardLog(LONG week, const wchar_t* description)
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, ...);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, kTaskRewardLog, week, description ? description : L"");
+    RefreshBattleTokenLog();
+}
+
+void WriteLevelRewardLog(LONG level)
+{
+    using PrintLogFn = void(__cdecl*)(uintptr_t, const wchar_t*, ...);
+    PrintLogFn printLog = reinterpret_cast<PrintLogFn>(g_mainBase + 0x2EF0);
+    printLog(g_mainBase + 0x230504, kLevelRewardLog, level);
+    RefreshBattleTokenLog();
+}
+
+void QueueTaskRewardLog(const TaskReward& reward)
+{
+    InterlockedExchange(&g_pendingTaskLogWeek, static_cast<LONG>(reward.week));
+    std::wcsncpy(g_pendingTaskLogDescription, reward.description, kTaskDescriptionLength - 1);
+    g_pendingTaskLogDescription[kTaskDescriptionLength - 1] = L'\0';
+    InterlockedExchange(&g_pendingTaskLog, 1);
+}
+
+void QueueLevelRewardLog(uint32_t level)
+{
+    InterlockedExchange(&g_pendingLevelLogLevel, static_cast<LONG>(level));
+    InterlockedExchange(&g_pendingLevelLog, 1);
+}
+
+void DrainPendingLogs()
+{
+    if (InterlockedExchange(&g_pendingTaskLog, 0) != 0) {
+        WriteTaskRewardLog(g_pendingTaskLogWeek, g_pendingTaskLogDescription);
+    }
+    if (InterlockedExchange(&g_pendingLevelLog, 0) != 0) {
+        WriteLevelRewardLog(g_pendingLevelLogLevel);
+    }
+}
+
+bool IsEnabled()
+{
+    return TaskDispatchUi::g_battleTokenSwitch != 0;
+}
+
+void ResetState()
+{
+    InterlockedExchange(&g_state, 0);
+    InterlockedExchange(&g_lastSendTick, 0);
+    InterlockedExchange(&g_deadlineTick, 0);
+    InterlockedExchange(&g_cycleTick, 0);
+    InterlockedExchange(&g_taskCount, 0);
+    InterlockedExchange(&g_taskIndex, 0);
+    InterlockedExchange(&g_levelRewardCount, 0);
+    InterlockedExchange(&g_levelRewardIndex, 0);
+    InterlockedExchange(&g_pendingLevelValid, 0);
+}
+
+void OnEnabledChanged(LONG enabled)
+{
+    ResetState();
+    if (enabled != 0) {
+        InterlockedExchange(&g_state, 0);
+    }
+}
+
+void WriteBe32(BYTE* output, uint32_t value)
+{
+    output[0] = static_cast<BYTE>((value >> 24) & 0xFF);
+    output[1] = static_cast<BYTE>((value >> 16) & 0xFF);
+    output[2] = static_cast<BYTE>((value >> 8) & 0xFF);
+    output[3] = static_cast<BYTE>(value & 0xFF);
+}
+
+void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket = reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(opcode, payload, payloadLength);
+}
+
+bool SkipBonusArray(PacketReader& reader)
+{
+    uint16_t count = 0;
+    if (!reader.ReadU16(count)) {
+        return false;
+    }
+    for (uint16_t i = 0; i < count; ++i) {
+        if (!reader.Skip(6) || !reader.SkipUtf()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ParseLevelRewardArray(PacketReader& reader, bool& pendingStillClaimable)
+{
+    uint16_t count = 0;
+    if (!reader.ReadU16(count)) {
+        return false;
+    }
+
+    for (uint16_t i = 0; i < count; ++i) {
+        uint32_t level = 0;
+        uint32_t type = 0;
+        uint32_t state = 0;
+        if (!reader.ReadU32(level) || !reader.ReadU32(type) || !reader.ReadU32(state) ||
+            !SkipBonusArray(reader) || !reader.SkipUtf()) {
+            return false;
+        }
+
+        if (state != 1) {
+            continue;
+        }
+        if (g_pendingLevelValid != 0 &&
+            level == static_cast<uint32_t>(g_pendingLevel) &&
+            type == static_cast<uint32_t>(g_pendingType)) {
+            pendingStillClaimable = true;
+        }
+        if (level > static_cast<uint32_t>(g_currentLevel)) {
+            continue;
+        }
+
+        const LONG index = g_levelRewardCount;
+        if (index < 0 || index >= static_cast<LONG>(kMaxLevelRewards)) {
+            continue;
+        }
+        g_levelRewards[index].type = type;
+        g_levelRewards[index].level = level;
+        InterlockedExchange(&g_levelRewardCount, index + 1);
+    }
+    return true;
+}
+
+void HandlePanel(const BYTE* payload, uint32_t payloadLength)
+{
+    const LONG state = g_state;
+    if ((state != 1 && state != 7) || !payload) {
+        return;
+    }
+
+    PacketReader reader{ payload, payload + payloadLength };
+    uint32_t level = 0;
+    bool pendingStillClaimable = false;
+    InterlockedExchange(&g_parseError, 0);
+    InterlockedExchange(&g_levelRewardCount, 0);
+    InterlockedExchange(&g_levelRewardIndex, 0);
+
+    if (!reader.Skip(8) || !reader.SkipUtf() || !reader.ReadU32(level)) {
+        InterlockedExchange(&g_parseError, 1);
+        InterlockedExchange(&g_state, state == 1 ? 0 : 6);
+        return;
+    }
+    InterlockedExchange(&g_currentLevel, static_cast<LONG>(level));
+
+    if (!reader.Skip(11) ||
+        !ParseLevelRewardArray(reader, pendingStillClaimable) ||
+        !ParseLevelRewardArray(reader, pendingStillClaimable) ||
+        !reader.SkipUtf() || !reader.SkipUtf() || !reader.Skip(8) ||
+        !reader.SkipUtf() || !reader.SkipUtf()) {
+        InterlockedExchange(&g_parseError, 1);
+        InterlockedExchange(&g_levelRewardCount, 0);
+        InterlockedExchange(&g_state, state == 1 ? 0 : 6);
+        return;
+    }
+
+    if (state == 7 && g_pendingLevelValid != 0 && !pendingStillClaimable) {
+        QueueLevelRewardLog(static_cast<uint32_t>(g_pendingLevel));
+        InterlockedExchange(&g_pendingLevelValid, 0);
+    }
+    InterlockedExchange(&g_state, state == 1 ? 2 : 8);
+}
+
+void HandleTaskPanel(const BYTE* payload, uint32_t payloadLength)
+{
+    if (g_state != 3 || !payload) {
+        return;
+    }
+
+    PacketReader reader{ payload, payload + payloadLength };
+    InterlockedExchange(&g_parseError, 0);
+    InterlockedExchange(&g_taskCount, 0);
+    InterlockedExchange(&g_taskIndex, 0);
+
+    if (!reader.Skip(9)) {
+        InterlockedExchange(&g_parseError, 1);
+        InterlockedExchange(&g_state, 2);
+        return;
+    }
+
+    uint16_t weekCount = 0;
+    if (!reader.ReadU16(weekCount)) {
+        InterlockedExchange(&g_parseError, 1);
+        InterlockedExchange(&g_state, 2);
+        return;
+    }
+
+    for (uint16_t weekIndex = 0; weekIndex < weekCount; ++weekIndex) {
+        uint32_t week = 0;
+        uint16_t taskCount = 0;
+        if (!reader.ReadU32(week) || !reader.Skip(9) || !reader.ReadU16(taskCount)) {
+            InterlockedExchange(&g_parseError, 1);
+            InterlockedExchange(&g_taskCount, 0);
+            InterlockedExchange(&g_state, 2);
+            return;
+        }
+
+        for (uint16_t taskIndex = 0; taskIndex < taskCount; ++taskIndex) {
+            uint32_t taskId = 0;
+            uint32_t taskState = 0;
+            wchar_t description[kTaskDescriptionLength]{};
+            if (!reader.ReadU32(taskId) || !reader.Skip(4) ||
+                !reader.ReadUtf(description, _countof(description)) ||
+                !reader.Skip(8) || !reader.ReadU32(taskState) ||
+                !SkipBonusArray(reader) || !reader.SkipUtf()) {
+                InterlockedExchange(&g_parseError, 1);
+                InterlockedExchange(&g_taskCount, 0);
+                InterlockedExchange(&g_state, 2);
+                return;
+            }
+
+            if (taskState != 1) {
+                continue;
+            }
+            const LONG queueIndex = g_taskCount;
+            if (queueIndex < 0 || queueIndex >= static_cast<LONG>(kMaxTaskRewards)) {
+                continue;
+            }
+            g_taskRewards[queueIndex].week = week;
+            g_taskRewards[queueIndex].taskId = taskId;
+            std::wcsncpy(
+                g_taskRewards[queueIndex].description,
+                description,
+                kTaskDescriptionLength - 1);
+            g_taskRewards[queueIndex].description[kTaskDescriptionLength - 1] = L'\0';
+            InterlockedExchange(&g_taskCount, queueIndex + 1);
+        }
+
+        if (!reader.SkipUtf()) {
+            InterlockedExchange(&g_parseError, 1);
+            InterlockedExchange(&g_taskCount, 0);
+            InterlockedExchange(&g_state, 2);
+            return;
+        }
+    }
+
+    if (!reader.SkipUtf()) {
+        InterlockedExchange(&g_parseError, 1);
+        InterlockedExchange(&g_taskCount, 0);
+        InterlockedExchange(&g_state, 2);
+        return;
+    }
+    InterlockedExchange(&g_state, 4);
+}
+
+void HandleTaskAck(const BYTE* payload, uint32_t payloadLength)
+{
+    if (g_state != 5 || !payload || payloadLength < 1) {
+        return;
+    }
+    const LONG ack = payload[0];
+    InterlockedExchange(&g_lastTaskAck, ack);
+    const LONG index = g_taskIndex;
+    if (ack == 1 && index >= 0 && index < g_taskCount) {
+        QueueTaskRewardLog(g_taskRewards[index]);
+    }
+    InterlockedExchange(&g_taskIndex, index + 1);
+    InterlockedExchange(&g_state, 4);
+}
+
+void HandleLevelAck(const BYTE* payload, uint32_t payloadLength)
+{
+    if (g_state != 9 || !payload || payloadLength < 1) {
+        return;
+    }
+    const LONG ack = payload[0];
+    InterlockedExchange(&g_lastLevelAck, ack);
+    const LONG index = g_levelRewardIndex;
+    if (ack == 1 && index >= 0 && index < g_levelRewardCount) {
+        QueueLevelRewardLog(g_levelRewards[index].level);
+        InterlockedExchange(&g_pendingLevelValid, 0);
+    }
+    InterlockedExchange(&g_levelRewardIndex, index + 1);
+    InterlockedExchange(&g_state, 8);
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    if (!IsEnabled()) {
+        return;
+    }
+    switch (opcode & 0xFFFF) {
+    case 0x478C:
+        HandlePanel(payload, payloadLength);
+        break;
+    case 0x4792:
+        HandleTaskPanel(payload, payloadLength);
+        break;
+    case 0x4794:
+        HandleTaskAck(payload, payloadLength);
+        break;
+    case 0x4796:
+        HandleLevelAck(payload, payloadLength);
+        break;
+    default:
+        break;
+    }
+}
+
+void SetWaitingState(LONG state, DWORD now)
+{
+    InterlockedExchange(&g_lastSendTick, static_cast<LONG>(now));
+    InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+    InterlockedExchange(&g_state, state);
+}
+
+void SendInitialPanel(DWORD now)
+{
+    InterlockedExchange(&g_taskCount, 0);
+    InterlockedExchange(&g_taskIndex, 0);
+    InterlockedExchange(&g_levelRewardCount, 0);
+    InterlockedExchange(&g_levelRewardIndex, 0);
+    SetWaitingState(1, now);
+    SendPacket(0x478B, nullptr, 0);
+}
+
+void SendTaskPanel(DWORD now)
+{
+    InterlockedExchange(&g_taskCount, 0);
+    InterlockedExchange(&g_taskIndex, 0);
+    SetWaitingState(3, now);
+    SendPacket(0x4791, nullptr, 0);
+}
+
+void SendTaskReward(DWORD now)
+{
+    const LONG index = g_taskIndex;
+    if (index < 0 || index >= g_taskCount) {
+        InterlockedExchange(&g_state, 6);
+        return;
+    }
+    WriteBe32(g_taskPayload, g_taskRewards[index].week);
+    WriteBe32(g_taskPayload + 4, g_taskRewards[index].taskId);
+    SetWaitingState(5, now);
+    SendPacket(0x4793, g_taskPayload, sizeof(g_taskPayload));
+}
+
+void SendFinalPanel(DWORD now)
+{
+    InterlockedExchange(&g_levelRewardCount, 0);
+    InterlockedExchange(&g_levelRewardIndex, 0);
+    SetWaitingState(7, now);
+    SendPacket(0x478B, nullptr, 0);
+}
+
+void SendLevelReward(DWORD now)
+{
+    const LONG index = g_levelRewardIndex;
+    if (index < 0 || index >= g_levelRewardCount) {
+        InterlockedExchange(&g_cycleTick, static_cast<LONG>(now));
+        InterlockedExchange(&g_state, 10);
+        return;
+    }
+    const LevelReward reward = g_levelRewards[index];
+    WriteBe32(g_levelPayload, reward.type);
+    WriteBe32(g_levelPayload + 4, reward.level);
+    InterlockedExchange(&g_pendingType, static_cast<LONG>(reward.type));
+    InterlockedExchange(&g_pendingLevel, static_cast<LONG>(reward.level));
+    InterlockedExchange(&g_pendingLevelValid, 1);
+    SetWaitingState(9, now);
+    SendPacket(0x4795, g_levelPayload, sizeof(g_levelPayload));
+}
+
+void TickImpl()
+{
+    DrainPendingLogs();
+    if (!IsEnabled()) {
+        ResetState();
+        return;
+    }
+
+    const DWORD now = GetGameTick();
+    if (now - static_cast<DWORD>(g_lastSendTick) < kSendGapMs) {
+        return;
+    }
+
+    switch (g_state) {
+    case 0:
+        SendInitialPanel(now);
+        return;
+    case 2:
+        SendTaskPanel(now);
+        return;
+    case 4:
+        if (g_taskIndex >= g_taskCount) {
+            SendFinalPanel(now);
+        } else {
+            SendTaskReward(now);
+        }
+        return;
+    case 6:
+        SendFinalPanel(now);
+        return;
+    case 8:
+        SendLevelReward(now);
+        return;
+    case 10:
+        if (now - static_cast<DWORD>(g_cycleTick) >= kCycleIntervalMs) {
+            InterlockedExchange(&g_state, 0);
+        }
+        return;
+    default:
+        break;
+    }
+
+    if (static_cast<LONG>(now - static_cast<DWORD>(g_deadlineTick)) < 0) {
+        return;
+    }
+    switch (g_state) {
+    case 1:
+        SendInitialPanel(now);
+        break;
+    case 3:
+    case 5:
+        SendTaskPanel(now);
+        break;
+    case 7:
+    case 9:
+        SendFinalPanel(now);
+        break;
+    default:
+        InterlockedExchange(&g_state, 0);
+        break;
+    }
+}
+
+__declspec(noinline) void Tick()
+{
+    if (InterlockedCompareExchange(&g_tickRunning, 1, 0) != 0) {
+        return;
+    }
+    __try {
+        TickImpl();
+    } __finally {
+        InterlockedExchange(&g_tickRunning, 0);
     }
 }
 
@@ -5434,7 +6485,11 @@ void Send429F()
 
 void Send4296()
 {
-    PutIdPayload(g_bufTeam4, static_cast<uint16_t>(g_teamId));
+    const uint32_t teamId = static_cast<uint32_t>(g_teamId);
+    g_bufTeam4[0] = static_cast<BYTE>((teamId >> 24) & 0xFF);
+    g_bufTeam4[1] = static_cast<BYTE>((teamId >> 16) & 0xFF);
+    g_bufTeam4[2] = static_cast<BYTE>((teamId >> 8) & 0xFF);
+    g_bufTeam4[3] = static_cast<BYTE>(teamId & 0xFF);
     SendPacket(0x4296, g_bufTeam4, sizeof(g_bufTeam4));
 }
 
@@ -5539,8 +6594,116 @@ uint16_t GetIdByIndex(LONG index)
     return kDungeonIds[index];
 }
 
+bool EnsureCreateGate()
+{
+    if (g_createGateMutex && g_createGateMapping && g_sharedCreateGate) {
+        return true;
+    }
+
+    HANDLE mutexHandle = CreateMutexW(nullptr, FALSE, L"Local\\MyPatch_LegionDungeon_CreateGate_Mutex_v1");
+    if (!mutexHandle) {
+        return false;
+    }
+
+    HANDLE mappingHandle = CreateFileMappingW(
+        INVALID_HANDLE_VALUE,
+        nullptr,
+        PAGE_READWRITE,
+        0,
+        sizeof(SharedCreateGate),
+        L"Local\\MyPatch_LegionDungeon_CreateGate_Mapping_v1");
+    if (!mappingHandle) {
+        CloseHandle(mutexHandle);
+        return false;
+    }
+
+    auto* sharedGate = static_cast<SharedCreateGate*>(
+        MapViewOfFile(mappingHandle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedCreateGate)));
+    if (!sharedGate) {
+        CloseHandle(mappingHandle);
+        CloseHandle(mutexHandle);
+        return false;
+    }
+
+    g_createGateMutex = mutexHandle;
+    g_createGateMapping = mappingHandle;
+    g_sharedCreateGate = sharedGate;
+    return true;
+}
+
+bool LockCreateGate()
+{
+    if (!EnsureCreateGate()) {
+        return false;
+    }
+    const DWORD waitResult = WaitForSingleObject(g_createGateMutex, 50);
+    return waitResult == WAIT_OBJECT_0 || waitResult == WAIT_ABANDONED;
+}
+
+bool TryClaimCreateGate(uint16_t dungeonId)
+{
+    if (!LockCreateGate()) {
+        return false;
+    }
+
+    const DWORD now = GetTickCount();
+    const DWORD processId = GetCurrentProcessId();
+    if (g_sharedCreateGate->magic != kCreateGateMagic) {
+        std::memset(g_sharedCreateGate, 0, sizeof(*g_sharedCreateGate));
+        g_sharedCreateGate->magic = kCreateGateMagic;
+    }
+
+    const bool expired = g_sharedCreateGate->ownerProcessId != 0 &&
+        static_cast<LONG>(now - g_sharedCreateGate->expiresAt) >= 0;
+    const bool alreadyOwned = g_sharedCreateGate->ownerProcessId == processId &&
+        g_sharedCreateGate->dungeonId == dungeonId;
+    const bool available = g_sharedCreateGate->ownerProcessId == 0 || expired;
+    const bool claimed = alreadyOwned || available;
+    if (claimed) {
+        g_sharedCreateGate->ownerProcessId = processId;
+        g_sharedCreateGate->dungeonId = dungeonId;
+        g_sharedCreateGate->expiresAt = now + kCreateGateLeaseMs;
+        InterlockedExchange(&g_createGateOwned, 1);
+    }
+
+    ReleaseMutex(g_createGateMutex);
+    return claimed;
+}
+
+void ReleaseCreateGate()
+{
+    if (g_createGateOwned != 1 || !LockCreateGate()) {
+        InterlockedExchange(&g_createGateOwned, 0);
+        return;
+    }
+
+    if (g_sharedCreateGate->magic == kCreateGateMagic &&
+        g_sharedCreateGate->ownerProcessId == GetCurrentProcessId()) {
+        g_sharedCreateGate->ownerProcessId = 0;
+        g_sharedCreateGate->dungeonId = 0;
+        g_sharedCreateGate->expiresAt = 0;
+    }
+    ReleaseMutex(g_createGateMutex);
+    InterlockedExchange(&g_createGateOwned, 0);
+}
+
+void KeepCreateGateLeaseAfterSend()
+{
+    InterlockedExchange(&g_createGateOwned, 0);
+}
+
+void ClearSoloBattleContext()
+{
+    InterlockedExchange(&g_soloBattleDungeonId, 0);
+    InterlockedExchange(&g_soloFastRetrySent, 0);
+    InterlockedExchange(&g_soloBattleStartTick, 0);
+    InterlockedExchange(&g_soloPanelNextTick, 0);
+}
+
 void ResetState()
 {
+    ReleaseCreateGate();
+    ClearSoloBattleContext();
     InterlockedExchange(&g_state, 0);
     InterlockedExchange(&g_currentId, 0);
     InterlockedExchange(&g_verifyId, 0);
@@ -5564,6 +6727,7 @@ void ResetState()
     InterlockedExchange(&g_teamOrderSent, 0);
     InterlockedExchange(&g_teamOrderRetries, 0);
     InterlockedExchange(&g_createTeamMissCount, 0);
+    InterlockedExchange(&g_createFinalCheck, 0);
     InterlockedExchange(&g_restoredTeamId, 0);
     std::memset(g_orderExpected, 0, sizeof(g_orderExpected));
     std::memset(g_orderExpectedLens, 0, sizeof(g_orderExpectedLens));
@@ -5598,7 +6762,12 @@ void UpdateMaxSolo()
 
 void StartSolo()
 {
+    const DWORD now = GetGameTick();
     InterlockedExchange(&g_battleMode, 1);
+    InterlockedExchange(&g_soloBattleDungeonId, g_pendingId);
+    InterlockedExchange(&g_soloFastRetrySent, 0);
+    InterlockedExchange(&g_soloBattleStartTick, static_cast<LONG>(now));
+    InterlockedExchange(&g_soloPanelNextTick, static_cast<LONG>(now + kSoloPanelQueryDelayMs));
     Send4297();
     Send429E();
     Send37A4();
@@ -5610,7 +6779,7 @@ void StartSolo()
         InterlockedExchange(&g_armyBattleConfirmed, 0);
         InterlockedExchange(&g_expectedWinValue, 0);
         InterlockedExchange(&g_state, 5);
-        InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+        InterlockedExchange(&g_waitTick, static_cast<LONG>(now));
     }
     WriteDungeonLog(kLogSingleFormat, g_logIndex);
 }
@@ -5638,8 +6807,29 @@ void ClearBattleAndFinish()
 
 void StartStatus08Battle(LONG matchIndex)
 {
-    (void)matchIndex;
-    Finish();
+    const uint16_t dungeonId = GetIdByIndex(matchIndex);
+    if (dungeonId == 0 || static_cast<uint16_t>(g_soloBattleDungeonId) != dungeonId) {
+        Finish();
+        return;
+    }
+
+    const DWORD now = GetGameTick();
+    if (g_soloBattleStartTick == 0 ||
+        now - static_cast<DWORD>(g_soloBattleStartTick) > kSoloResumeWindowMs) {
+        ClearSoloBattleContext();
+        Finish();
+        return;
+    }
+
+    InterlockedExchange(&g_battleMode, 1);
+    InterlockedExchange(&g_waitBattleResult, 1);
+    InterlockedExchange(&g_state, 5);
+    InterlockedExchange(&g_waitTick, static_cast<LONG>(now));
+    InterlockedExchange(&g_soloPanelNextTick, static_cast<LONG>(now + kSoloPanelQueryIntervalMs));
+    if (InterlockedCompareExchange(&g_soloFastRetrySent, 1, 0) == 0) {
+        Send4294();
+        Send37A4();
+    }
 }
 
 bool SkipUtf(const BYTE*& cursor, const BYTE* end)
@@ -5759,13 +6949,50 @@ bool TryApply42A1TimeBlock(const BYTE* payload, uint32_t payloadLength)
     WriteTimeClosedLog(leftSeconds);
     return true;
 }
+
+bool TryHandleSoloBattleStatus(const BYTE* payload, uint32_t payloadLength)
+{
+    if (g_soloBattleDungeonId == 0) {
+        return false;
+    }
+
+    LONG matchIndex = 0;
+    for (uint32_t offset = 0; offset + 4 <= payloadLength; ++offset) {
+        if (ReadLe32(payload + offset) != 0x7D7B0200) {
+            continue;
+        }
+        if (matchIndex >= static_cast<LONG>(kDungeonCount)) {
+            break;
+        }
+        if (offset >= 9) {
+            const BYTE status = payload[offset - 9];
+            const uint16_t dungeonId = GetIdByIndex(matchIndex);
+            if ((status == 0x08 || status == 0x09) &&
+                dungeonId == static_cast<uint16_t>(g_soloBattleDungeonId)) {
+                StartStatus08Battle(matchIndex);
+                return true;
+            }
+        }
+        ++matchIndex;
+    }
+    return false;
+}
+
 void Handle42A1(const BYTE* payload, uint32_t payloadLength)
 {
-    if (g_state != 1 || payloadLength < 0x0D) {
+    if ((g_state != 1 && g_state != 5) || payloadLength < 0x0D) {
         return;
     }
 
     if (TryApply42A1TimeBlock(payload, payloadLength)) {
+        return;
+    }
+
+    if (TryHandleSoloBattleStatus(payload, payloadLength)) {
+        return;
+    }
+
+    if (g_state == 5 && g_waitBattleResult == 1) {
         return;
     }
 
@@ -5891,6 +7118,7 @@ void Handle42A1(const BYTE* payload, uint32_t payloadLength)
                 Send4294();
                 InterlockedExchange(&g_state, 3);
                 InterlockedExchange(&g_createTeamMissCount, 0);
+                InterlockedExchange(&g_createFinalCheck, 0);
                 InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
                 return;
             }
@@ -5907,6 +7135,7 @@ void Handle42A1(const BYTE* payload, uint32_t payloadLength)
                 Send4294();
                 InterlockedExchange(&g_state, 3);
                 InterlockedExchange(&g_createTeamMissCount, 0);
+                InterlockedExchange(&g_createFinalCheck, 0);
                 InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
                 return;
             }
@@ -5930,6 +7159,9 @@ void Handle42A1(const BYTE* payload, uint32_t payloadLength)
         if (status == 0x05) {
             if (static_cast<uint16_t>(g_pendingId) == static_cast<uint16_t>(g_verifyId)) {
                 UpdateMaxSolo();
+            }
+            if (static_cast<uint16_t>(g_soloBattleDungeonId) == static_cast<uint16_t>(g_pendingId)) {
+                ClearSoloBattleContext();
             }
             InterlockedExchange(&g_battleMode, 0);
             Send429F();
@@ -6054,72 +7286,68 @@ void Handle42A2(const BYTE* payload, uint32_t payloadLength)
     Finish();
 }
 
-void ParseTeams(const BYTE* payload, uint32_t payloadLength)
+bool ParseTeams(const BYTE* payload, uint32_t payloadLength)
 {
     InterlockedExchange(&g_teamCount, 0);
     InterlockedExchange(&g_peopleCount, 0);
     std::memset(g_teamIds, 0, sizeof(g_teamIds));
     std::memset(g_teamDungeonIds, 0, sizeof(g_teamDungeonIds));
-    std::memset(g_teamOffsets, 0, sizeof(g_teamOffsets));
     std::memset(g_teamPeople, 0, sizeof(g_teamPeople));
     if (payloadLength < 2) {
         InterlockedExchange(&g_payloadTeamCount, 0);
-        return;
+        return false;
     }
 
-    InterlockedExchange(&g_payloadTeamCount, payload[1]);
-    if (g_payloadTeamCount == 0 || payloadLength < 8) {
-        return;
+    const BYTE* cursor = payload;
+    const BYTE* end = payload + payloadLength;
+    const uint16_t payloadTeamCount = ReadBe16(cursor);
+    cursor += 2;
+    InterlockedExchange(&g_payloadTeamCount, payloadTeamCount);
+    if (payloadTeamCount > 100) {
+        return false;
     }
 
-    for (uint32_t offset = 0; offset + 2 <= payloadLength; ++offset) {
-        if (ReadLe16(payload + offset) != 0x0C00 || offset < 6 || g_teamCount >= static_cast<LONG>(kMaxTeams)) {
-            continue;
+    LONG storedCount = 0;
+    for (uint16_t teamIndex = 0; teamIndex < payloadTeamCount; ++teamIndex) {
+        if (cursor + 8 > end) {
+            return false;
         }
-        const LONG index = g_teamCount;
-        g_teamIds[index] = ReadLe16(payload + offset - 6);
-        g_teamDungeonIds[index] = ReadLe16(payload + offset - 2);
-        g_teamOffsets[index] = offset;
-        InterlockedExchange(&g_teamCount, index + 1);
-    }
 
-    for (uint32_t offset = 0; offset + 4 <= payloadLength; ++offset) {
-        if (ReadLe32(payload + offset) != 0x7D7B0200 || offset < 5 || g_peopleCount >= static_cast<LONG>(kMaxTeams)) {
-            continue;
+        const uint32_t teamId = ReadBe32(cursor);
+        cursor += 4;
+        const uint16_t dungeonId = ReadLe16(cursor + 2);
+        cursor += 4;
+        if (!SkipUtf(cursor, end) || cursor + 4 > end) {
+            return false;
         }
-        const LONG index = g_peopleCount;
-        g_teamPeople[index] = payload[offset - 5];
-        InterlockedExchange(&g_peopleCount, index + 1);
-    }
-}
 
-BYTE FindPeopleNearTeam(const BYTE* payload, uint32_t payloadLength, LONG teamIndex)
-{
-    if (!payload || teamIndex < 0 || teamIndex >= static_cast<LONG>(kMaxTeams)) {
-        return 0;
-    }
-
-    uint32_t offset = g_teamOffsets[teamIndex];
-    if (offset >= payloadLength || offset + 4 > payloadLength) {
-        return 0;
-    }
-
-    uint32_t end = offset + 0x80;
-    if (end + 4 > payloadLength) {
-        end = payloadLength >= 4 ? payloadLength - 4 : 0;
-    }
-
-    for (uint32_t cursor = offset; cursor <= end; ++cursor) {
-        if (cursor != offset && cursor + 2 <= payloadLength && ReadLe16(payload + cursor) == 0x0C00) {
-            break;
+        cursor += 4;
+        if (!SkipUtf(cursor, end) || cursor + 8 > end) {
+            return false;
         }
-        if (cursor >= 5 && cursor + 4 <= payloadLength && ReadLe32(payload + cursor) == 0x7D7B0200) {
-            g_teamPeople[teamIndex] = payload[cursor - 5];
-            return g_teamPeople[teamIndex];
+
+        const uint32_t currentPeople = ReadBe32(cursor);
+        cursor += 4;
+        cursor += 4;
+        if (!SkipUtf(cursor, end)) {
+            return false;
+        }
+
+        if (storedCount < static_cast<LONG>(kMaxTeams)) {
+            g_teamIds[storedCount] = teamId;
+            g_teamDungeonIds[storedCount] = dungeonId;
+            g_teamPeople[storedCount] = currentPeople <= 0xFF ? static_cast<BYTE>(currentPeople) : 0xFF;
+            ++storedCount;
         }
     }
 
-    return 0;
+    if (!SkipUtf(cursor, end)) {
+        return false;
+    }
+
+    InterlockedExchange(&g_teamCount, storedCount);
+    InterlockedExchange(&g_peopleCount, storedCount);
+    return true;
 }
 
 bool WaitBeforeCreateTeam()
@@ -6132,8 +7360,18 @@ bool WaitBeforeCreateTeam()
         return true;
     }
 
+    if (TryClaimCreateGate(static_cast<uint16_t>(g_currentId))) {
+        InterlockedExchange(&g_createTeamMissCount, 0);
+        InterlockedExchange(&g_createFinalCheck, 1);
+        Send4294();
+        InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+        return true;
+    }
+
     InterlockedExchange(&g_createTeamMissCount, 0);
-    return false;
+    InterlockedExchange(&g_createFinalCheck, 0);
+    Finish();
+    return true;
 }
 
 void Handle42A4(const BYTE* payload, uint32_t payloadLength)
@@ -6142,26 +7380,21 @@ void Handle42A4(const BYTE* payload, uint32_t payloadLength)
         return;
     }
 
-    ParseTeams(payload, payloadLength);
+    if (!ParseTeams(payload, payloadLength)) {
+        InterlockedExchange(&g_createFinalCheck, 0);
+        ReleaseCreateGate();
+        Finish();
+        return;
+    }
     if (g_state == 3) {
-        if (g_payloadTeamCount == 0) {
-            if (WaitBeforeCreateTeam()) {
-                return;
-            }
-            InterlockedExchange(&g_battleMode, 3);
-            Send4297();
-            WriteDungeonLog(kLogCreateFormat, g_logIndex);
-            Finish();
-            return;
-        }
-
         const LONG count = g_teamCount < static_cast<LONG>(kMaxTeams) ? g_teamCount : static_cast<LONG>(kMaxTeams);
         for (LONG i = 0; i < count; ++i) {
-            const BYTE people = g_teamPeople[i] == 1 ? 1 : FindPeopleNearTeam(payload, payloadLength, i);
-            if (g_teamDungeonIds[i] != static_cast<uint16_t>(g_currentId) || people != 1) {
+            if (g_teamDungeonIds[i] != static_cast<uint16_t>(g_currentId) || g_teamPeople[i] != 1) {
                 continue;
             }
             InterlockedExchange(&g_createTeamMissCount, 0);
+            InterlockedExchange(&g_createFinalCheck, 0);
+            ReleaseCreateGate();
             InterlockedExchange(&g_battleMode, 3);
             InterlockedExchange(&g_teamId, g_teamIds[i]);
             Send4296();
@@ -6171,11 +7404,15 @@ void Handle42A4(const BYTE* payload, uint32_t payloadLength)
             return;
         }
 
-        if (WaitBeforeCreateTeam()) {
+        if (g_createFinalCheck != 1) {
+            WaitBeforeCreateTeam();
             return;
         }
+
+        InterlockedExchange(&g_createFinalCheck, 0);
         InterlockedExchange(&g_battleMode, 3);
         Send4297();
+        KeepCreateGateLeaseAfterSend();
         WriteDungeonLog(kLogCreateFormat, g_logIndex);
         Finish();
         return;
@@ -6191,7 +7428,7 @@ void Handle42A4(const BYTE* payload, uint32_t payloadLength)
     if (g_helpTrackCount > 0) {
         bool keepTrackedRoom = false;
         for (LONG i = 0; i < count; ++i) {
-            if (g_teamIds[i] != static_cast<uint16_t>(g_helpTrackId)) {
+            if (g_teamIds[i] != static_cast<uint32_t>(g_helpTrackId)) {
                 continue;
             }
 
@@ -6330,6 +7567,7 @@ void Handle1464(const BYTE* payload, uint32_t payloadLength)
         return;
     }
     if (g_verifyMode != 1) {
+        ClearSoloBattleContext();
         ClearBattleAndFinish();
         return;
     }
@@ -6349,6 +7587,7 @@ void Handle1464(const BYTE* payload, uint32_t payloadLength)
         InterlockedExchange(&g_soloVerifyBlocked, 1);
     }
 
+    ClearSoloBattleContext();
     ClearBattleAndFinish();
 }
 
@@ -6393,6 +7632,12 @@ __declspec(noinline) void __stdcall Tick()
     if (g_waitBattleResult == 1) {
         if (now - static_cast<DWORD>(g_waitTick) >= kBattleResultTimeoutMs) {
             ClearBattleAndFinish();
+            return;
+        }
+        if (g_soloBattleDungeonId != 0 && g_soloFastRetrySent == 0 &&
+            now >= static_cast<DWORD>(g_soloPanelNextTick)) {
+            Send4293();
+            InterlockedExchange(&g_soloPanelNextTick, static_cast<LONG>(now + kSoloPanelQueryIntervalMs));
         }
         return;
     }
@@ -6402,6 +7647,10 @@ __declspec(noinline) void __stdcall Tick()
             return;
         }
         if (now - static_cast<DWORD>(g_waitTick) >= kWaitTimeoutMs) {
+            if (g_state == 3) {
+                InterlockedExchange(&g_createFinalCheck, 0);
+                ReleaseCreateGate();
+            }
             InterlockedExchange(&g_state, 0);
         }
         return;
@@ -6409,6 +7658,11 @@ __declspec(noinline) void __stdcall Tick()
 
     if (now < static_cast<DWORD>(g_nextTick)) {
         return;
+    }
+
+    if (g_soloBattleDungeonId != 0 &&
+        now - static_cast<DWORD>(g_soloBattleStartTick) > kSoloResumeWindowMs) {
+        ClearSoloBattleContext();
     }
 
     Send4293();
@@ -6464,6 +7718,7 @@ namespace SharedRecvRouter
 __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
 {
     InterlockedExchange(&g_clearStackArg, 0);
+    NativeWash::HandleRecvPacket(opcode, payload, payloadLength);
     WorldCityBattle::HandleRecvPacket(opcode, payload, payloadLength);
     DailySign::HandleRecvPacket(opcode, payload);
     PrizePool::HandleRecvPacket(opcode, payload);
@@ -6472,6 +7727,7 @@ __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* pa
     Xyfp::HandleRecvPacket(opcode, payload, payloadLength);
     PersonalTask::HandleRecvPacket(opcode, payload, payloadLength);
     TaskDispatch::HandleRecvPacket(opcode, payload, payloadLength);
+    BattleToken::HandleRecvPacket(opcode, payload, payloadLength);
     ExpeditionGuard::HandleRecvPacket(opcode);
     const BYTE* const legionPayload = payload;
     const uint32_t legionPayloadLength = payloadLength;
@@ -7149,6 +8405,12 @@ DWORD WINAPI MainThread(LPVOID)
         IsPatchApplied(results, kPatchCount, "Main loop speed 403E5");
     const bool loginCredentialPromptOk =
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Login credential prompt");
+    const bool nativeWashOk = sharedRouterOk &&
+        IsPatchApplied(results, kPatchCount, "Native wash fixed total rule") &&
+        IsPatchApplied(results, kPatchCount, "Native wash candidate order") &&
+        IsPatchApplied(results, kPatchCount, "Native wash missing owner") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Native wash cycle gate") &&
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Native wash after send refresh");
 
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x767B\x5165\x5E33\x5BC6\x63D0\x793A", loginCredentialPromptOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5171\x7528\x6536\x5305Router", sharedRouterOk);
@@ -7167,6 +8429,7 @@ DWORD WINAPI MainThread(LPVOID)
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5FEB\x901F\x6BCF\x65E5\x6230\x9B25", fastDailyBattleOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x81EA\x52D5\x7A81\x9032", autoLureDashOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x4E3B\x5FAA\x74B0\x52A0\x901F", mainLoopSpeedOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x539F\x751F\x6D17\x934A", nativeWashOk);
 
     HANDLE authorizationThread = CreateThread(nullptr, 0, AuthorizationThread, nullptr, 0, nullptr);
     if (!authorizationThread) {
