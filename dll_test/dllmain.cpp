@@ -15,7 +15,7 @@ HHOOK g_msgBoxHook = nullptr;
 HMODULE g_selfModule = nullptr;
 wchar_t g_patchStatusMessage[2048]{};
 constexpr DWORD kMessageBoxAutoCloseMs = 3000;
-constexpr wchar_t kMyPatchVersion[] = L"0.13b";
+constexpr wchar_t kMyPatchVersion[] = L"0.14b";
 
 struct MemoryPatch
 {
@@ -307,36 +307,49 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
 bool BuildDailyGuardCode(uintptr_t base, CodeBuffer& code);
 }
 
+namespace TeamBattleReward
+{
+void Tick();
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+void OnEnabledChanged(LONG enabled);
+}
+
 namespace TaskDispatchUi
 {
 constexpr UINT kCheckboxId = 0x0439;
 constexpr UINT kBattleTokenCheckboxId = 0x7B05;
 constexpr UINT kZhaoXianNaKeCheckboxId = 0x7B06;
+constexpr UINT kTeamBattleRewardCheckboxId = 0x7B07;
 constexpr UINT kPrivateMessage = 0x8439;
 constexpr UINT kTimerId = 0x843A;
 const wchar_t kBattleTokenConfigSection[] = L"MAIN";
 const wchar_t kTaskDispatchConfigKey[] = L"bTaskDispatch";
 const wchar_t kBattleTokenConfigKey[] = L"bBattleToken";
 const wchar_t kZhaoXianNaKeConfigKey[] = L"bZhaoXianNaKe";
+const wchar_t kTeamBattleRewardConfigKey[] = L"bTeamBattleReward";
 
 volatile LONG g_started = 0;
 volatile LONG g_switch = 0;
 volatile LONG g_battleTokenSwitch = 1;
 volatile LONG g_zhaoXianNaKeSwitch = 1;
+volatile LONG g_teamBattleRewardSwitch = 1;
 volatile LONG g_lastValue = 0;
 volatile LONG g_hitCount = 0;
 volatile LONG g_status = 0;
 volatile LONG g_taskDispatchKeyReady = 0;
 volatile LONG g_battleTokenKeyReady = 0;
 volatile LONG g_zhaoXianNaKeKeyReady = 0;
+volatile LONG g_teamBattleRewardKeyReady = 0;
 volatile LONG g_taskDispatchDirty = 0;
 volatile LONG g_battleTokenDirty = 0;
 volatile LONG g_zhaoXianNaKeDirty = 0;
+volatile LONG g_teamBattleRewardDirty = 0;
 HWND g_settingsHwnd = nullptr;
 HWND g_parentHwnd = nullptr;
 HWND g_checkboxHwnd = nullptr;
 HWND g_battleTokenCheckboxHwnd = nullptr;
 HWND g_zhaoXianNaKeCheckboxHwnd = nullptr;
+HWND g_teamBattleRewardCheckboxHwnd = nullptr;
 HWND g_weeklyHwnd = nullptr;
 HWND g_dailyHwnd = nullptr;
 WNDPROC g_oldProc = nullptr;
@@ -350,6 +363,7 @@ const wchar_t kSettingsTitle[] = L"\x8A2D\x7F6E";
 const wchar_t kCheckboxText[] = L"\x4EFB\x52D9\x6D3E\x9063";
 const wchar_t kBattleTokenCheckboxText[] = L"\x6230\x4EE4";
 const wchar_t kZhaoXianNaKeCheckboxText[] = L"\x62DB\x52DF\x8CE2\x5BA2";
+const wchar_t kTeamBattleRewardCheckboxText[] = L"\x7D44\x968A\x6230";
 const wchar_t kActivityLoginCheckboxText[] = L"\x6D3B\x52D5\x767B\x5165";
 
 void Start();
@@ -2858,6 +2872,7 @@ __declspec(noinline) void __stdcall IndependentTimerTick(void* owner)
     BattleToken::Tick();
     ZhaoXianNaKe::Tick();
     ActivityLogin::Tick();
+    TeamBattleReward::Tick();
 
     if (SetTimer(hwnd, kIndependentTimerId, IndependentTimerInterval(), nullptr) != 0) {
         g_independentTimerHwnd = hwnd;
@@ -2884,6 +2899,7 @@ bool BuildMainCode(uintptr_t base, CodeBuffer& code)
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&BattleToken::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&ZhaoXianNaKe::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&ActivityLogin::Tick)) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&TeamBattleReward::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&DashTick)) &&
         AppendPopad(code) &&
         AppendByte(code, 0x9D) &&
@@ -5309,6 +5325,30 @@ bool PersistZhaoXianNaKeSwitch(LONG value)
     return true;
 }
 
+bool PersistTeamBattleRewardSwitch(LONG value)
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) {
+        return false;
+    }
+
+    __try {
+        if (!WritePrivateProfileStringW(
+                kBattleTokenConfigSection,
+                kTeamBattleRewardConfigKey,
+                value != 0 ? L"1" : L"0",
+                path)) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    InterlockedExchange(&g_teamBattleRewardKeyReady, 1);
+    InterlockedExchange(&g_teamBattleRewardDirty, 0);
+    return true;
+}
+
 bool PersistTaskDispatchSwitch(LONG value)
 {
     const wchar_t* path = nullptr;
@@ -5446,6 +5486,45 @@ bool LoadZhaoXianNaKeSwitch()
     }
 }
 
+bool LoadTeamBattleRewardSwitch()
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) {
+        return false;
+    }
+
+    __try {
+        wchar_t value[16]{};
+        const wchar_t missingMarker[] = { 0xFFFF, 0x0000 };
+        const DWORD length = GetPrivateProfileStringW(
+            kBattleTokenConfigSection,
+            kTeamBattleRewardConfigKey,
+            missingMarker,
+            value,
+            static_cast<DWORD>(sizeof(value) / sizeof(value[0])),
+            path);
+        const bool missing = length == 0 ||
+            (length == 1 && value[0] == missingMarker[0] && value[1] == L'\0');
+        if (missing) {
+            InterlockedExchange(&g_teamBattleRewardSwitch, 1);
+            TeamBattleReward::OnEnabledChanged(1);
+            return PersistTeamBattleRewardSwitch(1);
+        }
+
+        const LONG enabled = GetPrivateProfileIntW(
+            kBattleTokenConfigSection,
+            kTeamBattleRewardConfigKey,
+            1,
+            path) != 0 ? 1 : 0;
+        InterlockedExchange(&g_teamBattleRewardSwitch, enabled);
+        TeamBattleReward::OnEnabledChanged(enabled);
+        InterlockedExchange(&g_teamBattleRewardKeyReady, 1);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void WriteSwitch(uint32_t value)
 {
     if (g_mainBase == 0) {
@@ -5506,6 +5585,19 @@ void SyncZhaoXianNaKeSwitch()
     PersistZhaoXianNaKeSwitch(value);
 }
 
+void SyncTeamBattleRewardSwitch()
+{
+    if (!g_teamBattleRewardCheckboxHwnd || !IsWindow(g_teamBattleRewardCheckboxHwnd)) {
+        return;
+    }
+
+    const LONG value = SendMessageW(g_teamBattleRewardCheckboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
+    InterlockedExchange(&g_teamBattleRewardSwitch, value);
+    TeamBattleReward::OnEnabledChanged(value);
+    InterlockedExchange(&g_teamBattleRewardDirty, 1);
+    PersistTeamBattleRewardSwitch(value);
+}
+
 void RefreshPersistentSwitches()
 {
     if (g_taskDispatchKeyReady == 0) {
@@ -5552,6 +5644,22 @@ void RefreshPersistentSwitches()
                 0);
         }
     }
+
+    if (g_teamBattleRewardKeyReady == 0) {
+        bool ready = false;
+        if (g_teamBattleRewardDirty != 0) {
+            ready = PersistTeamBattleRewardSwitch(g_teamBattleRewardSwitch);
+        } else {
+            ready = LoadTeamBattleRewardSwitch();
+        }
+        if (ready && g_teamBattleRewardCheckboxHwnd && IsWindow(g_teamBattleRewardCheckboxHwnd)) {
+            SendMessageW(
+                g_teamBattleRewardCheckboxHwnd,
+                BM_SETCHECK,
+                g_teamBattleRewardSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+                0);
+        }
+    }
 }
 
 LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -5560,6 +5668,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         PersistTaskDispatchSwitch(g_switch);
         PersistBattleTokenSwitch(g_battleTokenSwitch);
         PersistZhaoXianNaKeSwitch(g_zhaoXianNaKeSwitch);
+        PersistTeamBattleRewardSwitch(g_teamBattleRewardSwitch);
     }
 
     return g_settingsOldProc
@@ -5583,6 +5692,10 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         SyncZhaoXianNaKeSwitch();
         return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
     }
+    if (message == WM_COMMAND && LOWORD(wParam) == kTeamBattleRewardCheckboxId && HIWORD(wParam) == BN_CLICKED) {
+        SyncTeamBattleRewardSwitch();
+        return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
+    }
 
     if (message == WM_TIMER && wParam == kTimerId) {
         RefreshPersistentSwitches();
@@ -5595,6 +5708,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             LoadTaskDispatchSwitch();
             LoadBattleTokenSwitch();
             LoadZhaoXianNaKeSwitch();
+            LoadTeamBattleRewardSwitch();
             if (!g_checkboxHwnd) {
                 g_checkboxHwnd = CreateWindowExW(
                     0,
@@ -5640,6 +5754,21 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                     nullptr,
                     nullptr);
             }
+            if (!g_teamBattleRewardCheckboxHwnd) {
+                g_teamBattleRewardCheckboxHwnd = CreateWindowExW(
+                    0,
+                    L"Button",
+                    kTeamBattleRewardCheckboxText,
+                    0x50018003,
+                    g_x,
+                    g_y + (g_h * 3),
+                    g_w,
+                    g_h,
+                    g_parentHwnd,
+                    reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kTeamBattleRewardCheckboxId)),
+                    nullptr,
+                    nullptr);
+            }
 
             if (g_checkboxHwnd) {
                 HFONT font = reinterpret_cast<HFONT>(SendMessageW(g_weeklyHwnd, WM_GETFONT, 0, 0));
@@ -5650,6 +5779,9 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                     }
                     if (g_zhaoXianNaKeCheckboxHwnd) {
                         SendMessageW(g_zhaoXianNaKeCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+                    }
+                    if (g_teamBattleRewardCheckboxHwnd) {
+                        SendMessageW(g_teamBattleRewardCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
                     }
                 }
                 ShowWindow(g_checkboxHwnd, SW_SHOW);
@@ -5669,6 +5801,14 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                         0);
                     ShowWindow(g_zhaoXianNaKeCheckboxHwnd, SW_SHOW);
                 }
+                if (g_teamBattleRewardCheckboxHwnd) {
+                    SendMessageW(
+                        g_teamBattleRewardCheckboxHwnd,
+                        BM_SETCHECK,
+                        g_teamBattleRewardSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+                        0);
+                    ShowWindow(g_teamBattleRewardCheckboxHwnd, SW_SHOW);
+                }
                 SetTimer(g_parentHwnd, kTimerId, 1000, nullptr);
                 SendMessageW(g_checkboxHwnd, BM_SETCHECK, g_switch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
                 SyncSwitch();
@@ -5681,6 +5821,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             PersistTaskDispatchSwitch(g_switch);
             PersistBattleTokenSwitch(g_battleTokenSwitch);
             PersistZhaoXianNaKeSwitch(g_zhaoXianNaKeSwitch);
+            PersistTeamBattleRewardSwitch(g_teamBattleRewardSwitch);
             KillTimer(g_parentHwnd, kTimerId);
             if (g_checkboxHwnd && IsWindow(g_checkboxHwnd)) {
                 DestroyWindow(g_checkboxHwnd);
@@ -5691,9 +5832,13 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             if (g_zhaoXianNaKeCheckboxHwnd && IsWindow(g_zhaoXianNaKeCheckboxHwnd)) {
                 DestroyWindow(g_zhaoXianNaKeCheckboxHwnd);
             }
+            if (g_teamBattleRewardCheckboxHwnd && IsWindow(g_teamBattleRewardCheckboxHwnd)) {
+                DestroyWindow(g_teamBattleRewardCheckboxHwnd);
+            }
             g_checkboxHwnd = nullptr;
             g_battleTokenCheckboxHwnd = nullptr;
             g_zhaoXianNaKeCheckboxHwnd = nullptr;
+            g_teamBattleRewardCheckboxHwnd = nullptr;
             WriteSwitch(0);
             InterlockedExchange(&g_status, 8);
             return 1;
@@ -5819,6 +5964,9 @@ DWORD WINAPI SetupThread(LPVOID)
     }
 
     for (int i = 0; i < 30; ++i) {
+        if (g_teamBattleRewardKeyReady == 0) {
+            LoadTeamBattleRewardSwitch();
+        }
         if (FindAndInstall()) {
             return 0;
         }
@@ -6263,6 +6411,359 @@ bool BuildDailyGuardCode(uintptr_t base, CodeBuffer& code)
         AppendByte(code, 0xC3) &&
         AppendFunctionPrologueWithStack(code, 0x14) &&
         AppendRel32Instruction(code, 0xE9, base + 0x39F26);
+}
+
+}
+
+namespace TeamBattleReward
+{
+constexpr DWORD kRetryDelayMs = 30 * 60 * 1000;
+constexpr DWORD kResponseTimeoutMs = 15000;
+
+struct PacketReader
+{
+    const BYTE* cursor = nullptr;
+    const BYTE* end = nullptr;
+
+    bool ReadByte(BYTE& value)
+    {
+        if (!cursor || cursor >= end) {
+            return false;
+        }
+        value = *cursor++;
+        return true;
+    }
+
+    bool ReadU16(uint16_t& value)
+    {
+        if (!cursor || cursor + 2 > end) {
+            return false;
+        }
+        value = ReadBe16Unaligned(cursor);
+        cursor += 2;
+        return true;
+    }
+
+    bool ReadU32(uint32_t& value)
+    {
+        if (!cursor || cursor + 4 > end) {
+            return false;
+        }
+        value = ReadBe32Unaligned(cursor);
+        cursor += 4;
+        return true;
+    }
+
+    bool Skip(size_t length)
+    {
+        if (!cursor || length > static_cast<size_t>(end - cursor)) {
+            return false;
+        }
+        cursor += length;
+        return true;
+    }
+
+    bool SkipUtf()
+    {
+        uint16_t length = 0;
+        return ReadU16(length) && Skip(length);
+    }
+};
+
+volatile LONG g_tickRunning = 0;
+volatile LONG g_wasEnabled = 0;
+volatile LONG g_state = 0;
+volatile LONG g_deadlineTick = 0;
+volatile LONG g_dailyNextTick = 0;
+volatile LONG g_rankNextTick = 0;
+volatile LONG g_dailyDoneDate = 0;
+volatile LONG g_rankDoneDate = 0;
+volatile LONG g_pendingLog = 0;
+volatile LONG g_parseError = 0;
+volatile LONG g_dailyQueryCount = 0;
+volatile LONG g_dailyClaimCount = 0;
+volatile LONG g_rankQueryCount = 0;
+volatile LONG g_rankClaimCount = 0;
+volatile LONG g_dailySuccessCount = 0;
+volatile LONG g_rankSuccessCount = 0;
+BYTE g_dailyQueryPayload[4]{};
+
+const wchar_t kLogFormat[] = L"%s";
+const wchar_t kDailyRewardLog[] = L"\x7D44\x968A\x6230\x0020\x6BCF\x65E5\x734E\x52F5";
+const wchar_t kRankRewardLog[] = L"\x7D44\x968A\x6230\x0020\x6230\x968A\x734E\x52F5";
+
+bool IsEnabled()
+{
+    return TaskDispatchUi::g_teamBattleRewardSwitch != 0;
+}
+
+LONG DateKey(const SYSTEMTIME& time)
+{
+    return static_cast<LONG>(time.wYear * 10000 + time.wMonth * 100 + time.wDay);
+}
+
+bool TickReached(DWORD now, LONG target)
+{
+    return target == 0 || static_cast<LONG>(now - static_cast<DWORD>(target)) >= 0;
+}
+
+bool SkipBonusArray(PacketReader& reader, uint16_t* countOut = nullptr)
+{
+    uint16_t count = 0;
+    if (!reader.ReadU16(count)) {
+        return false;
+    }
+    if (countOut) {
+        *countOut = count;
+    }
+    for (uint16_t index = 0; index < count; ++index) {
+        if (!reader.Skip(6) || !reader.SkipUtf()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SkipRankList(PacketReader& reader)
+{
+    uint16_t rankCount = 0;
+    if (!reader.ReadU16(rankCount)) {
+        return false;
+    }
+    for (uint16_t rankIndex = 0; rankIndex < rankCount; ++rankIndex) {
+        if (!reader.Skip(4) || !reader.SkipUtf() || !reader.Skip(6)) {
+            return false;
+        }
+        uint16_t memberCount = 0;
+        if (!reader.ReadU16(memberCount)) {
+            return false;
+        }
+        for (uint16_t memberIndex = 0; memberIndex < memberCount; ++memberIndex) {
+            if (!reader.Skip(8) || !reader.SkipUtf() || !reader.Skip(1) || !reader.SkipUtf()) {
+                return false;
+            }
+        }
+        if (!reader.SkipUtf()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ParseDailyPanel(const BYTE* payload, uint32_t payloadLength, bool& claimable)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint32_t battleState = 0;
+    BYTE receiveState = 0;
+    uint32_t goldReward = 0;
+    claimable = false;
+    if (!reader.ReadU32(battleState) ||
+        !reader.Skip(28) ||
+        !reader.SkipUtf() ||
+        !reader.Skip(18) ||
+        !reader.SkipUtf() ||
+        !reader.Skip(2) ||
+        !SkipBonusArray(reader) ||
+        !reader.ReadByte(receiveState) ||
+        !reader.ReadU32(goldReward)) {
+        return false;
+    }
+    claimable = battleState == 2 && receiveState == 0 && static_cast<int32_t>(goldReward) <= 0;
+    return true;
+}
+
+bool ParseRankPanel(const BYTE* payload, uint32_t payloadLength, bool& claimable)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint32_t ownRank = 0;
+    uint16_t rewardCount = 0;
+    BYTE receiveState = 0;
+    uint32_t goldReward = 0;
+    uint32_t teamBattleState = 0;
+    claimable = false;
+    if (!SkipRankList(reader) ||
+        !reader.ReadU32(ownRank) ||
+        !SkipBonusArray(reader, &rewardCount) ||
+        !reader.ReadByte(receiveState) ||
+        !reader.ReadU32(goldReward) ||
+        !reader.ReadU32(teamBattleState) ||
+        !reader.SkipUtf()) {
+        return false;
+    }
+    claimable = teamBattleState != 1 &&
+        ownRank > 0 &&
+        rewardCount > 0 &&
+        goldReward == 0 &&
+        receiveState == 0;
+    return true;
+}
+
+void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket = reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(opcode, payload, payloadLength);
+}
+
+void DrainPendingLog()
+{
+    const LONG pending = InterlockedExchange(&g_pendingLog, 0);
+    if (pending == 1) {
+        GameLog::Write(kLogFormat, kDailyRewardLog);
+    } else if (pending == 2) {
+        GameLog::Write(kLogFormat, kRankRewardLog);
+    }
+}
+
+void ResetState()
+{
+    InterlockedExchange(&g_state, 0);
+    InterlockedExchange(&g_deadlineTick, 0);
+    InterlockedExchange(&g_dailyNextTick, 0);
+    InterlockedExchange(&g_rankNextTick, 0);
+}
+
+void OnEnabledChanged(LONG enabled)
+{
+    InterlockedExchange(&g_wasEnabled, enabled != 0 ? 1 : 0);
+    ResetState();
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    const uint32_t packetOpcode = opcode & 0xFFFF;
+    const DWORD now = GetGameTick();
+    if (packetOpcode == 0x34C4) {
+        bool claimable = false;
+        if (!ParseDailyPanel(payload, payloadLength, claimable)) {
+            InterlockedIncrement(&g_parseError);
+            return;
+        }
+        if (g_state != 1) {
+            return;
+        }
+        if (claimable) {
+            InterlockedExchange(&g_state, 2);
+        } else {
+            InterlockedExchange(&g_dailyNextTick, static_cast<LONG>(now + kRetryDelayMs));
+            InterlockedExchange(&g_state, 0);
+        }
+        return;
+    }
+    if (packetOpcode == 0x34C3) {
+        bool claimable = false;
+        if (!ParseRankPanel(payload, payloadLength, claimable)) {
+            InterlockedIncrement(&g_parseError);
+            return;
+        }
+        if (g_state != 4) {
+            return;
+        }
+        if (claimable) {
+            InterlockedExchange(&g_state, 5);
+        } else {
+            InterlockedExchange(&g_rankNextTick, static_cast<LONG>(now + kRetryDelayMs));
+            InterlockedExchange(&g_state, 0);
+        }
+        return;
+    }
+    if (packetOpcode == 0x34D5 && g_state == 3) {
+        SYSTEMTIME localTime{};
+        GetLocalTime(&localTime);
+        InterlockedExchange(&g_dailyDoneDate, DateKey(localTime));
+        InterlockedExchange(&g_dailyNextTick, 0);
+        InterlockedExchange(&g_pendingLog, 1);
+        InterlockedIncrement(&g_dailySuccessCount);
+        InterlockedExchange(&g_state, 0);
+        return;
+    }
+    if (packetOpcode == 0x34D6 && g_state == 6) {
+        SYSTEMTIME localTime{};
+        GetLocalTime(&localTime);
+        InterlockedExchange(&g_rankDoneDate, DateKey(localTime));
+        InterlockedExchange(&g_rankNextTick, 0);
+        InterlockedExchange(&g_pendingLog, 2);
+        InterlockedIncrement(&g_rankSuccessCount);
+        InterlockedExchange(&g_state, 0);
+    }
+}
+
+void TickImpl()
+{
+    DrainPendingLog();
+    if (!IsEnabled()) {
+        if (InterlockedExchange(&g_wasEnabled, 0) != 0) {
+            ResetState();
+        }
+        return;
+    }
+    if (InterlockedExchange(&g_wasEnabled, 1) == 0) {
+        ResetState();
+    }
+
+    const DWORD now = GetGameTick();
+    const LONG state = g_state;
+    if ((state == 1 || state == 3 || state == 4 || state == 6) &&
+        TickReached(now, g_deadlineTick)) {
+        if (state == 1 || state == 3) {
+            InterlockedExchange(&g_dailyNextTick, static_cast<LONG>(now + kRetryDelayMs));
+        } else {
+            InterlockedExchange(&g_rankNextTick, static_cast<LONG>(now + kRetryDelayMs));
+        }
+        InterlockedExchange(&g_state, 0);
+        return;
+    }
+    if (state == 2) {
+        InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+        InterlockedExchange(&g_state, 3);
+        InterlockedIncrement(&g_dailyClaimCount);
+        SendPacket(0x34C7, nullptr, 0);
+        return;
+    }
+    if (state == 5) {
+        InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+        InterlockedExchange(&g_state, 6);
+        InterlockedIncrement(&g_rankClaimCount);
+        SendPacket(0x34C6, nullptr, 0);
+        return;
+    }
+    if (state != 0) {
+        return;
+    }
+
+    SYSTEMTIME localTime{};
+    GetLocalTime(&localTime);
+    const LONG today = DateKey(localTime);
+    if (localTime.wHour >= 16 &&
+        g_dailyDoneDate != today &&
+        TickReached(now, g_dailyNextTick)) {
+        InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+        InterlockedExchange(&g_state, 1);
+        InterlockedIncrement(&g_dailyQueryCount);
+        SendPacket(0x34C0, g_dailyQueryPayload, sizeof(g_dailyQueryPayload));
+        return;
+    }
+    if (localTime.wDayOfWeek == 0 &&
+        localTime.wHour >= 16 &&
+        g_rankDoneDate != today &&
+        TickReached(now, g_rankNextTick)) {
+        InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+        InterlockedExchange(&g_state, 4);
+        InterlockedIncrement(&g_rankQueryCount);
+        SendPacket(0x34BF, nullptr, 0);
+    }
+}
+
+void Tick()
+{
+    if (InterlockedCompareExchange(&g_tickRunning, 1, 0) != 0) {
+        return;
+    }
+    __try {
+        TickImpl();
+    } __finally {
+        InterlockedExchange(&g_tickRunning, 0);
+    }
 }
 
 }
@@ -8866,6 +9367,7 @@ __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* pa
     BattleToken::HandleRecvPacket(opcode, payload, payloadLength);
     ZhaoXianNaKe::HandleRecvPacket(opcode, payload, payloadLength);
     ActivityLogin::HandleRecvPacket(opcode, payload, payloadLength);
+    TeamBattleReward::HandleRecvPacket(opcode, payload, payloadLength);
     ExpeditionGuard::HandleRecvPacket(opcode);
     const BYTE* const legionPayload = payload;
     const uint32_t legionPayloadLength = payloadLength;

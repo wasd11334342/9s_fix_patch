@@ -4,8 +4,8 @@
 IDR_LICENSE_CA_BUNDLE RCDATA "third_party/cacert/cacert.pem"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,13,0,0
- PRODUCTVERSION 0,13,0,0
+ FILEVERSION 0,14,0,0
+ PRODUCTVERSION 0,14,0,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
 #ifdef _DEBUG
  FILEFLAGS VS_FF_DEBUG
@@ -22,11 +22,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "MyPatch\0"
             VALUE "FileDescription", "MyPatch DLL\0"
-            VALUE "FileVersion", "0.13b\0"
+            VALUE "FileVersion", "0.14b\0"
             VALUE "InternalName", "MyPatch\0"
             VALUE "OriginalFilename", "MyPatch.dll\0"
             VALUE "ProductName", "MyPatch\0"
-            VALUE "ProductVersion", "0.13b\0"
+            VALUE "ProductVersion", "0.14b\0"
         END
     END
     BLOCK "VarFileInfo"
