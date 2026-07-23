@@ -14,9 +14,10 @@ add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
 
 add_library(MyPatch SHARED
     dllmain.cpp
+    native_optimization.cpp
     license_tls_client.cpp
     license_tls_resources.rc)
 
 target_compile_features(MyPatch PRIVATE cxx_std_17)
 target_compile_options(MyPatch PRIVATE /utf-8)
-target_link_libraries(MyPatch PRIVATE MbedTLS::mbedtls)
+target_link_libraries(MyPatch PRIVATE MbedTLS::mbedtls Psapi)

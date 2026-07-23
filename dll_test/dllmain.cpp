@@ -1,4 +1,5 @@
 ﻿#include <windows.h>
+#include <algorithm>
 #include <climits>
 #include <cstdio>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <vector>
 
 #include "license_tls_client.h"
+#include "native_optimization.h"
 
 namespace
 {
@@ -15,7 +17,7 @@ HHOOK g_msgBoxHook = nullptr;
 HMODULE g_selfModule = nullptr;
 wchar_t g_patchStatusMessage[2048]{};
 constexpr DWORD kMessageBoxAutoCloseMs = 3000;
-constexpr wchar_t kMyPatchVersion[] = L"0.14b";
+constexpr wchar_t kMyPatchVersion[] = L"0.15b";
 
 struct MemoryPatch
 {
@@ -142,11 +144,23 @@ namespace Jrnt
 volatile LONG g_this = 0;
 volatile LONG g_didWork = 0;
 volatile LONG g_pendingOpen = 0;
+volatile LONG g_bribeTaskActive = 0;
+volatile LONG g_bribeTaskTarget = 0;
+volatile LONG g_bribeTaskSchedule = 0;
+volatile LONG g_bribeSnapshotGeneration = 0;
+volatile LONG g_bribeConsumedGeneration = 0;
 uint32_t g_ids[4] = { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0 };
 BYTE g_claimPending[4]{};
 BYTE g_payloadZero = 0;
 BYTE g_payload4F37 = 0;
 uint32_t g_payload4F36 = 0;
+
+const BYTE kBribeTaskName[] = {
+    0xE8, 0xA0, 0xBB, 0xE6, 0x97, 0x8F, 0xE5, 0xA4, 0x96, 0xE4, 0xBA, 0xA4
+};
+const BYTE kBribeTaskDescription[] = {
+    0xE6, 0x94, 0xB6, 0xE8, 0xB2, 0xB7, 0xE8, 0xA0, 0xBB, 0xE6, 0x97, 0x8F
+};
 
 const wchar_t kLogOpen[] = {
     0x570B, 0x5BB6, 0x52D5, 0x54E1, 0x0020, 0x958B, 0x555F, 0x5BF6, 0x7BB1, 0x0000
@@ -286,6 +300,1728 @@ void SendTick();
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
 }
 
+uint16_t ReadBe16Unaligned(const BYTE* address);
+uint32_t ReadBe32Unaligned(const BYTE* address);
+DWORD GetGameTick();
+
+namespace GameLog
+{
+template <typename... Args>
+void Write(const wchar_t* format, Args... args);
+}
+
+namespace TaskDispatchUi
+{
+extern volatile LONG g_dianFengZhuLuSwitch;
+extern volatile LONG g_huanJingSwitch;
+}
+
+namespace AlBattle
+{
+size_t CopyReadyHeroUuids(BYTE* output, size_t capacity);
+}
+
+namespace DianFengZhuLu
+{
+constexpr DWORD kResponseTimeoutMs = 15000;
+constexpr DWORD kBattlePollMs = 15000;
+constexpr DWORD kIdlePollMs = 5000;
+constexpr DWORD kMaxResetSeconds = 7 * 24 * 60 * 60;
+constexpr size_t kMaxHeroes = 16;
+
+enum State : LONG
+{
+    kIdle = 0,
+    kWaitingPanel = 1,
+    kSendSelection = 2,
+    kWaitingFormation = 3,
+    kSendFormation = 4,
+    kWaitingFormationSave = 5,
+    kRepeatChallenge = 6,
+    kStartBattle = 7,
+    kWaitingBattle = 8,
+    kSendBuffReplace = 9,
+    kWaitingBuffReplace = 10,
+    kWaitingBuffList = 11,
+    kWaitingRecovery = 12,
+    kSendRecoverySkip = 13,
+    kSendFastBattleRetry = 14
+};
+
+struct PacketReader
+{
+    const BYTE* cursor = nullptr;
+    const BYTE* end = nullptr;
+
+    bool ReadByte(BYTE& value)
+    {
+        if (!cursor || cursor >= end) return false;
+        value = *cursor++;
+        return true;
+    }
+
+    bool ReadU16(uint16_t& value)
+    {
+        if (!cursor || cursor + 2 > end) return false;
+        value = ReadBe16Unaligned(cursor);
+        cursor += 2;
+        return true;
+    }
+
+    bool ReadU32(uint32_t& value)
+    {
+        if (!cursor || cursor + 4 > end) return false;
+        value = ReadBe32Unaligned(cursor);
+        cursor += 4;
+        return true;
+    }
+
+    bool Skip(size_t length)
+    {
+        if (!cursor || length > static_cast<size_t>(end - cursor)) return false;
+        cursor += length;
+        return true;
+    }
+
+    bool ReadUtf(const BYTE*& text, uint16_t& length)
+    {
+        if (!ReadU16(length) || length > static_cast<size_t>(end - cursor)) return false;
+        text = cursor;
+        cursor += length;
+        return true;
+    }
+
+    bool SkipUtf()
+    {
+        const BYTE* text = nullptr;
+        uint16_t length = 0;
+        return ReadUtf(text, length);
+    }
+};
+
+struct Hero
+{
+    uint32_t heroId = 0;
+    uint32_t uuidHigh = 0;
+    uint32_t uuidLow = 0;
+    uint32_t currentHp = 0;
+    bool disabled = false;
+};
+
+struct PanelOption
+{
+    uint32_t optionLv = 0;
+    int32_t score = 0;
+    wchar_t buffName[128]{};
+};
+
+volatile LONG g_tickRunning = 0;
+volatile LONG g_wasEnabled = 0;
+volatile LONG g_state = kIdle;
+volatile LONG g_deadlineTick = 0;
+volatile LONG g_nextTick = 0;
+volatile LONG g_resetDeadlineTick = 0;
+volatile LONG g_dailyPauseDate = 0;
+volatile LONG g_weeklyPaused = 0;
+volatile LONG g_selectedOption = 0;
+volatile LONG g_selectionMode = 0;
+volatile LONG g_battleId = 0;
+volatile LONG g_replaceTemplateId = 0;
+volatile LONG g_pendingLog = 0;
+volatile LONG g_parseError = 0;
+volatile LONG g_battleActive = 0;
+volatile LONG g_fastBattleRetrySent = 0;
+volatile LONG g_battleStartTick = 0;
+Hero g_heroes[kMaxHeroes]{};
+size_t g_heroCount = 0;
+wchar_t g_stageText[32] = L"?";
+wchar_t g_battleStageText[32] = L"?";
+wchar_t g_buffText[128] = L"?";
+wchar_t g_lastBuffLogStage[32]{};
+wchar_t g_lastBuffLogText[128]{};
+
+bool IsEnabled()
+{
+    return TaskDispatchUi::g_dianFengZhuLuSwitch != 0;
+}
+
+LONG DateKey(const SYSTEMTIME& time)
+{
+    return static_cast<LONG>(time.wYear * 10000 + time.wMonth * 100 + time.wDay);
+}
+
+bool TickReached(DWORD now, LONG target)
+{
+    return target == 0 || static_cast<LONG>(now - static_cast<DWORD>(target)) >= 0;
+}
+
+void WriteU16(BYTE*& cursor, uint16_t value)
+{
+    *cursor++ = static_cast<BYTE>((value >> 8) & 0xFF);
+    *cursor++ = static_cast<BYTE>(value & 0xFF);
+}
+
+void WriteU32(BYTE*& cursor, uint32_t value)
+{
+    *cursor++ = static_cast<BYTE>((value >> 24) & 0xFF);
+    *cursor++ = static_cast<BYTE>((value >> 16) & 0xFF);
+    *cursor++ = static_cast<BYTE>((value >> 8) & 0xFF);
+    *cursor++ = static_cast<BYTE>(value & 0xFF);
+}
+
+void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360)(opcode, payload, payloadLength);
+}
+
+void CopyUtfToWide(const BYTE* text, uint16_t length, wchar_t* output, size_t capacity)
+{
+    if (!output || capacity == 0) return;
+    output[0] = L'\0';
+    if (!text || length == 0) return;
+    int count = MultiByteToWideChar(CP_UTF8, 0, reinterpret_cast<const char*>(text), length,
+        output, static_cast<int>(capacity - 1));
+    if (count < 0) count = 0;
+    output[count] = L'\0';
+}
+
+void ExtractStage(const BYTE* text, uint16_t length)
+{
+    wchar_t title[128]{};
+    CopyUtfToWide(text, length, title, _countof(title));
+    for (size_t index = 0; title[index] != L'\0'; ++index) {
+        if (title[index] < L'0' || title[index] > L'9') continue;
+        size_t out = 0;
+        while (title[index] != L'\0' && out + 1 < _countof(g_stageText)) {
+            const wchar_t ch = title[index];
+            if ((ch >= L'0' && ch <= L'9') || ch == L'-') {
+                g_stageText[out++] = ch;
+                ++index;
+                continue;
+            }
+            break;
+        }
+        g_stageText[out] = L'\0';
+        if (out != 0) return;
+    }
+    wcscpy_s(g_stageText, L"?");
+}
+
+bool ParseUnsignedField(const char* json, const char* key, uint32_t& value)
+{
+    const char* found = strstr(json, key);
+    if (!found) return false;
+    found += strlen(key);
+    while (*found == ' ' || *found == '\"' || *found == ':') ++found;
+    uint64_t result = 0;
+    bool any = false;
+    while (*found >= '0' && *found <= '9') {
+        any = true;
+        result = result * 10 + static_cast<unsigned>(*found - '0');
+        ++found;
+    }
+    value = static_cast<uint32_t>(result);
+    return any;
+}
+
+bool ParseHeroExtra(const BYTE* text, uint16_t length, Hero& hero)
+{
+    char json[768]{};
+    const size_t copyLength = length < sizeof(json) - 1 ? length : sizeof(json) - 1;
+    memcpy(json, text, copyLength);
+    json[copyLength] = '\0';
+    ParseUnsignedField(json, "heroId", hero.heroId);
+    const char* uuid = strstr(json, "heroUUID");
+    if (uuid) {
+        uuid = strchr(uuid, ':');
+        if (uuid) {
+            ++uuid;
+            while (*uuid == ' ' || *uuid == '\"') ++uuid;
+            uint64_t high = 0;
+            while (*uuid >= '0' && *uuid <= '9') high = high * 10 + static_cast<unsigned>(*uuid++ - '0');
+            if (*uuid == ',') ++uuid;
+            uint64_t low = 0;
+            while (*uuid >= '0' && *uuid <= '9') low = low * 10 + static_cast<unsigned>(*uuid++ - '0');
+            hero.uuidHigh = static_cast<uint32_t>(high);
+            hero.uuidLow = static_cast<uint32_t>(low);
+        }
+    }
+    hero.disabled = strstr(json, "\"disabled\":true") != nullptr ||
+        strstr(json, "\"disabled\":1") != nullptr;
+    return hero.heroId != 0 && (hero.uuidHigh != 0 || hero.uuidLow != 0);
+}
+
+bool SkipBuff(PacketReader& reader, wchar_t* name, size_t nameCapacity, uint32_t* templateId)
+{
+    const BYTE* text = nullptr;
+    uint16_t length = 0;
+    uint32_t id = 0;
+    uint32_t ignored = 0;
+    uint16_t descCount = 0;
+    if (!reader.ReadUtf(text, length) || !reader.ReadU32(id) || !reader.ReadU32(ignored) ||
+        !reader.ReadU16(descCount)) return false;
+    if (name) CopyUtfToWide(text, length, name, nameCapacity);
+    if (templateId) *templateId = id;
+    for (uint16_t index = 0; index < descCount; ++index) {
+        if (!reader.SkipUtf()) return false;
+    }
+    return reader.ReadU32(ignored) && reader.SkipUtf();
+}
+
+bool ParsePanel(const BYTE* payload, uint32_t payloadLength, uint32_t& raidType,
+    uint32_t& currentPower, uint32_t& firstOption, wchar_t* buffName, size_t buffCapacity,
+    uint32_t& resetSeconds, uint16_t& optionCount)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    const BYTE* title = nullptr;
+    uint16_t titleLength = 0;
+    uint32_t ignored = 0;
+    if (!reader.ReadUtf(title, titleLength) || !reader.ReadU32(resetSeconds) ||
+        !reader.ReadU32(raidType) || !reader.ReadU32(ignored) || !reader.ReadU32(currentPower) ||
+        !reader.ReadU16(optionCount)) return false;
+    ExtractStage(title, titleLength);
+    firstOption = 0;
+    PanelOption options[16]{};
+    size_t savedOptionCount = 0;
+    for (uint16_t optionIndex = 0; optionIndex < optionCount; ++optionIndex) {
+        uint32_t optionLv = 0;
+        uint32_t npcIcon = 0;
+        uint32_t rawScore = 0;
+        uint32_t soldierId = 0;
+        uint16_t descCount = 0;
+        if (!reader.ReadU32(optionLv) || !reader.ReadU32(npcIcon) || !reader.ReadU32(rawScore) ||
+            !reader.ReadU32(soldierId) || !reader.ReadU16(descCount)) return false;
+        for (uint16_t descIndex = 0; descIndex < descCount; ++descIndex) {
+            if (!reader.SkipUtf()) return false;
+        }
+        if (!reader.SkipUtf() || !reader.SkipUtf()) return false;
+        const BYTE* optionBuffName = nullptr;
+        uint16_t optionBuffLength = 0;
+        if (!reader.ReadUtf(optionBuffName, optionBuffLength)) return false;
+        if (savedOptionCount < _countof(options)) {
+            PanelOption& option = options[savedOptionCount++];
+            option.optionLv = optionLv;
+            option.score = static_cast<int32_t>(rawScore);
+            CopyUtfToWide(optionBuffName, optionBuffLength, option.buffName, _countof(option.buffName));
+        }
+        if (!reader.Skip(12) || !reader.SkipUtf()) return false;
+    }
+    uint32_t currentScore = 0;
+    uint32_t totalScore = 0;
+    if (!reader.SkipUtf() || !reader.ReadU32(currentScore) || !reader.ReadU32(totalScore)) return false;
+    for (size_t optionIndex = 0; optionIndex < savedOptionCount; ++optionIndex) {
+        const PanelOption& option = options[optionIndex];
+        const int64_t signedScore = static_cast<int64_t>(option.score);
+        const uint64_t requiredScore = static_cast<uint64_t>(
+            signedScore < 0 ? -signedScore : signedScore);
+        if (raidType == 2 && static_cast<uint64_t>(currentScore) < requiredScore) continue;
+        firstOption = option.optionLv;
+        if (buffName) wcscpy_s(buffName, buffCapacity, option.buffName);
+        break;
+    }
+    return true;
+}
+
+bool ParseRole(PacketReader& reader, Hero* hero)
+{
+    uint32_t ignored = 0;
+    uint16_t ignored16 = 0;
+    uint16_t tacticCount = 0;
+    if (!reader.SkipUtf() || !reader.ReadU32(ignored)) return false;
+    uint32_t currentHp = 0;
+    if (!reader.ReadU32(currentHp) || !reader.ReadU32(ignored) || !reader.ReadU32(ignored) ||
+        !reader.ReadU16(ignored16) || !reader.SkipUtf() || !reader.ReadU16(tacticCount)) return false;
+    for (uint16_t index = 0; index < tacticCount; ++index) {
+        if (!reader.ReadU32(ignored) || !reader.SkipUtf()) return false;
+    }
+    if (!reader.ReadU32(ignored)) return false;
+    const BYTE* extra = nullptr;
+    uint16_t extraLength = 0;
+    if (!reader.ReadUtf(extra, extraLength)) return false;
+    if (hero) {
+        hero->currentHp = currentHp;
+        return ParseHeroExtra(extra, extraLength, *hero);
+    }
+    return true;
+}
+
+bool ParseFormation(const BYTE* payload, uint32_t payloadLength, BYTE& offon,
+    uint32_t& battleId, Hero* heroes, size_t& heroCount)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint16_t ownCount = 0;
+    uint16_t enemyCount = 0;
+    if (!reader.ReadByte(offon) || !reader.ReadU16(ownCount)) return false;
+    heroCount = 0;
+    for (uint16_t index = 0; index < ownCount; ++index) {
+        Hero parsed{};
+        if (!ParseRole(reader, &parsed)) return false;
+        if (heroCount < kMaxHeroes) heroes[heroCount++] = parsed;
+    }
+    if (!reader.ReadU16(enemyCount)) return false;
+    for (uint16_t index = 0; index < enemyCount; ++index) {
+        if (!ParseRole(reader, nullptr)) return false;
+    }
+    return reader.ReadU32(battleId) && reader.SkipUtf();
+}
+
+bool ParseRecoveryFormation(const BYTE* payload, uint32_t payloadLength, bool& allDead)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint32_t ignored = 0;
+    uint16_t heroCount = 0;
+    if (!reader.ReadU32(ignored) || !reader.ReadU16(heroCount)) return false;
+    size_t usableCount = 0;
+    for (uint16_t index = 0; index < heroCount; ++index) {
+        Hero hero{};
+        if (!ParseRole(reader, &hero)) return false;
+        if (hero.currentHp != 0 && !hero.disabled) ++usableCount;
+    }
+    if (!reader.ReadU32(ignored) || !reader.SkipUtf()) return false;
+    allDead = heroCount != 0 && usableCount == 0;
+    return true;
+}
+
+bool ParseBuffSelection(const BYTE* payload, uint32_t payloadLength, wchar_t* selectedName,
+    size_t nameCapacity, uint32_t& replaceTemplateId)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint16_t selectedCount = 0;
+    uint16_t currentCount = 0;
+    if (!reader.ReadU16(selectedCount)) return false;
+    for (uint16_t index = 0; index < selectedCount; ++index) {
+        if (!SkipBuff(reader, index == 0 ? selectedName : nullptr, nameCapacity, nullptr)) return false;
+    }
+    if (!reader.ReadU16(currentCount)) return false;
+    replaceTemplateId = 0;
+    for (uint16_t index = 0; index < currentCount; ++index) {
+        if (!SkipBuff(reader, nullptr, 0, index == 0 ? &replaceTemplateId : nullptr)) return false;
+    }
+    return reader.SkipUtf();
+}
+
+void PauseForReset()
+{
+    InterlockedExchange(&g_battleActive, 0);
+    InterlockedExchange(&g_fastBattleRetrySent, 0);
+    InterlockedExchange(&g_battleStartTick, 0);
+    InterlockedExchange(&g_weeklyPaused, 1);
+    InterlockedExchange(&g_state, kIdle);
+}
+
+void ResetTransient()
+{
+    InterlockedExchange(&g_state, kIdle);
+    InterlockedExchange(&g_deadlineTick, 0);
+    InterlockedExchange(&g_nextTick, 0);
+    InterlockedExchange(&g_pendingLog, 0);
+    InterlockedExchange(&g_battleActive, 0);
+    InterlockedExchange(&g_fastBattleRetrySent, 0);
+    InterlockedExchange(&g_battleStartTick, 0);
+    g_heroCount = 0;
+    g_lastBuffLogStage[0] = L'\0';
+    g_lastBuffLogText[0] = L'\0';
+}
+
+void QueueBuffLogOnce()
+{
+    if (wcscmp(g_lastBuffLogStage, g_stageText) == 0 &&
+        wcscmp(g_lastBuffLogText, g_buffText) == 0) {
+        return;
+    }
+    wcscpy_s(g_lastBuffLogStage, g_stageText);
+    wcscpy_s(g_lastBuffLogText, g_buffText);
+    InterlockedExchange(&g_pendingLog, 2);
+}
+
+void OnEnabledChanged(LONG enabled)
+{
+    InterlockedExchange(&g_wasEnabled, enabled ? 1 : 0);
+    InterlockedExchange(&g_weeklyPaused, 0);
+    InterlockedExchange(&g_dailyPauseDate, 0);
+    ResetTransient();
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    if (!IsEnabled()) return;
+    const uint32_t packetOpcode = opcode & 0xFFFF;
+    const DWORD now = GetGameTick();
+    if (packetOpcode == 0x1464 && g_battleActive != 0) {
+        InterlockedExchange(&g_battleActive, 0);
+        InterlockedExchange(&g_fastBattleRetrySent, 0);
+        InterlockedExchange(&g_battleStartTick, 0);
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + 1000));
+        InterlockedExchange(&g_state, kWaitingBattle);
+        return;
+    }
+    if (packetOpcode == 0x52BA) {
+        const LONG priorState = g_state;
+        uint32_t raidType = 0;
+        uint32_t currentPower = 0;
+        uint32_t firstOption = 0;
+        uint32_t resetSeconds = 0;
+        uint16_t optionCount = 0;
+        wchar_t optionBuff[128]{};
+        if (!ParsePanel(payload, payloadLength, raidType, currentPower, firstOption,
+                optionBuff, _countof(optionBuff), resetSeconds, optionCount)) {
+            InterlockedIncrement(&g_parseError);
+            return;
+        }
+        const DWORD boundedSeconds = resetSeconds > kMaxResetSeconds ? kMaxResetSeconds : resetSeconds;
+        InterlockedExchange(&g_resetDeadlineTick, static_cast<LONG>(now + boundedSeconds * 1000));
+        if (raidType != 2) {
+            g_lastBuffLogStage[0] = L'\0';
+            g_lastBuffLogText[0] = L'\0';
+        }
+        if (priorState == kWaitingPanel && g_battleActive != 0) {
+            const bool sameStage = wcscmp(g_stageText, g_battleStageText) == 0;
+            const bool insideRetryWindow = g_battleStartTick != 0 &&
+                now - static_cast<DWORD>(g_battleStartTick) <= 120000;
+            if (sameStage && insideRetryWindow &&
+                InterlockedCompareExchange(&g_fastBattleRetrySent, 1, 0) == 0) {
+                InterlockedExchange(&g_state, kSendFastBattleRetry);
+                return;
+            }
+            InterlockedExchange(&g_battleActive, 0);
+            InterlockedExchange(&g_battleStartTick, 0);
+        }
+        if (currentPower == 0) {
+            SYSTEMTIME localTime{};
+            GetLocalTime(&localTime);
+            InterlockedExchange(&g_dailyPauseDate, DateKey(localTime));
+            InterlockedExchange(&g_state, kIdle);
+            return;
+        }
+        if (raidType == 2 && optionCount != 0 && firstOption == 0) {
+            InterlockedExchange(&g_pendingLog, 3);
+            InterlockedExchange(&g_state, kSendRecoverySkip);
+            return;
+        }
+        if (optionCount == 0 || firstOption == 0) {
+            PauseForReset();
+            return;
+        }
+        InterlockedExchange(&g_selectedOption, static_cast<LONG>(firstOption));
+        InterlockedExchange(&g_selectionMode, static_cast<LONG>(raidType));
+        if (raidType == 2) {
+            wcscpy_s(g_buffText, optionBuff[0] ? optionBuff : L"?");
+        }
+        InterlockedExchange(&g_state, kSendSelection);
+        return;
+    }
+    if (packetOpcode == 0x52BC) {
+        BYTE offon = 0;
+        uint32_t battleId = 0;
+        Hero heroes[kMaxHeroes]{};
+        size_t heroCount = 0;
+        if (!ParseFormation(payload, payloadLength, offon, battleId, heroes, heroCount)) {
+            InterlockedIncrement(&g_parseError);
+            return;
+        }
+        size_t usableCount = 0;
+        for (size_t index = 0; index < heroCount; ++index) {
+            if (heroes[index].currentHp != 0 && !heroes[index].disabled) ++usableCount;
+        }
+        if (usableCount == 0) {
+            PauseForReset();
+            return;
+        }
+        memcpy(g_heroes, heroes, sizeof(heroes));
+        g_heroCount = heroCount;
+        InterlockedExchange(&g_battleId, static_cast<LONG>(battleId));
+        if (g_state == kWaitingFormationSave) {
+            InterlockedExchange(&g_state, kRepeatChallenge);
+        } else if (offon == 0) {
+            InterlockedExchange(&g_state, kSendFormation);
+        } else {
+            InterlockedExchange(&g_state, kStartBattle);
+        }
+        return;
+    }
+    if (packetOpcode == 0x52BE) {
+        uint32_t replaceTemplateId = 0;
+        wchar_t selectedName[128]{};
+        if (!ParseBuffSelection(payload, payloadLength, selectedName, _countof(selectedName), replaceTemplateId)) {
+            InterlockedIncrement(&g_parseError);
+            return;
+        }
+        if (selectedName[0]) wcscpy_s(g_buffText, selectedName);
+        if (g_state == kWaitingBuffReplace) {
+            InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kIdlePollMs));
+            InterlockedExchange(&g_state, kWaitingBattle);
+        } else if (replaceTemplateId != 0) {
+            InterlockedExchange(&g_replaceTemplateId, static_cast<LONG>(replaceTemplateId));
+            InterlockedExchange(&g_state, kSendBuffReplace);
+        } else {
+            InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kIdlePollMs));
+            InterlockedExchange(&g_state, kWaitingBattle);
+        }
+        return;
+    }
+    if (packetOpcode == 0x52C2 && g_state == kWaitingRecovery) {
+        bool allDead = false;
+        if (!ParseRecoveryFormation(payload, payloadLength, allDead)) {
+            InterlockedIncrement(&g_parseError);
+            return;
+        }
+        if (allDead) {
+            PauseForReset();
+        } else {
+            InterlockedExchange(&g_state, kSendRecoverySkip);
+        }
+    }
+}
+
+void DrainPendingLog()
+{
+    const LONG pending = InterlockedExchange(&g_pendingLog, 0);
+    if (pending == 1) {
+        GameLog::Write(L"\x5DD4\x5CF0\x9010\x9E7F \x6311\x6230 %s", g_stageText);
+    } else if (pending == 2) {
+        GameLog::Write(L"\x5DD4\x5CF0\x9010\x9E7F \x9078\x64C7 %s", g_buffText);
+    } else if (pending == 3) {
+        GameLog::Write(L"\x9010\x9E7F\x5DD4\x5CF0 \x7A4D\x5206\x4E0D\x8DB3");
+    }
+}
+
+void QueryPanel(DWORD now)
+{
+    InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+    InterlockedExchange(&g_state, kWaitingPanel);
+    SendPacket(0x52B9, nullptr, 0);
+}
+
+void TickImpl()
+{
+    DrainPendingLog();
+    if (!IsEnabled()) {
+        if (InterlockedExchange(&g_wasEnabled, 0) != 0) ResetTransient();
+        return;
+    }
+    if (InterlockedExchange(&g_wasEnabled, 1) == 0) ResetTransient();
+    const DWORD now = GetGameTick();
+
+    if (g_weeklyPaused) {
+        if (!TickReached(now, g_resetDeadlineTick)) return;
+        InterlockedExchange(&g_weeklyPaused, 0);
+        InterlockedExchange(&g_resetDeadlineTick, 0);
+    }
+    SYSTEMTIME localTime{};
+    GetLocalTime(&localTime);
+    const LONG today = DateKey(localTime);
+    if (g_dailyPauseDate == today) return;
+    if (g_dailyPauseDate != 0 && g_dailyPauseDate != today) InterlockedExchange(&g_dailyPauseDate, 0);
+
+    LONG state = g_state;
+    if ((state == kWaitingPanel || state == kWaitingFormation || state == kWaitingFormationSave ||
+            state == kWaitingBuffList || state == kWaitingBuffReplace ||
+            state == kWaitingRecovery) && TickReached(now, g_deadlineTick)) {
+        InterlockedExchange(&g_state, kIdle);
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kIdlePollMs));
+        state = kIdle;
+    }
+    if (state == kSendSelection) {
+        const LONG mode = g_selectionMode;
+        BYTE payload[4]{};
+        BYTE* cursor = payload;
+        WriteU32(cursor, static_cast<uint32_t>(g_selectedOption));
+        if (mode == 2) {
+            QueueBuffLogOnce();
+        }
+        InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+        InterlockedExchange(&g_state,
+            mode == 2 ? kWaitingBuffList : (mode == 3 ? kWaitingRecovery : kWaitingFormation));
+        SendPacket(0x52BB, payload, sizeof(payload));
+        return;
+    }
+    if (state == kSendRecoverySkip) {
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kIdlePollMs));
+        InterlockedExchange(&g_state, kWaitingBattle);
+        SendPacket(0x52C4, nullptr, 0);
+        return;
+    }
+    if (state == kSendFastBattleRetry) {
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kBattlePollMs));
+        InterlockedExchange(&g_state, kWaitingBattle);
+        SendPacket(0x37A4, nullptr, 0);
+        return;
+    }
+    if (state == kSendFormation) {
+        BYTE payload[2 + kMaxHeroes * 4 + 4]{};
+        BYTE* cursor = payload;
+        WriteU16(cursor, static_cast<uint16_t>(g_heroCount));
+        for (size_t index = 0; index < g_heroCount; ++index) WriteU32(cursor, g_heroes[index].heroId);
+        WriteU32(cursor, static_cast<uint32_t>(g_selectedOption));
+        InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+        InterlockedExchange(&g_state, kWaitingFormationSave);
+        SendPacket(0x52BD, payload, static_cast<uint32_t>(cursor - payload));
+        return;
+    }
+    if (state == kRepeatChallenge) {
+        BYTE payload[4]{};
+        BYTE* cursor = payload;
+        WriteU32(cursor, static_cast<uint32_t>(g_selectedOption));
+        InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+        InterlockedExchange(&g_state, kWaitingFormation);
+        SendPacket(0x52BB, payload, sizeof(payload));
+        return;
+    }
+    if (state == kStartBattle) {
+        BYTE payload[4 + 1 + 2 + kMaxHeroes * 8]{};
+        BYTE* cursor = payload;
+        WriteU32(cursor, static_cast<uint32_t>(g_battleId));
+        *cursor++ = 37;
+        BYTE* countCursor = cursor;
+        cursor += 2;
+        uint16_t usableCount = 0;
+        for (size_t index = 0; index < g_heroCount; ++index) {
+            const Hero& hero = g_heroes[index];
+            if (hero.currentHp == 0 || hero.disabled) continue;
+            WriteU32(cursor, hero.uuidHigh);
+            WriteU32(cursor, hero.uuidLow);
+            ++usableCount;
+        }
+        WriteU16(countCursor, usableCount);
+        if (usableCount == 0) {
+            PauseForReset();
+            return;
+        }
+        wcscpy_s(g_battleStageText, g_stageText);
+        InterlockedExchange(&g_battleActive, 1);
+        InterlockedExchange(&g_fastBattleRetrySent, 0);
+        InterlockedExchange(&g_battleStartTick, static_cast<LONG>(now));
+        InterlockedExchange(&g_pendingLog, 1);
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kBattlePollMs));
+        InterlockedExchange(&g_state, kWaitingBattle);
+        SendPacket(0x145A, payload, static_cast<uint32_t>(cursor - payload));
+        SendPacket(0x37A4, nullptr, 0);
+        return;
+    }
+    if (state == kSendBuffReplace) {
+        BYTE payload[4]{};
+        BYTE* cursor = payload;
+        WriteU32(cursor, static_cast<uint32_t>(g_replaceTemplateId));
+        InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+        InterlockedExchange(&g_state, kWaitingBuffReplace);
+        SendPacket(0x52BF, payload, sizeof(payload));
+        return;
+    }
+    if (state == kWaitingBattle) {
+        if (TickReached(now, g_nextTick)) QueryPanel(now);
+        return;
+    }
+    if (state == kIdle && TickReached(now, g_nextTick)) QueryPanel(now);
+}
+
+void Tick()
+{
+    if (InterlockedCompareExchange(&g_tickRunning, 1, 0) != 0) return;
+    __try {
+        TickImpl();
+    } __finally {
+        InterlockedExchange(&g_tickRunning, 0);
+    }
+}
+
+}
+
+namespace HuanJing
+{
+constexpr DWORD kIdlePollMs = 3000;
+constexpr DWORD kResponseTimeoutMs = 15000;
+constexpr DWORD kMoveStepDelayMs = 1200;
+constexpr DWORD kFastBattleDelayMs = 2000;
+constexpr DWORD kAfterBattleDelayMs = 1800;
+constexpr DWORD kNoCandidateDelayMs = 30000;
+constexpr size_t kMaxCityId = 252;
+constexpr size_t kMaxHeroes = 16;
+
+enum State : LONG
+{
+    kIdle = 0,
+    kWaitingMap = 1,
+    kWaitingProgressReward = 2,
+    kWaitingPreview = 3,
+    kWaitingCityInfo = 4,
+    kWaitingMoveAck = 5,
+    kMoveStepDelay = 6,
+    kWaitingBattleInfo = 7,
+    kFastBattleDelay = 8,
+    kWaitingTreasure = 9,
+    kRefreshAfterBattle = 10
+};
+
+struct PacketReader
+{
+    const BYTE* cursor = nullptr;
+    const BYTE* end = nullptr;
+
+    bool ReadByte(BYTE& value)
+    {
+        if (!cursor || cursor >= end) return false;
+        value = *cursor++;
+        return true;
+    }
+
+    bool ReadU16(uint16_t& value)
+    {
+        if (!cursor || cursor + 2 > end) return false;
+        value = ReadBe16Unaligned(cursor);
+        cursor += 2;
+        return true;
+    }
+
+    bool ReadU32(uint32_t& value)
+    {
+        if (!cursor || cursor + 4 > end) return false;
+        value = ReadBe32Unaligned(cursor);
+        cursor += 4;
+        return true;
+    }
+
+    bool Skip(size_t size)
+    {
+        if (!cursor || size > static_cast<size_t>(end - cursor)) return false;
+        cursor += size;
+        return true;
+    }
+
+    bool SkipUtf()
+    {
+        uint16_t length = 0;
+        return ReadU16(length) && Skip(length);
+    }
+};
+
+struct Candidate
+{
+    uint32_t cityId = 0;
+    std::vector<uint16_t> path;
+};
+
+struct HeroUuid
+{
+    BYTE bytes[8]{};
+};
+
+volatile LONG g_tickRunning = 0;
+volatile LONG g_wasEnabled = 0;
+volatile LONG g_state = kIdle;
+volatile LONG g_nextTick = 0;
+volatile LONG g_deadlineTick = 0;
+volatile LONG g_grade = 0;
+volatile LONG g_currentCity = 0;
+volatile LONG g_currentTimes = -1;
+volatile LONG g_haveMap = 0;
+volatile LONG g_haveCurrentCity = 0;
+volatile LONG g_progressReward = 0;
+volatile LONG g_checkingCity = 0;
+volatile LONG g_moveTarget = 0;
+volatile LONG g_battleId = 0;
+volatile LONG g_dailyPauseDate = 0;
+volatile LONG g_parseErrors = 0;
+volatile LONG g_routerHits = 0;
+volatile LONG g_roadLoaded = 0;
+volatile LONG g_roadLoadFailed = 0;
+volatile LONG g_testBypassReady = 0;
+volatile LONG g_testMoveSends = 0;
+volatile LONG g_testStepSends = 0;
+volatile LONG g_testBattleInfoSends = 0;
+volatile LONG g_testStartBattleSends = 0;
+volatile LONG g_testBattleEnds = 0;
+std::vector<uint16_t> g_adjacency[kMaxCityId + 1];
+BYTE g_cityUnlocked[kMaxCityId + 1]{};
+std::vector<Candidate> g_candidates;
+std::vector<uint16_t> g_movePath;
+size_t g_moveIndex = 0;
+HeroUuid g_heroes[kMaxHeroes]{};
+size_t g_heroCount = 0;
+SRWLOCK g_lock = SRWLOCK_INIT;
+
+bool IsEnabled()
+{
+    return TaskDispatchUi::g_huanJingSwitch != 0;
+}
+
+bool TickReached(DWORD now, LONG target)
+{
+    return target == 0 || static_cast<LONG>(now - static_cast<DWORD>(target)) >= 0;
+}
+
+LONG DateKey(const SYSTEMTIME& time)
+{
+    return static_cast<LONG>(time.wYear * 10000 + time.wMonth * 100 + time.wDay);
+}
+
+void WriteU16(BYTE*& cursor, uint16_t value)
+{
+    *cursor++ = static_cast<BYTE>((value >> 8) & 0xFF);
+    *cursor++ = static_cast<BYTE>(value & 0xFF);
+}
+
+void WriteU32(BYTE*& cursor, uint32_t value)
+{
+    *cursor++ = static_cast<BYTE>((value >> 24) & 0xFF);
+    *cursor++ = static_cast<BYTE>((value >> 16) & 0xFF);
+    *cursor++ = static_cast<BYTE>((value >> 8) & 0xFF);
+    *cursor++ = static_cast<BYTE>(value & 0xFF);
+}
+
+void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket = reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(opcode, payload, payloadLength);
+}
+
+void SendOneU32(uint32_t opcode, uint32_t value)
+{
+    BYTE payload[4]{};
+    BYTE* cursor = payload;
+    WriteU32(cursor, value);
+    SendPacket(opcode, payload, sizeof(payload));
+}
+
+void SendTwoU32(uint32_t opcode, uint32_t first, uint32_t second)
+{
+    BYTE payload[8]{};
+    BYTE* cursor = payload;
+    WriteU32(cursor, first);
+    WriteU32(cursor, second);
+    SendPacket(opcode, payload, sizeof(payload));
+}
+
+void SetWaiting(State state, DWORD now, DWORD timeout = kResponseTimeoutMs)
+{
+    InterlockedExchange(&g_state, state);
+    InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + timeout));
+}
+
+void ResetTransient()
+{
+    AcquireSRWLockExclusive(&g_lock);
+    g_candidates.clear();
+    g_movePath.clear();
+    g_moveIndex = 0;
+    ReleaseSRWLockExclusive(&g_lock);
+    InterlockedExchange(&g_state, kIdle);
+    InterlockedExchange(&g_nextTick, 0);
+    InterlockedExchange(&g_deadlineTick, 0);
+    InterlockedExchange(&g_grade, 0);
+    InterlockedExchange(&g_currentCity, 0);
+    InterlockedExchange(&g_currentTimes, -1);
+    InterlockedExchange(&g_haveMap, 0);
+    InterlockedExchange(&g_haveCurrentCity, 0);
+    InterlockedExchange(&g_progressReward, 0);
+    InterlockedExchange(&g_checkingCity, 0);
+    InterlockedExchange(&g_moveTarget, 0);
+    InterlockedExchange(&g_battleId, 0);
+}
+
+bool AppendRoadEdge(uint16_t first, uint16_t second)
+{
+    if (first == 0 || second == 0 || first > kMaxCityId || second > kMaxCityId) return false;
+    g_adjacency[first].push_back(second);
+    g_adjacency[second].push_back(first);
+    return true;
+}
+
+bool ParseRoadBytes(const char* data, size_t size)
+{
+    if (!data || size == 0) return false;
+    size_t edgeCount = 0;
+    const char* cursor = data;
+    const char* end = data + size;
+    static constexpr char marker[] = "city=\"";
+    while (cursor + sizeof(marker) < end) {
+        const char* found = std::strstr(cursor, marker);
+        if (!found || found >= end) break;
+        const char* number = found + sizeof(marker) - 1;
+        uint32_t first = 0;
+        uint32_t second = 0;
+        bool firstDigit = false;
+        while (number < end && *number >= '0' && *number <= '9') {
+            firstDigit = true;
+            first = first * 10 + static_cast<uint32_t>(*number++ - '0');
+        }
+        if (!firstDigit || number >= end || *number++ != '-') {
+            cursor = found + 1;
+            continue;
+        }
+        bool secondDigit = false;
+        while (number < end && *number >= '0' && *number <= '9') {
+            secondDigit = true;
+            second = second * 10 + static_cast<uint32_t>(*number++ - '0');
+        }
+        if (secondDigit && AppendRoadEdge(static_cast<uint16_t>(first), static_cast<uint16_t>(second))) {
+            ++edgeCount;
+        }
+        cursor = number;
+    }
+    return edgeCount > 0;
+}
+
+bool LoadRoadGraph()
+{
+    if (g_roadLoaded != 0) return true;
+    if (g_roadLoadFailed != 0) return false;
+
+    wchar_t programFiles[MAX_PATH]{};
+    DWORD length = GetEnvironmentVariableW(L"ProgramFiles(x86)", programFiles, _countof(programFiles));
+    if (length == 0 || length >= _countof(programFiles)) {
+        wcscpy_s(programFiles, L"C:\\Program Files (x86)");
+    }
+    std::wstring path(programFiles);
+    path += L"\\\x4E00\x7D71\x5929\x4E0B\\media\\zh_TW\\config\\dreamland\\road.xml";
+
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        InterlockedExchange(&g_roadLoadFailed, 1);
+        GameLog::Write(L"\x5E7B\x5883\xFF1A\x7121\x6CD5\x8B80\x53D6 road.xml");
+        return false;
+    }
+
+    LARGE_INTEGER fileSize{};
+    bool success = GetFileSizeEx(file, &fileSize) != FALSE &&
+        fileSize.QuadPart > 0 && fileSize.QuadPart <= 4 * 1024 * 1024;
+    std::vector<char> bytes;
+    if (success) {
+        bytes.resize(static_cast<size_t>(fileSize.QuadPart) + 1);
+        DWORD read = 0;
+        success = ReadFile(file, bytes.data(), static_cast<DWORD>(fileSize.QuadPart), &read, nullptr) != FALSE &&
+            read == static_cast<DWORD>(fileSize.QuadPart);
+        bytes[read] = '\0';
+    }
+    CloseHandle(file);
+
+    if (success) {
+        success = ParseRoadBytes(bytes.data(), static_cast<size_t>(fileSize.QuadPart));
+    }
+    if (!success) {
+        InterlockedExchange(&g_roadLoadFailed, 1);
+        GameLog::Write(L"\x5E7B\x5883\xFF1A\x9053\x8DEF\x8A2D\x5B9A\x89E3\x6790\x5931\x6557");
+        return false;
+    }
+
+    InterlockedExchange(&g_roadLoaded, 1);
+    return true;
+}
+
+std::vector<uint16_t> FindShortestPath(uint16_t start, uint16_t target)
+{
+    std::vector<uint16_t> empty;
+    if (start == 0 || target == 0 || start > kMaxCityId || target > kMaxCityId) return empty;
+    if (start == target) return std::vector<uint16_t>{ start };
+
+    uint16_t previous[kMaxCityId + 1]{};
+    BYTE visited[kMaxCityId + 1]{};
+    uint16_t queue[kMaxCityId + 1]{};
+    size_t head = 0;
+    size_t tail = 0;
+    queue[tail++] = start;
+    visited[start] = 1;
+
+    while (head < tail) {
+        const uint16_t current = queue[head++];
+        for (uint16_t next : g_adjacency[current]) {
+            if (next == 0 || next > kMaxCityId || visited[next]) continue;
+            if (next != target && next != start && g_cityUnlocked[next] == 0) continue;
+            visited[next] = 1;
+            previous[next] = current;
+            if (next == target) {
+                head = tail;
+                break;
+            }
+            if (tail < _countof(queue)) queue[tail++] = next;
+        }
+    }
+    if (!visited[target]) return empty;
+
+    std::vector<uint16_t> path;
+    for (uint16_t city = target; city != 0; city = previous[city]) {
+        path.push_back(city);
+        if (city == start) break;
+    }
+    if (path.empty() || path.back() != start) return empty;
+    std::reverse(path.begin(), path.end());
+    return path;
+}
+
+bool SkipBuff(PacketReader& reader)
+{
+    uint32_t ignored = 0;
+    BYTE byte = 0;
+    return reader.ReadU32(ignored) && reader.SkipUtf() && reader.ReadU32(ignored) &&
+        reader.SkipUtf() && reader.ReadU32(ignored) && reader.ReadByte(byte) && reader.SkipUtf();
+}
+
+bool ParseMap(const BYTE* payload, uint32_t payloadLength, LONG& grade, LONG& currentTimes, LONG& progressReward)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    BYTE parsedUnlocked[kMaxCityId + 1]{};
+    uint16_t cityCount = 0;
+    if (!reader.ReadU16(cityCount) || cityCount > 512) return false;
+    for (uint16_t index = 0; index < cityCount; ++index) {
+        uint16_t cityId = 0;
+        BYTE initCountry = 0;
+        BYTE country = 0;
+        BYTE unlocked = 0;
+        BYTE fighting = 0;
+        uint16_t buffCount = 0;
+        if (!reader.ReadU16(cityId) || !reader.ReadByte(initCountry) || !reader.ReadByte(country) ||
+            !reader.ReadByte(unlocked) || !reader.ReadByte(fighting) || !reader.ReadU16(buffCount) ||
+            buffCount > 256) return false;
+        if (cityId > 0 && cityId <= kMaxCityId) {
+            parsedUnlocked[cityId] = unlocked != 0 ? 1 : 0;
+        }
+        for (uint16_t buff = 0; buff < buffCount; ++buff) {
+            if (!SkipBuff(reader)) return false;
+        }
+        if (!reader.SkipUtf()) return false;
+    }
+
+    uint16_t dreamCityCount = 0;
+    if (!reader.ReadU16(dreamCityCount) || dreamCityCount > 512) return false;
+    for (uint16_t index = 0; index < dreamCityCount; ++index) {
+        uint16_t cityId = 0;
+        uint32_t heroHead = 0;
+        if (!reader.ReadU16(cityId) || !reader.ReadU32(heroHead) || !reader.SkipUtf()) return false;
+    }
+
+    uint32_t initCity = 0;
+    uint32_t country = 0;
+    uint32_t parsedGrade = 0;
+    uint32_t parsedTimes = 0;
+    uint32_t maxTimes = 0;
+    uint32_t killed = 0;
+    BYTE parsedProgress = 0;
+    if (!reader.ReadU32(initCity) || !reader.ReadU32(country) || !reader.ReadU32(parsedGrade) ||
+        !reader.SkipUtf() || !reader.ReadU32(parsedTimes) || !reader.ReadU32(maxTimes) ||
+        !reader.ReadU32(killed) || !reader.ReadByte(parsedProgress) || !reader.SkipUtf()) return false;
+
+    grade = static_cast<LONG>(parsedGrade);
+    currentTimes = static_cast<LONG>(parsedTimes);
+    progressReward = parsedProgress != 0 ? 1 : 0;
+    AcquireSRWLockExclusive(&g_lock);
+    std::memcpy(g_cityUnlocked, parsedUnlocked, sizeof(g_cityUnlocked));
+    ReleaseSRWLockExclusive(&g_lock);
+    return grade > 0;
+}
+
+bool ParseSyncCharacter(const BYTE* payload, uint32_t payloadLength, LONG& grade, LONG& currentCity)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint32_t parsedGrade = 0;
+    uint32_t ignored = 0;
+    uint32_t parsedCity = 0;
+    if (!reader.ReadU32(parsedGrade) || !reader.Skip(8) || !reader.ReadU32(ignored) ||
+        !reader.ReadU32(parsedCity) || !reader.SkipUtf()) return false;
+    grade = static_cast<LONG>(parsedGrade);
+    currentCity = static_cast<LONG>(parsedCity);
+    return grade > 0 && currentCity > 0;
+}
+
+bool ParseProgressReward(const BYTE* payload, uint32_t payloadLength, uint32_t& grade, uint32_t& claimCity)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint16_t rewardCount = 0;
+    claimCity = 0;
+    if (!reader.ReadU32(grade) || !reader.ReadU16(rewardCount) || rewardCount > 256) return false;
+    for (uint16_t index = 0; index < rewardCount; ++index) {
+        uint32_t cityNum = 0;
+        uint32_t rewardState = 0;
+        uint16_t bonusCount = 0;
+        if (!reader.ReadU32(cityNum) || !reader.ReadU32(rewardState) ||
+            !reader.ReadU16(bonusCount) || bonusCount > 256) return false;
+        for (uint16_t bonus = 0; bonus < bonusCount; ++bonus) {
+            uint16_t type = 0;
+            uint32_t value = 0;
+            if (!reader.ReadU16(type) || !reader.ReadU32(value) || !reader.SkipUtf()) return false;
+        }
+        if (!reader.SkipUtf()) return false;
+        if (claimCity == 0 && rewardState == 1) claimCity = cityNum;
+    }
+    return reader.SkipUtf();
+}
+
+bool ParsePreview(const BYTE* payload, uint32_t payloadLength, uint32_t& grade, std::vector<uint32_t>& cityIds)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint16_t count = 0;
+    if (!reader.ReadU32(grade) || !reader.ReadU16(count) || count > 512) return false;
+    cityIds.clear();
+    for (uint16_t index = 0; index < count; ++index) {
+        uint32_t cityId = 0;
+        uint32_t cityState = 0;
+        uint32_t treasureState = 0;
+        if (!reader.ReadU32(cityId) || !reader.SkipUtf() || !reader.SkipUtf() ||
+            !reader.ReadU32(cityState) || !reader.ReadU32(treasureState) || !reader.SkipUtf()) return false;
+        if (cityState == 0) cityIds.push_back(cityId);
+    }
+    return reader.SkipUtf();
+}
+
+bool ParseCityInfo(const BYTE* payload, uint32_t payloadLength, bool& unlocked, BYTE& state)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint32_t ignored = 0;
+    uint16_t count = 0;
+    unlocked = true;
+    state = 0xFF;
+    if (!reader.ReadU32(ignored) || !reader.SkipUtf() || !reader.ReadU32(ignored) ||
+        !reader.SkipUtf() || !reader.ReadU16(count) || count > 256) return false;
+    for (uint16_t index = 0; index < count; ++index) {
+        if (!reader.SkipUtf()) return false;
+    }
+    if (!reader.ReadU16(count) || count > 256) return false;
+    for (uint16_t index = 0; index < count; ++index) {
+        BYTE alreadyHave = 0;
+        if (!reader.ReadU32(ignored) || !reader.SkipUtf() || !reader.ReadByte(alreadyHave) ||
+            !reader.SkipUtf()) return false;
+        if (alreadyHave == 0) unlocked = false;
+    }
+    if (!reader.ReadU16(count) || count > 256) return false;
+    for (uint16_t index = 0; index < count; ++index) {
+        uint16_t type = 0;
+        if (!reader.ReadU16(type) || !reader.ReadU32(ignored) || !reader.SkipUtf()) return false;
+    }
+    return reader.ReadByte(state) && reader.ReadU32(ignored) && reader.SkipUtf() && reader.SkipUtf();
+}
+
+bool ParseBattleInfo(const BYTE* payload, uint32_t payloadLength, uint32_t& battleId,
+    BYTE& battleType, uint16_t& currentTimes)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint16_t roleCount = 0;
+    if (!reader.ReadU16(roleCount) || roleCount > 256) return false;
+    for (uint16_t role = 0; role < roleCount; ++role) {
+        uint32_t ignored = 0;
+        uint16_t ignored16 = 0;
+        uint16_t tacticCount = 0;
+        if (!reader.SkipUtf() || !reader.ReadU32(ignored) || !reader.ReadU32(ignored) ||
+            !reader.ReadU32(ignored) || !reader.ReadU32(ignored) || !reader.ReadU16(ignored16) ||
+            !reader.SkipUtf() || !reader.ReadU16(tacticCount) || tacticCount > 256) return false;
+        for (uint16_t tactic = 0; tactic < tacticCount; ++tactic) {
+            if (!reader.ReadU32(ignored) || !reader.SkipUtf()) return false;
+        }
+        if (!reader.ReadU32(ignored) || !reader.SkipUtf()) return false;
+    }
+    uint32_t mapId = 0;
+    uint32_t ignored = 0;
+    BYTE packetBattleType = 0;
+    uint16_t terrain = 0;
+    if (!reader.ReadU32(battleId) || !reader.ReadU32(mapId) ||
+        !reader.ReadByte(packetBattleType) || !reader.SkipUtf() || !reader.ReadU16(terrain) ||
+        !reader.ReadU32(ignored) || !reader.ReadU32(ignored) || !reader.SkipUtf() ||
+        !reader.SkipUtf()) return false;
+    battleType = packetBattleType;
+    currentTimes = static_cast<uint16_t>(g_currentTimes > 0 ? g_currentTimes : 0);
+    return true;
+}
+
+bool ParseHero(PacketReader& reader, size_t index, HeroUuid& output, bool& usable)
+{
+    const BYTE* uuid = reader.cursor;
+    if (!reader.Skip(8) || !reader.SkipUtf() || !reader.SkipUtf() || !reader.Skip(0x1A)) return false;
+    BYTE heroState = 0;
+    uint16_t roleType = 0;
+    BYTE bonusType = 0;
+    uint32_t ignored = 0;
+    uint16_t tacticCount = 0;
+    if (!reader.ReadByte(heroState) || !reader.ReadU16(roleType) || !reader.ReadByte(bonusType) ||
+        !reader.SkipUtf() || !reader.ReadU32(ignored) || !reader.ReadU16(tacticCount) ||
+        tacticCount > 256) return false;
+    for (uint16_t tactic = 0; tactic < tacticCount; ++tactic) {
+        if (!reader.ReadU32(ignored) || !reader.SkipUtf()) return false;
+    }
+    if (!reader.SkipUtf()) return false;
+    std::memcpy(output.bytes, uuid, sizeof(output.bytes));
+    usable = index < 5 && heroState == 1 && roleType != 4;
+    return true;
+}
+
+bool ParseHeroList(PacketReader& reader, bool store)
+{
+    uint16_t count = 0;
+    if (!reader.ReadU16(count) || count > 256) return false;
+    for (uint16_t index = 0; index < count; ++index) {
+        HeroUuid uuid{};
+        bool usable = false;
+        if (!ParseHero(reader, index, uuid, usable)) return false;
+        if (store && usable && g_heroCount < kMaxHeroes) {
+            g_heroes[g_heroCount++] = uuid;
+        }
+    }
+    return true;
+}
+
+void HandleHeroList(const BYTE* payload, uint32_t payloadLength)
+{
+    if (!payload || payloadLength < 0x12) return;
+    PacketReader reader{ payload + 0x10, payload + payloadLength };
+    HeroUuid parsed[kMaxHeroes]{};
+    HeroUuid old[kMaxHeroes]{};
+    std::memcpy(old, g_heroes, sizeof(old));
+    const size_t oldCount = g_heroCount;
+    g_heroCount = 0;
+    if (!ParseHeroList(reader, true) || !ParseHeroList(reader, false)) {
+        std::memcpy(g_heroes, old, sizeof(old));
+        g_heroCount = oldCount;
+        InterlockedIncrement(&g_parseErrors);
+    }
+}
+
+void SendEnterMap(uint32_t grade, DWORD now)
+{
+    SendOneU32(0x49D5, grade);
+    SetWaiting(kWaitingMap, now);
+}
+
+void SendProgressQuery(DWORD now)
+{
+    SendOneU32(0x49E0, static_cast<uint32_t>(g_grade));
+    SetWaiting(kWaitingProgressReward, now);
+}
+
+void SendPreview(DWORD now)
+{
+    if (g_grade <= 0 || g_currentCity <= 0) {
+        SendEnterMap(0, now);
+        return;
+    }
+    SendOneU32(0x49E2, static_cast<uint32_t>(g_grade));
+    SetWaiting(kWaitingPreview, now);
+}
+
+void SendNextCandidate(DWORD now)
+{
+    Candidate candidate{};
+    bool hasCandidate = false;
+    AcquireSRWLockExclusive(&g_lock);
+    if (!g_candidates.empty()) {
+        candidate = g_candidates.front();
+        g_candidates.erase(g_candidates.begin());
+        hasCandidate = true;
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    if (!hasCandidate) {
+        InterlockedExchange(&g_state, kIdle);
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kNoCandidateDelayMs));
+        GameLog::Write(L"\x5E7B\x5883\xFF1A\x6C92\x6709\x53EF\x79FB\x52D5\x7684\x672A\x4F54\x9818\x57CE\x6C60");
+        return;
+    }
+    InterlockedExchange(&g_checkingCity, static_cast<LONG>(candidate.cityId));
+    AcquireSRWLockExclusive(&g_lock);
+    g_movePath = candidate.path;
+    g_moveIndex = 0;
+    ReleaseSRWLockExclusive(&g_lock);
+    SendTwoU32(0x49DA, static_cast<uint32_t>(g_grade), candidate.cityId);
+    SetWaiting(kWaitingCityInfo, now);
+}
+
+void SendMoveRequest(DWORD now)
+{
+    std::vector<uint16_t> path;
+    AcquireSRWLockShared(&g_lock);
+    path = g_movePath;
+    ReleaseSRWLockShared(&g_lock);
+    if (path.size() < 2 || path.size() > kMaxCityId) {
+        SendNextCandidate(now);
+        return;
+    }
+
+    std::vector<BYTE> payload(8 + path.size() * 2);
+    BYTE* cursor = payload.data();
+    WriteU32(cursor, static_cast<uint32_t>(g_grade));
+    WriteU16(cursor, path.back());
+    WriteU16(cursor, static_cast<uint16_t>(path.size()));
+    for (uint16_t city : path) WriteU16(cursor, city);
+    InterlockedIncrement(&g_testMoveSends);
+    SendPacket(0x49D2, payload.data(), static_cast<uint32_t>(cursor - payload.data()));
+
+    AcquireSRWLockExclusive(&g_lock);
+    g_moveIndex = 1;
+    const uint16_t firstStep = g_movePath[g_moveIndex];
+    ReleaseSRWLockExclusive(&g_lock);
+    BYTE stepPayload[6]{};
+    cursor = stepPayload;
+    WriteU32(cursor, static_cast<uint32_t>(g_grade));
+    WriteU16(cursor, firstStep);
+    InterlockedIncrement(&g_testStepSends);
+    SendPacket(0x49D3, stepPayload, sizeof(stepPayload));
+    InterlockedExchange(&g_moveTarget, path.back());
+    SetWaiting(kWaitingMoveAck, now);
+    GameLog::Write(L"\x5E7B\x5883\xFF1A\x79FB\x52D5\x81F3\x57CE\x6C60 %u",
+        static_cast<unsigned>(path.back()));
+}
+
+void SendNextMoveStep(DWORD now)
+{
+    uint16_t nextCity = 0;
+    bool finalReached = false;
+    AcquireSRWLockExclusive(&g_lock);
+    if (g_moveIndex + 1 < g_movePath.size()) {
+        ++g_moveIndex;
+        nextCity = g_movePath[g_moveIndex];
+    } else {
+        finalReached = true;
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+
+    if (finalReached) {
+        InterlockedIncrement(&g_testBattleInfoSends);
+        SendTwoU32(0x49DC, static_cast<uint32_t>(g_grade), static_cast<uint32_t>(g_moveTarget));
+        SetWaiting(kWaitingBattleInfo, now);
+        return;
+    }
+
+    BYTE payload[6]{};
+    BYTE* cursor = payload;
+    WriteU32(cursor, static_cast<uint32_t>(g_grade));
+    WriteU16(cursor, nextCity);
+    InterlockedIncrement(&g_testStepSends);
+    SendPacket(0x49D3, payload, sizeof(payload));
+    SetWaiting(kWaitingMoveAck, now);
+}
+
+void SendStartBattle(uint32_t battleId, DWORD now)
+{
+    HeroUuid heroes[kMaxHeroes]{};
+    const size_t heroCount = AlBattle::CopyReadyHeroUuids(
+        reinterpret_cast<BYTE*>(heroes), kMaxHeroes);
+    if (heroCount == 0) {
+        InterlockedExchange(&g_state, kIdle);
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kIdlePollMs));
+        GameLog::Write(L"\x5E7B\x5883\xFF1A\x5C1A\x7121\x53EF\x4E0A\x9663\x6B66\x5C07");
+        return;
+    }
+    BYTE payload[4 + 1 + 2 + kMaxHeroes * 8]{};
+    BYTE* cursor = payload;
+    WriteU32(cursor, battleId);
+    *cursor++ = 33;
+    WriteU16(cursor, static_cast<uint16_t>(heroCount));
+    for (size_t index = 0; index < heroCount; ++index) {
+        std::memcpy(cursor, heroes[index].bytes, sizeof(heroes[index].bytes));
+        cursor += sizeof(heroes[index].bytes);
+    }
+    InterlockedIncrement(&g_testStartBattleSends);
+    SendPacket(0x145A, payload, static_cast<uint32_t>(cursor - payload));
+    InterlockedExchange(&g_battleId, static_cast<LONG>(battleId));
+    InterlockedExchange(&g_state, kFastBattleDelay);
+    InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kFastBattleDelayMs));
+    InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+    GameLog::Write(L"\x5E7B\x5883\xFF1A\x958B\x59CB\x6230\x9B25");
+}
+
+void HandleMap(const BYTE* payload, uint32_t payloadLength, DWORD now)
+{
+    LONG grade = 0;
+    LONG currentTimes = 0;
+    LONG progress = 0;
+    if (!ParseMap(payload, payloadLength, grade, currentTimes, progress)) {
+        InterlockedIncrement(&g_parseErrors);
+        return;
+    }
+    InterlockedExchange(&g_grade, grade);
+    InterlockedExchange(&g_currentTimes, currentTimes);
+    InterlockedExchange(&g_progressReward, progress);
+    InterlockedExchange(&g_haveMap, 1);
+
+    if (currentTimes <= 0) {
+        SYSTEMTIME local{};
+        GetLocalTime(&local);
+        InterlockedExchange(&g_dailyPauseDate, DateKey(local));
+        ResetTransient();
+        GameLog::Write(L"\x5E7B\x5883\xFF1A\x6311\x6230\x6B21\x6578\x5DF2\x7528\x5B8C\xFF0C\x9694\x65E5 00:01 \x518D\x57F7\x884C");
+        return;
+    }
+    if (g_state != kWaitingMap) {
+        return;
+    }
+    if (progress != 0) {
+        SendProgressQuery(now);
+        return;
+    }
+    if (g_haveCurrentCity != 0) SendPreview(now);
+}
+
+void HandleSync(const BYTE* payload, uint32_t payloadLength, DWORD now)
+{
+    LONG grade = 0;
+    LONG city = 0;
+    if (!ParseSyncCharacter(payload, payloadLength, grade, city)) {
+        InterlockedIncrement(&g_parseErrors);
+        return;
+    }
+    InterlockedExchange(&g_grade, grade);
+    InterlockedExchange(&g_currentCity, city);
+    InterlockedExchange(&g_haveCurrentCity, 1);
+    if (g_state == kWaitingMap && g_haveMap != 0 &&
+        g_currentTimes > 0 && g_progressReward == 0) SendPreview(now);
+}
+
+void HandleProgress(const BYTE* payload, uint32_t payloadLength, DWORD now)
+{
+    if (g_state != kWaitingProgressReward) return;
+    uint32_t grade = 0;
+    uint32_t claimCity = 0;
+    if (!ParseProgressReward(payload, payloadLength, grade, claimCity)) {
+        InterlockedIncrement(&g_parseErrors);
+        return;
+    }
+    if (claimCity != 0) {
+        SendTwoU32(0x49E5, grade, claimCity);
+        InterlockedExchange(&g_state, kWaitingProgressReward);
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + 700));
+        InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+        GameLog::Write(L"\x5E7B\x5883\xFF1A\x9818\x53D6\x7D2F\x7A4D\x901A\x95DC\x734E\x52F5 %u",
+            static_cast<unsigned>(claimCity));
+        return;
+    }
+    SendPreview(now);
+}
+
+void HandlePreview(const BYTE* payload, uint32_t payloadLength, DWORD now)
+{
+    if (g_state != kWaitingPreview) return;
+    uint32_t grade = 0;
+    std::vector<uint32_t> cityIds;
+    if (!ParsePreview(payload, payloadLength, grade, cityIds) || !LoadRoadGraph()) {
+        InterlockedIncrement(&g_parseErrors);
+        return;
+    }
+    std::vector<Candidate> candidates;
+    const uint16_t current = static_cast<uint16_t>(g_currentCity);
+    for (uint32_t cityId : cityIds) {
+        if (cityId == static_cast<uint32_t>(current) || cityId > kMaxCityId) continue;
+        Candidate candidate{};
+        candidate.cityId = cityId;
+        candidate.path = FindShortestPath(current, static_cast<uint16_t>(cityId));
+        if (candidate.path.size() > 1) candidates.push_back(candidate);
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& first, const Candidate& second) {
+        if (first.path.size() != second.path.size()) return first.path.size() < second.path.size();
+        return first.cityId < second.cityId;
+    });
+    AcquireSRWLockExclusive(&g_lock);
+    g_candidates.swap(candidates);
+    ReleaseSRWLockExclusive(&g_lock);
+    SendNextCandidate(now);
+}
+
+void HandleCityInfo(const BYTE* payload, uint32_t payloadLength, DWORD now)
+{
+    if (g_state != kWaitingCityInfo) return;
+    bool unlocked = false;
+    BYTE state = 0xFF;
+    if (!ParseCityInfo(payload, payloadLength, unlocked, state)) {
+        InterlockedIncrement(&g_parseErrors);
+        return;
+    }
+    if (state == 0 && unlocked) {
+        SendMoveRequest(now);
+    } else {
+        SendNextCandidate(now);
+    }
+}
+
+void HandleMoveAck(const BYTE* payload, uint32_t payloadLength, DWORD now)
+{
+    if (g_state != kWaitingMoveAck) return;
+    PacketReader reader{ payload, payload + payloadLength };
+    uint32_t grade = 0;
+    uint16_t fromCity = 0;
+    uint16_t toCity = 0;
+    if (!reader.ReadU32(grade) || !reader.ReadU16(fromCity) || !reader.ReadU16(toCity) ||
+        !reader.SkipUtf()) {
+        InterlockedIncrement(&g_parseErrors);
+        return;
+    }
+    InterlockedExchange(&g_currentCity, toCity);
+    InterlockedExchange(&g_state, kMoveStepDelay);
+    InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kMoveStepDelayMs));
+    InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+}
+
+void HandleBattleInfo(const BYTE* payload, uint32_t payloadLength, DWORD now)
+{
+    if (g_state != kWaitingBattleInfo) return;
+    uint32_t battleId = 0;
+    BYTE battleType = 0;
+    uint16_t currentTimes = 0;
+    if (!ParseBattleInfo(payload, payloadLength, battleId, battleType, currentTimes)) {
+        InterlockedIncrement(&g_parseErrors);
+        return;
+    }
+    if (battleType != 33 || battleId == 0 || currentTimes == 0) {
+        SendEnterMap(static_cast<uint32_t>(g_grade), now);
+        return;
+    }
+    SendStartBattle(battleId, now);
+}
+
+void HandleTreasure(const BYTE* payload, uint32_t payloadLength, DWORD now)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint32_t grade = 0;
+    uint16_t count = 0;
+    if (!reader.ReadU32(grade) || !reader.ReadU16(count) || count > 256) {
+        InterlockedIncrement(&g_parseErrors);
+        return;
+    }
+    for (uint16_t index = 0; index < count; ++index) {
+        uint32_t cityId = 0;
+        if (!reader.ReadU32(cityId)) {
+            InterlockedIncrement(&g_parseErrors);
+            return;
+        }
+        SendTwoU32(0x49DF, grade, cityId);
+    }
+    if (!reader.SkipUtf()) {
+        InterlockedIncrement(&g_parseErrors);
+        return;
+    }
+    if (g_state == kWaitingTreasure) {
+        InterlockedExchange(&g_state, kRefreshAfterBattle);
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kAfterBattleDelayMs));
+        InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+    }
+}
+
+void HandleBattleEnd(DWORD now)
+{
+    if (g_state != kWaitingTreasure && g_state != kFastBattleDelay) {
+        return;
+    }
+    InterlockedIncrement(&g_testBattleEnds);
+    InterlockedExchange(&g_state, kRefreshAfterBattle);
+    InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kAfterBattleDelayMs));
+    InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    const uint32_t packetOpcode = opcode & 0xFFFF;
+    if (!IsEnabled()) return;
+    const DWORD now = GetGameTick();
+    switch (packetOpcode) {
+        case 0x49D9:
+            InterlockedIncrement(&g_routerHits);
+            HandleSync(payload, payloadLength, now);
+            break;
+        case 0x49D6:
+            InterlockedIncrement(&g_routerHits);
+            HandleMap(payload, payloadLength, now);
+            break;
+        case 0x49E1:
+            InterlockedIncrement(&g_routerHits);
+            HandleProgress(payload, payloadLength, now);
+            break;
+        case 0x49E3:
+            InterlockedIncrement(&g_routerHits);
+            HandlePreview(payload, payloadLength, now);
+            break;
+        case 0x49DB:
+            InterlockedIncrement(&g_routerHits);
+            HandleCityInfo(payload, payloadLength, now);
+            break;
+        case 0x49D4:
+            InterlockedIncrement(&g_routerHits);
+            HandleMoveAck(payload, payloadLength, now);
+            break;
+        case 0x1468:
+            HandleBattleInfo(payload, payloadLength, now);
+            break;
+        case 0x1464:
+            HandleBattleEnd(now);
+            break;
+        case 0x49D7:
+            InterlockedIncrement(&g_routerHits);
+            HandleTreasure(payload, payloadLength, now);
+            break;
+        default:
+            break;
+    }
+}
+
+void OnEnabledChanged(LONG enabled)
+{
+    if (enabled == 0) {
+        InterlockedExchange(&g_wasEnabled, 0);
+        ResetTransient();
+    } else if (InterlockedExchange(&g_wasEnabled, 1) == 0) {
+        ResetTransient();
+    }
+}
+
+void TickImpl()
+{
+    if (!IsEnabled()) {
+        if (InterlockedExchange(&g_wasEnabled, 0) != 0) ResetTransient();
+        return;
+    }
+    if (InterlockedExchange(&g_wasEnabled, 1) == 0) ResetTransient();
+    if (g_testBypassReady == 0 && !IsNativeEntryReady()) return;
+
+    SYSTEMTIME local{};
+    GetLocalTime(&local);
+    const LONG pauseDate = g_dailyPauseDate;
+    if (pauseDate != 0) {
+        const LONG today = DateKey(local);
+        if (today == pauseDate || (local.wHour == 0 && local.wMinute < 1)) return;
+        InterlockedExchange(&g_dailyPauseDate, 0);
+    }
+
+    const DWORD now = GetGameTick();
+    const LONG state = g_state;
+    if (state != kIdle && TickReached(now, g_deadlineTick)) {
+        ResetTransient();
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kIdlePollMs));
+        return;
+    }
+    if (!TickReached(now, g_nextTick)) return;
+
+    switch (state) {
+        case kIdle:
+            if (!LoadRoadGraph()) {
+                InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kNoCandidateDelayMs));
+                return;
+            }
+            SendEnterMap(0, now);
+            break;
+        case kWaitingProgressReward:
+            SendProgressQuery(now);
+            break;
+        case kMoveStepDelay:
+            SendNextMoveStep(now);
+            break;
+        case kFastBattleDelay:
+            SendPacket(0x37A4, nullptr, 0);
+            SetWaiting(kWaitingTreasure, now, 30000);
+            break;
+        case kRefreshAfterBattle:
+            SendEnterMap(static_cast<uint32_t>(g_grade), now);
+            break;
+        default:
+            break;
+    }
+}
+
+void Tick()
+{
+    if (InterlockedCompareExchange(&g_tickRunning, 1, 0) != 0) return;
+    __try {
+        TickImpl();
+    } __finally {
+        InterlockedExchange(&g_tickRunning, 0);
+    }
+}
+
+}
+
 namespace BattleToken
 {
 void Tick();
@@ -307,7 +2043,26 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
 bool BuildDailyGuardCode(uintptr_t base, CodeBuffer& code);
 }
 
+namespace NativeLogHook
+{
+bool BuildCode(uintptr_t base, CodeBuffer& code);
+}
+
 namespace TeamBattleReward
+{
+void Tick();
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+void OnEnabledChanged(LONG enabled);
+}
+
+namespace DianFengZhuLu
+{
+void Tick();
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+void OnEnabledChanged(LONG enabled);
+}
+
+namespace HuanJing
 {
 void Tick();
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
@@ -320,6 +2075,8 @@ constexpr UINT kCheckboxId = 0x0439;
 constexpr UINT kBattleTokenCheckboxId = 0x7B05;
 constexpr UINT kZhaoXianNaKeCheckboxId = 0x7B06;
 constexpr UINT kTeamBattleRewardCheckboxId = 0x7B07;
+constexpr UINT kDianFengZhuLuCheckboxId = 0x7B08;
+constexpr UINT kHuanJingCheckboxId = 0x7B09;
 constexpr UINT kPrivateMessage = 0x8439;
 constexpr UINT kTimerId = 0x843A;
 const wchar_t kBattleTokenConfigSection[] = L"MAIN";
@@ -327,12 +2084,16 @@ const wchar_t kTaskDispatchConfigKey[] = L"bTaskDispatch";
 const wchar_t kBattleTokenConfigKey[] = L"bBattleToken";
 const wchar_t kZhaoXianNaKeConfigKey[] = L"bZhaoXianNaKe";
 const wchar_t kTeamBattleRewardConfigKey[] = L"bTeamBattleReward";
+const wchar_t kDianFengZhuLuConfigKey[] = L"bDianFengZhuLu";
+const wchar_t kHuanJingConfigKey[] = L"bHuanJing";
 
 volatile LONG g_started = 0;
 volatile LONG g_switch = 0;
 volatile LONG g_battleTokenSwitch = 1;
 volatile LONG g_zhaoXianNaKeSwitch = 1;
 volatile LONG g_teamBattleRewardSwitch = 1;
+volatile LONG g_dianFengZhuLuSwitch = 1;
+volatile LONG g_huanJingSwitch = 1;
 volatile LONG g_lastValue = 0;
 volatile LONG g_hitCount = 0;
 volatile LONG g_status = 0;
@@ -340,16 +2101,22 @@ volatile LONG g_taskDispatchKeyReady = 0;
 volatile LONG g_battleTokenKeyReady = 0;
 volatile LONG g_zhaoXianNaKeKeyReady = 0;
 volatile LONG g_teamBattleRewardKeyReady = 0;
+volatile LONG g_dianFengZhuLuKeyReady = 0;
+volatile LONG g_huanJingKeyReady = 0;
 volatile LONG g_taskDispatchDirty = 0;
 volatile LONG g_battleTokenDirty = 0;
 volatile LONG g_zhaoXianNaKeDirty = 0;
 volatile LONG g_teamBattleRewardDirty = 0;
+volatile LONG g_dianFengZhuLuDirty = 0;
+volatile LONG g_huanJingDirty = 0;
 HWND g_settingsHwnd = nullptr;
 HWND g_parentHwnd = nullptr;
 HWND g_checkboxHwnd = nullptr;
 HWND g_battleTokenCheckboxHwnd = nullptr;
 HWND g_zhaoXianNaKeCheckboxHwnd = nullptr;
 HWND g_teamBattleRewardCheckboxHwnd = nullptr;
+HWND g_dianFengZhuLuCheckboxHwnd = nullptr;
+HWND g_huanJingCheckboxHwnd = nullptr;
 HWND g_weeklyHwnd = nullptr;
 HWND g_dailyHwnd = nullptr;
 WNDPROC g_oldProc = nullptr;
@@ -364,6 +2131,8 @@ const wchar_t kCheckboxText[] = L"\x4EFB\x52D9\x6D3E\x9063";
 const wchar_t kBattleTokenCheckboxText[] = L"\x6230\x4EE4";
 const wchar_t kZhaoXianNaKeCheckboxText[] = L"\x62DB\x52DF\x8CE2\x5BA2";
 const wchar_t kTeamBattleRewardCheckboxText[] = L"\x7D44\x968A\x6230";
+const wchar_t kDianFengZhuLuCheckboxText[] = L"\x5DD4\x5CF0\x9010\x9E7F";
+const wchar_t kHuanJingCheckboxText[] = L"\x5E7B\x5883";
 const wchar_t kActivityLoginCheckboxText[] = L"\x6D3B\x52D5\x767B\x5165";
 
 void Start();
@@ -689,6 +2458,7 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
 namespace Jrnt
 {
 bool BuildSendCode(uintptr_t base, CodeBuffer& code);
+bool BuildBribeGateCode(uintptr_t base, CodeBuffer& code);
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
 }
 
@@ -743,6 +2513,7 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
 }
 
 const JumpPatch kJumpPatches[] = {
+    { "Native log limiter", 0x25B70, 5, 96, NativeLogHook::BuildCode },
     { "Login credential prompt", 0x40DEA, 7, 128, LoginCredentialPrompt::BuildCode },
     { "Fast Daily Battle", 0x4A785, 11, 128, FastDailyBattle::BuildSend37A4Code },
     { "Shared recv router", 0x42AD0, 5, 128, SharedRecvRouter::BuildCode },
@@ -751,6 +2522,7 @@ const JumpPatch kJumpPatches[] = {
     { "Prize Pool sender", 0x364C0, 5, 128, PrizePool::BuildSendCode },
     { "Weekly Reward sender", 0x35CE0, 5, 128, WeeklyReward::BuildSendCode },
     { "JRNT sender", 0x36A90, 11, 128, Jrnt::BuildSendCode },
+    { "JRNT bribe task gate", 0x353B9, 5, 128, Jrnt::BuildBribeGateCode },
     { "XYFP sender", 0x36690, 6, 128, Xyfp::BuildSendCode },
     { "Personal Task sender", 0x3D000, 13, 128, PersonalTask::BuildSendCode },
     { "Legion Dungeon", 0x3B2E0, 5, 128, LegionDungeon::BuildTickCode },
@@ -997,6 +2769,35 @@ bool AppendRel32Instruction(CodeBuffer& code, BYTE opcode, uintptr_t destination
     }
 
     return AppendByte(code, opcode) && AppendU32(code, static_cast<uint32_t>(displacement));
+}
+
+namespace NativeLogHook
+{
+const BYTE kExpectedHookBytes[] = { 0x55, 0x8B, 0xEC, 0x6A, 0xFF };
+
+bool BuildCode(uintptr_t base, CodeBuffer& code)
+{
+    if (std::memcmp(
+            reinterpret_cast<const void*>(base + 0x25B70),
+            kExpectedHookBytes,
+            sizeof(kExpectedHookBytes)) != 0) {
+        return false;
+    }
+
+    return AppendByte(code, 0x9C) &&                         // pushfd
+        AppendPushad(code) &&
+        AppendByte(code, 0x51) &&                           // push ecx (native log owner)
+        AppendRel32Instruction(
+            code,
+            0xE8,
+            reinterpret_cast<uintptr_t>(&NativeOptimization::BeforeNativeLog)) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&                           // popfd
+        AppendByte(code, 0x55) &&                           // push ebp
+        AppendByte(code, 0x8B) && AppendByte(code, 0xEC) && // mov ebp,esp
+        AppendByte(code, 0x6A) && AppendByte(code, 0xFF) && // push -1
+        AppendRel32Instruction(code, 0xE9, base + 0x25B75);
+}
 }
 
 bool WriteRel32Jump(void* source, void* destination, size_t overwriteSize)
@@ -1713,6 +3514,51 @@ void StoreHero(uint32_t uuid0, uint32_t uuid4)
     hero.ready = 1;
     hero.tick = GetTickCount();
     InterlockedExchange(&g_heroCount, index + 1);
+}
+
+size_t CopyReadyHeroUuids(BYTE* output, size_t capacity)
+{
+    if (!output || capacity == 0) {
+        return 0;
+    }
+    size_t written = 0;
+    __try {
+        const uintptr_t list = static_cast<uintptr_t>(
+            ReadGameU32(g_mainBase + 0x230644));
+        const uint32_t rawCount = ReadGameU32(g_mainBase + 0x230648);
+        const size_t count = rawCount < capacity ? rawCount : capacity;
+        if (list != 0 && count <= 32) {
+            for (size_t index = 0; index < count; ++index) {
+                const uintptr_t entry = static_cast<uintptr_t>(
+                    ReadGameU32(list + index * sizeof(uint32_t)));
+                if (entry == 0) {
+                    continue;
+                }
+                std::memcpy(output + written * 8,
+                    reinterpret_cast<const void*>(entry), 8);
+                ++written;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        written = 0;
+    }
+    if (written != 0) {
+        return written;
+    }
+
+    const LONG available = g_heroCount;
+    const size_t availableCount = available > 0 ? static_cast<size_t>(available) : 0;
+    const size_t count = availableCount < capacity ? availableCount : capacity;
+    for (size_t index = 0; index < count; ++index) {
+        const HeroEntry& hero = g_heroTable[index];
+        if (hero.ready == 0) {
+            continue;
+        }
+        std::memcpy(output + written * 8, &hero.uuid0, 4);
+        std::memcpy(output + written * 8 + 4, &hero.uuid4, 4);
+        ++written;
+    }
+    return written;
 }
 
 bool ParseOneHero(Reader& reader, uint32_t index)
@@ -2873,6 +4719,9 @@ __declspec(noinline) void __stdcall IndependentTimerTick(void* owner)
     ZhaoXianNaKe::Tick();
     ActivityLogin::Tick();
     TeamBattleReward::Tick();
+    DianFengZhuLu::Tick();
+    HuanJing::Tick();
+    NativeOptimization::Tick(g_mainBase);
 
     if (SetTimer(hwnd, kIndependentTimerId, IndependentTimerInterval(), nullptr) != 0) {
         g_independentTimerHwnd = hwnd;
@@ -2900,6 +4749,8 @@ bool BuildMainCode(uintptr_t base, CodeBuffer& code)
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&ZhaoXianNaKe::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&ActivityLogin::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&TeamBattleReward::Tick)) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&DianFengZhuLu::Tick)) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&HuanJing::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&DashTick)) &&
         AppendPopad(code) &&
         AppendByte(code, 0x9D) &&
@@ -4179,6 +6030,9 @@ void WriteLog(const wchar_t* text)
 void ResetState()
 {
     InterlockedExchange(&g_pendingOpen, 0);
+    InterlockedExchange(&g_bribeTaskActive, 0);
+    InterlockedExchange(&g_bribeTaskTarget, 0);
+    InterlockedExchange(&g_bribeTaskSchedule, 0);
     for (size_t i = 0; i < 3; ++i) {
         g_ids[i] = 0xFFFFFFFF;
         g_claimPending[i] = 0;
@@ -4258,6 +6112,67 @@ bool SkipUtf(const BYTE*& cursor, const BYTE* end)
     return true;
 }
 
+bool ReadUtfView(const BYTE*& cursor, const BYTE* end, const BYTE*& text, uint16_t& length)
+{
+    if (cursor + 2 > end) {
+        return false;
+    }
+
+    length = ReadBe16(cursor);
+    cursor += 2;
+    if (cursor + length > end) {
+        return false;
+    }
+
+    text = cursor;
+    cursor += length;
+    return true;
+}
+
+bool BytesEqual(const BYTE* text, uint16_t length, const BYTE* expected, size_t expectedLength)
+{
+    return text && length == expectedLength && std::memcmp(text, expected, expectedLength) == 0;
+}
+
+bool BytesContain(const BYTE* text, uint16_t length, const BYTE* needle, size_t needleLength)
+{
+    if (!text || !needle || needleLength == 0 || length < needleLength) {
+        return false;
+    }
+
+    const size_t lastOffset = static_cast<size_t>(length) - needleLength;
+    for (size_t offset = 0; offset <= lastOffset; ++offset) {
+        if (std::memcmp(text + offset, needle, needleLength) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ParseAsciiUInt(const BYTE* text, uint16_t length, uint32_t& value)
+{
+    if (!text || length == 0) {
+        return false;
+    }
+
+    uint32_t parsed = 0;
+    for (uint16_t i = 0; i < length; ++i) {
+        const BYTE ch = text[i];
+        if (ch < '0' || ch > '9') {
+            return false;
+        }
+
+        const uint32_t digit = static_cast<uint32_t>(ch - '0');
+        if (parsed > (0x7FFFFFFFu - digit) / 10u) {
+            return false;
+        }
+        parsed = parsed * 10u + digit;
+    }
+
+    value = parsed;
+    return true;
+}
+
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
 {
     if ((opcode & 0xFFFF) != 0x4F35 || !payload || payloadLength < 4) {
@@ -4265,6 +6180,9 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
     }
 
     InterlockedExchange(&g_pendingOpen, 0);
+    InterlockedExchange(&g_bribeTaskActive, 0);
+    InterlockedExchange(&g_bribeTaskTarget, 0);
+    InterlockedExchange(&g_bribeTaskSchedule, 0);
     for (size_t i = 0; i < 3; ++i) {
         g_ids[i] = 0xFFFFFFFF;
         g_claimPending[i] = 0;
@@ -4285,6 +6203,9 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
     cursor += 2;
 
     size_t pendingIndex = 0;
+    bool bribeTaskActive = false;
+    uint32_t bribeTaskTarget = 0;
+    uint32_t bribeTaskSchedule = 0;
     for (uint16_t task = 0; task < taskCount; ++task) {
         if (cursor + 4 > end) {
             return;
@@ -4292,10 +6213,18 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
         const uint32_t taskId = ReadBe32(cursor);
         cursor += 4;
 
-        if (!SkipUtf(cursor, end) ||
-            !SkipUtf(cursor, end) ||
-            !SkipUtf(cursor, end) ||
-            !SkipUtf(cursor, end) ||
+        const BYTE* taskName = nullptr;
+        const BYTE* taskDescription = nullptr;
+        const BYTE* taskTargetText = nullptr;
+        const BYTE* taskScheduleText = nullptr;
+        uint16_t taskNameLength = 0;
+        uint16_t taskDescriptionLength = 0;
+        uint16_t taskTargetLength = 0;
+        uint16_t taskScheduleLength = 0;
+        if (!ReadUtfView(cursor, end, taskName, taskNameLength) ||
+            !ReadUtfView(cursor, end, taskDescription, taskDescriptionLength) ||
+            !ReadUtfView(cursor, end, taskTargetText, taskTargetLength) ||
+            !ReadUtfView(cursor, end, taskScheduleText, taskScheduleLength) ||
             cursor + 8 > end) {
             return;
         }
@@ -4307,12 +6236,75 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
             return;
         }
 
+        const bool isBribeTask =
+            BytesEqual(taskName, taskNameLength, kBribeTaskName, sizeof(kBribeTaskName)) ||
+            BytesContain(taskDescription,
+                taskDescriptionLength,
+                kBribeTaskDescription,
+                sizeof(kBribeTaskDescription));
+        uint32_t parsedTarget = 0;
+        uint32_t parsedSchedule = 0;
+        if (isBribeTask &&
+            ParseAsciiUInt(taskTargetText, taskTargetLength, parsedTarget) &&
+            ParseAsciiUInt(taskScheduleText, taskScheduleLength, parsedSchedule)) {
+            const bool thisTaskActive = parsedTarget > 0 && parsedSchedule < parsedTarget;
+            if (thisTaskActive || !bribeTaskActive) {
+                bribeTaskTarget = parsedTarget;
+                bribeTaskSchedule = parsedSchedule;
+            }
+            bribeTaskActive = bribeTaskActive || thisTaskActive;
+        }
+
         if (taskState == 1 && pendingIndex < 3) {
             g_ids[pendingIndex] = taskId;
             g_claimPending[pendingIndex] = 1;
             ++pendingIndex;
         }
     }
+
+    if (!SkipUtf(cursor, end) || cursor != end) {
+        return;
+    }
+
+    InterlockedExchange(&g_bribeTaskTarget, static_cast<LONG>(bribeTaskTarget));
+    InterlockedExchange(&g_bribeTaskSchedule, static_cast<LONG>(bribeTaskSchedule));
+    InterlockedIncrement(&g_bribeSnapshotGeneration);
+    InterlockedExchange(&g_bribeTaskActive, bribeTaskActive ? 1 : 0);
+}
+
+bool ConsumeBribePermission()
+{
+    if (g_mainBase == 0 || ReadGameU32(g_mainBase + 0x230358) == 0) {
+        return false;
+    }
+    if (InterlockedCompareExchange(&g_bribeTaskActive, 0, 0) != 1) {
+        return false;
+    }
+
+    const LONG target = InterlockedCompareExchange(&g_bribeTaskTarget, 0, 0);
+    const LONG schedule = InterlockedCompareExchange(&g_bribeTaskSchedule, 0, 0);
+    if (target <= 0 || schedule < 0 || schedule >= target) {
+        return false;
+    }
+
+    const LONG generation = InterlockedCompareExchange(&g_bribeSnapshotGeneration, 0, 0);
+    const LONG consumed = InterlockedCompareExchange(&g_bribeConsumedGeneration, 0, 0);
+    if (generation == 0 || consumed == generation) {
+        return false;
+    }
+
+    return InterlockedCompareExchange(&g_bribeConsumedGeneration, generation, consumed) == consumed;
+}
+
+__declspec(noinline) void __stdcall RunNativeBribeIfAllowed()
+{
+    if (!ConsumeBribePermission()) {
+        return;
+    }
+
+    using NativeBribeFn = void(__cdecl*)();
+    NativeBribeFn nativeBribe = reinterpret_cast<NativeBribeFn>(g_mainBase + 0x39640);
+    nativeBribe();
 }
 
 __declspec(noinline) void __stdcall SendHook()
@@ -4337,6 +6329,21 @@ bool BuildSendCode(uintptr_t, CodeBuffer& code)
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&SendHook)) &&
         AppendPopad(code) &&
         AppendByte(code, 0xC3);
+}
+
+bool BuildBribeGateCode(uintptr_t base, CodeBuffer& code)
+{
+    const BYTE expectedCall[] = { 0xE8, 0x82, 0x42, 0x00, 0x00 };
+    if (std::memcmp(reinterpret_cast<const void*>(base + 0x353B9),
+            expectedCall,
+            sizeof(expectedCall)) != 0) {
+        return false;
+    }
+
+    return AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&RunNativeBribeIfAllowed)) &&
+        AppendPopad(code) &&
+        AppendRel32Instruction(code, 0xE9, base + 0x353BE);
 }
 
 }
@@ -5349,6 +7356,36 @@ bool PersistTeamBattleRewardSwitch(LONG value)
     return true;
 }
 
+bool PersistDianFengZhuLuSwitch(LONG value)
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) return false;
+    __try {
+        if (!WritePrivateProfileStringW(kBattleTokenConfigSection, kDianFengZhuLuConfigKey,
+                value != 0 ? L"1" : L"0", path)) return false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    InterlockedExchange(&g_dianFengZhuLuKeyReady, 1);
+    InterlockedExchange(&g_dianFengZhuLuDirty, 0);
+    return true;
+}
+
+bool PersistHuanJingSwitch(LONG value)
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) return false;
+    __try {
+        if (!WritePrivateProfileStringW(kBattleTokenConfigSection, kHuanJingConfigKey,
+                value != 0 ? L"1" : L"0", path)) return false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    InterlockedExchange(&g_huanJingKeyReady, 1);
+    InterlockedExchange(&g_huanJingDirty, 0);
+    return true;
+}
+
 bool PersistTaskDispatchSwitch(LONG value)
 {
     const wchar_t* path = nullptr;
@@ -5525,6 +7562,60 @@ bool LoadTeamBattleRewardSwitch()
     }
 }
 
+bool LoadDianFengZhuLuSwitch()
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) return false;
+    __try {
+        wchar_t value[16]{};
+        const wchar_t missingMarker[] = { 0xFFFF, 0x0000 };
+        const DWORD length = GetPrivateProfileStringW(kBattleTokenConfigSection,
+            kDianFengZhuLuConfigKey, missingMarker, value, _countof(value), path);
+        const bool missing = length == 0 ||
+            (length == 1 && value[0] == missingMarker[0] && value[1] == L'\0');
+        if (missing) {
+            InterlockedExchange(&g_dianFengZhuLuSwitch, 1);
+            DianFengZhuLu::OnEnabledChanged(1);
+            return PersistDianFengZhuLuSwitch(1);
+        }
+        const LONG enabled = GetPrivateProfileIntW(kBattleTokenConfigSection,
+            kDianFengZhuLuConfigKey, 1, path) != 0 ? 1 : 0;
+        InterlockedExchange(&g_dianFengZhuLuSwitch, enabled);
+        DianFengZhuLu::OnEnabledChanged(enabled);
+        InterlockedExchange(&g_dianFengZhuLuKeyReady, 1);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool LoadHuanJingSwitch()
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) return false;
+    __try {
+        wchar_t value[16]{};
+        const wchar_t missingMarker[] = { 0xFFFF, 0x0000 };
+        const DWORD length = GetPrivateProfileStringW(kBattleTokenConfigSection,
+            kHuanJingConfigKey, missingMarker, value, _countof(value), path);
+        const bool missing = length == 0 ||
+            (length == 1 && value[0] == missingMarker[0] && value[1] == L'\0');
+        if (missing) {
+            InterlockedExchange(&g_huanJingSwitch, 1);
+            HuanJing::OnEnabledChanged(1);
+            return PersistHuanJingSwitch(1);
+        }
+        const LONG enabled = GetPrivateProfileIntW(kBattleTokenConfigSection,
+            kHuanJingConfigKey, 1, path) != 0 ? 1 : 0;
+        InterlockedExchange(&g_huanJingSwitch, enabled);
+        HuanJing::OnEnabledChanged(enabled);
+        InterlockedExchange(&g_huanJingKeyReady, 1);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void WriteSwitch(uint32_t value)
 {
     if (g_mainBase == 0) {
@@ -5598,6 +7689,26 @@ void SyncTeamBattleRewardSwitch()
     PersistTeamBattleRewardSwitch(value);
 }
 
+void SyncDianFengZhuLuSwitch()
+{
+    if (!g_dianFengZhuLuCheckboxHwnd || !IsWindow(g_dianFengZhuLuCheckboxHwnd)) return;
+    const LONG value = SendMessageW(g_dianFengZhuLuCheckboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
+    InterlockedExchange(&g_dianFengZhuLuSwitch, value);
+    DianFengZhuLu::OnEnabledChanged(value);
+    InterlockedExchange(&g_dianFengZhuLuDirty, 1);
+    PersistDianFengZhuLuSwitch(value);
+}
+
+void SyncHuanJingSwitch()
+{
+    if (!g_huanJingCheckboxHwnd || !IsWindow(g_huanJingCheckboxHwnd)) return;
+    const LONG value = SendMessageW(g_huanJingCheckboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
+    InterlockedExchange(&g_huanJingSwitch, value);
+    HuanJing::OnEnabledChanged(value);
+    InterlockedExchange(&g_huanJingDirty, 1);
+    PersistHuanJingSwitch(value);
+}
+
 void RefreshPersistentSwitches()
 {
     if (g_taskDispatchKeyReady == 0) {
@@ -5660,6 +7771,26 @@ void RefreshPersistentSwitches()
                 0);
         }
     }
+
+    if (g_dianFengZhuLuKeyReady == 0) {
+        bool ready = g_dianFengZhuLuDirty != 0
+            ? PersistDianFengZhuLuSwitch(g_dianFengZhuLuSwitch)
+            : LoadDianFengZhuLuSwitch();
+        if (ready && g_dianFengZhuLuCheckboxHwnd && IsWindow(g_dianFengZhuLuCheckboxHwnd)) {
+            SendMessageW(g_dianFengZhuLuCheckboxHwnd, BM_SETCHECK,
+                g_dianFengZhuLuSwitch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+    }
+
+    if (g_huanJingKeyReady == 0) {
+        bool ready = g_huanJingDirty != 0
+            ? PersistHuanJingSwitch(g_huanJingSwitch)
+            : LoadHuanJingSwitch();
+        if (ready && g_huanJingCheckboxHwnd && IsWindow(g_huanJingCheckboxHwnd)) {
+            SendMessageW(g_huanJingCheckboxHwnd, BM_SETCHECK,
+                g_huanJingSwitch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+    }
 }
 
 LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -5669,6 +7800,8 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         PersistBattleTokenSwitch(g_battleTokenSwitch);
         PersistZhaoXianNaKeSwitch(g_zhaoXianNaKeSwitch);
         PersistTeamBattleRewardSwitch(g_teamBattleRewardSwitch);
+        PersistDianFengZhuLuSwitch(g_dianFengZhuLuSwitch);
+        PersistHuanJingSwitch(g_huanJingSwitch);
     }
 
     return g_settingsOldProc
@@ -5696,6 +7829,14 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         SyncTeamBattleRewardSwitch();
         return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
     }
+    if (message == WM_COMMAND && LOWORD(wParam) == kDianFengZhuLuCheckboxId && HIWORD(wParam) == BN_CLICKED) {
+        SyncDianFengZhuLuSwitch();
+        return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+    if (message == WM_COMMAND && LOWORD(wParam) == kHuanJingCheckboxId && HIWORD(wParam) == BN_CLICKED) {
+        SyncHuanJingSwitch();
+        return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
+    }
 
     if (message == WM_TIMER && wParam == kTimerId) {
         RefreshPersistentSwitches();
@@ -5709,6 +7850,8 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             LoadBattleTokenSwitch();
             LoadZhaoXianNaKeSwitch();
             LoadTeamBattleRewardSwitch();
+            LoadDianFengZhuLuSwitch();
+            LoadHuanJingSwitch();
             if (!g_checkboxHwnd) {
                 g_checkboxHwnd = CreateWindowExW(
                     0,
@@ -5769,6 +7912,36 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                     nullptr,
                     nullptr);
             }
+            if (!g_dianFengZhuLuCheckboxHwnd) {
+                g_dianFengZhuLuCheckboxHwnd = CreateWindowExW(
+                    0,
+                    L"Button",
+                    kDianFengZhuLuCheckboxText,
+                    0x50018003,
+                    g_x,
+                    g_y + (g_h * 4),
+                    g_w,
+                    g_h,
+                    g_parentHwnd,
+                    reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kDianFengZhuLuCheckboxId)),
+                    nullptr,
+                    nullptr);
+            }
+            if (!g_huanJingCheckboxHwnd) {
+                g_huanJingCheckboxHwnd = CreateWindowExW(
+                    0,
+                    L"Button",
+                    kHuanJingCheckboxText,
+                    0x50018003,
+                    g_x,
+                    g_y + (g_h * 5),
+                    g_w,
+                    g_h,
+                    g_parentHwnd,
+                    reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kHuanJingCheckboxId)),
+                    nullptr,
+                    nullptr);
+            }
 
             if (g_checkboxHwnd) {
                 HFONT font = reinterpret_cast<HFONT>(SendMessageW(g_weeklyHwnd, WM_GETFONT, 0, 0));
@@ -5782,6 +7955,12 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                     }
                     if (g_teamBattleRewardCheckboxHwnd) {
                         SendMessageW(g_teamBattleRewardCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+                    }
+                    if (g_dianFengZhuLuCheckboxHwnd) {
+                        SendMessageW(g_dianFengZhuLuCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+                    }
+                    if (g_huanJingCheckboxHwnd) {
+                        SendMessageW(g_huanJingCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
                     }
                 }
                 ShowWindow(g_checkboxHwnd, SW_SHOW);
@@ -5809,6 +7988,16 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                         0);
                     ShowWindow(g_teamBattleRewardCheckboxHwnd, SW_SHOW);
                 }
+                if (g_dianFengZhuLuCheckboxHwnd) {
+                    SendMessageW(g_dianFengZhuLuCheckboxHwnd, BM_SETCHECK,
+                        g_dianFengZhuLuSwitch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
+                    ShowWindow(g_dianFengZhuLuCheckboxHwnd, SW_SHOW);
+                }
+                if (g_huanJingCheckboxHwnd) {
+                    SendMessageW(g_huanJingCheckboxHwnd, BM_SETCHECK,
+                        g_huanJingSwitch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
+                    ShowWindow(g_huanJingCheckboxHwnd, SW_SHOW);
+                }
                 SetTimer(g_parentHwnd, kTimerId, 1000, nullptr);
                 SendMessageW(g_checkboxHwnd, BM_SETCHECK, g_switch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
                 SyncSwitch();
@@ -5822,6 +8011,8 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             PersistBattleTokenSwitch(g_battleTokenSwitch);
             PersistZhaoXianNaKeSwitch(g_zhaoXianNaKeSwitch);
             PersistTeamBattleRewardSwitch(g_teamBattleRewardSwitch);
+            PersistDianFengZhuLuSwitch(g_dianFengZhuLuSwitch);
+            PersistHuanJingSwitch(g_huanJingSwitch);
             KillTimer(g_parentHwnd, kTimerId);
             if (g_checkboxHwnd && IsWindow(g_checkboxHwnd)) {
                 DestroyWindow(g_checkboxHwnd);
@@ -5835,10 +8026,18 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             if (g_teamBattleRewardCheckboxHwnd && IsWindow(g_teamBattleRewardCheckboxHwnd)) {
                 DestroyWindow(g_teamBattleRewardCheckboxHwnd);
             }
+            if (g_dianFengZhuLuCheckboxHwnd && IsWindow(g_dianFengZhuLuCheckboxHwnd)) {
+                DestroyWindow(g_dianFengZhuLuCheckboxHwnd);
+            }
+            if (g_huanJingCheckboxHwnd && IsWindow(g_huanJingCheckboxHwnd)) {
+                DestroyWindow(g_huanJingCheckboxHwnd);
+            }
             g_checkboxHwnd = nullptr;
             g_battleTokenCheckboxHwnd = nullptr;
             g_zhaoXianNaKeCheckboxHwnd = nullptr;
             g_teamBattleRewardCheckboxHwnd = nullptr;
+            g_dianFengZhuLuCheckboxHwnd = nullptr;
+            g_huanJingCheckboxHwnd = nullptr;
             WriteSwitch(0);
             InterlockedExchange(&g_status, 8);
             return 1;
@@ -5966,6 +8165,12 @@ DWORD WINAPI SetupThread(LPVOID)
     for (int i = 0; i < 30; ++i) {
         if (g_teamBattleRewardKeyReady == 0) {
             LoadTeamBattleRewardSwitch();
+        }
+        if (g_dianFengZhuLuKeyReady == 0) {
+            LoadDianFengZhuLuSwitch();
+        }
+        if (g_huanJingKeyReady == 0) {
+            LoadHuanJingSwitch();
         }
         if (FindAndInstall()) {
             return 0;
@@ -9368,6 +11573,8 @@ __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* pa
     ZhaoXianNaKe::HandleRecvPacket(opcode, payload, payloadLength);
     ActivityLogin::HandleRecvPacket(opcode, payload, payloadLength);
     TeamBattleReward::HandleRecvPacket(opcode, payload, payloadLength);
+    DianFengZhuLu::HandleRecvPacket(opcode, payload, payloadLength);
+    HuanJing::HandleRecvPacket(opcode, payload, payloadLength);
     ExpeditionGuard::HandleRecvPacket(opcode);
     const BYTE* const legionPayload = payload;
     const uint32_t legionPayloadLength = payloadLength;
@@ -9995,6 +12202,8 @@ DWORD WINAPI MainThread(LPVOID)
         }
     }
 
+    const bool nativeResourceFixOk = NativeOptimization::Install(base);
+
     const DWORD pid = GetCurrentProcessId();
     wchar_t (&message)[2048] = g_patchStatusMessage;
     std::memset(message, 0, sizeof(message));
@@ -10053,6 +12262,8 @@ DWORD WINAPI MainThread(LPVOID)
         IsPatchApplied(results, kPatchCount, "Main loop speed 403E5");
     const bool loginCredentialPromptOk =
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Login credential prompt");
+    const bool nativeLogLimiterOk =
+        IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Native log limiter");
     const bool nativeWashOk = sharedRouterOk &&
         IsPatchApplied(results, kPatchCount, "Native wash fixed total rule") &&
         IsPatchApplied(results, kPatchCount, "Native wash candidate order") &&
@@ -10061,6 +12272,8 @@ DWORD WINAPI MainThread(LPVOID)
         IsJumpPatchApplied(jumpResults, kJumpPatchCount, "Native wash after send refresh");
 
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x767B\x5165\x5E33\x5BC6\x63D0\x793A", loginCredentialPromptOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"Native LOG limit", nativeLogLimiterOk);
+    AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"Window DC release", nativeResourceFixOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x5171\x7528\x6536\x5305Router", sharedRouterOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x9F8D\x8108", dragonVeinOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x7838\x86CB", breakEggOk);
@@ -10095,7 +12308,19 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH) {
         g_selfModule = hModule;
         DisableThreadLibraryCalls(hModule);
-        CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
+        wchar_t modulePath[MAX_PATH]{};
+        if (GetModuleFileNameW(hModule, modulePath, _countof(modulePath)) != 0) {
+            const wchar_t* moduleName = std::wcsrchr(modulePath, L'\\');
+            moduleName = moduleName ? moduleName + 1 : modulePath;
+            if (_wcsicmp(moduleName, L"HuanTest8.dll") == 0) {
+                g_mainBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+                return TRUE;
+            }
+        }
+        HANDLE mainThread = CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
+        if (mainThread) {
+            CloseHandle(mainThread);
+        }
     }
     return TRUE;
 }
@@ -10105,6 +12330,46 @@ void InitPatch()
 {
 }
 
+extern "C" __declspec(dllexport)
+void __stdcall HuanJingTestTick()
+{
+    InterlockedExchange(&HuanJing::g_testBypassReady, 1);
+    HuanJing::Tick();
+}
+
+extern "C" __declspec(dllexport)
+void __stdcall HuanJingTestRecv(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    AlBattle::HandleRecvPacket(opcode, payload, payloadLength);
+    HuanJing::HandleRecvPacket(opcode, payload, payloadLength);
+}
+
+extern "C" __declspec(dllexport)
+uint32_t __stdcall HuanJingTestGet(uint32_t field)
+{
+    switch (field) {
+    case 0: return static_cast<uint32_t>(g_mainBase);
+    case 1: return static_cast<uint32_t>(HuanJing::g_state);
+    case 2: return static_cast<uint32_t>(HuanJing::g_routerHits);
+    case 3: return static_cast<uint32_t>(HuanJing::g_parseErrors);
+    case 4: return static_cast<uint32_t>(HuanJing::g_grade);
+    case 5: return static_cast<uint32_t>(HuanJing::g_currentCity);
+    case 6: return static_cast<uint32_t>(HuanJing::g_currentTimes);
+    case 7: {
+        BYTE heroes[16 * 8]{};
+        return static_cast<uint32_t>(AlBattle::CopyReadyHeroUuids(heroes, 16));
+    }
+    case 8: return static_cast<uint32_t>(HuanJing::g_haveMap);
+    case 9: return static_cast<uint32_t>(HuanJing::g_haveCurrentCity);
+    case 10: return static_cast<uint32_t>(HuanJing::g_dailyPauseDate);
+    case 11: return static_cast<uint32_t>(HuanJing::g_testMoveSends);
+    case 12: return static_cast<uint32_t>(HuanJing::g_testStepSends);
+    case 13: return static_cast<uint32_t>(HuanJing::g_testBattleInfoSends);
+    case 14: return static_cast<uint32_t>(HuanJing::g_testStartBattleSends);
+    case 15: return static_cast<uint32_t>(HuanJing::g_testBattleEnds);
+    default: return 0xFFFFFFFFu;
+    }
+}
 
 
 
