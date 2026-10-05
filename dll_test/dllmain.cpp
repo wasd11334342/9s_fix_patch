@@ -1,4 +1,4 @@
-﻿#include <windows.h>
+#include <windows.h>
 #include <algorithm>
 #include <climits>
 #include <cstdio>
@@ -17,7 +17,7 @@ HHOOK g_msgBoxHook = nullptr;
 HMODULE g_selfModule = nullptr;
 wchar_t g_patchStatusMessage[2048]{};
 constexpr DWORD kMessageBoxAutoCloseMs = 3000;
-constexpr wchar_t kMyPatchVersion[] = L"0.15b";
+constexpr wchar_t kMyPatchVersion[] = L"0.16b";
 
 struct MemoryPatch
 {
@@ -345,7 +345,8 @@ enum State : LONG
     kWaitingBuffList = 11,
     kWaitingRecovery = 12,
     kSendRecoverySkip = 13,
-    kSendFastBattleRetry = 14
+    kSendFastBattleRetry = 14,
+    kSendRecover = 15
 };
 
 struct PacketReader
@@ -405,6 +406,7 @@ struct Hero
     uint32_t uuidHigh = 0;
     uint32_t uuidLow = 0;
     uint32_t currentHp = 0;
+    uint32_t hpMax = 0;
     bool disabled = false;
 };
 
@@ -427,6 +429,8 @@ volatile LONG g_selectedOption = 0;
 volatile LONG g_selectionMode = 0;
 volatile LONG g_battleId = 0;
 volatile LONG g_replaceTemplateId = 0;
+volatile LONG g_recoverTarget = 0;
+volatile LONG g_recoverType = 0;
 volatile LONG g_pendingLog = 0;
 volatile LONG g_parseError = 0;
 volatile LONG g_battleActive = 0;
@@ -439,10 +443,18 @@ wchar_t g_battleStageText[32] = L"?";
 wchar_t g_buffText[128] = L"?";
 wchar_t g_lastBuffLogStage[32]{};
 wchar_t g_lastBuffLogText[128]{};
+PanelOption g_options[16]{};
+size_t g_optionCount = 0;
+volatile LONG g_selectionTry = 0;
+wchar_t g_selectionStageText[32]{};
+volatile LONG g_selectionRaidType = 0;
 
 bool IsEnabled()
 {
-    return TaskDispatchUi::g_dianFengZhuLuSwitch != 0;
+    if (TaskDispatchUi::g_dianFengZhuLuSwitch == 0 || g_mainBase == 0) {
+        return false;
+    }
+    return *reinterpret_cast<volatile uint32_t*>(g_mainBase + 0x230284) != 0;
 }
 
 LONG DateKey(const SYSTEMTIME& time)
@@ -570,8 +582,7 @@ bool SkipBuff(PacketReader& reader, wchar_t* name, size_t nameCapacity, uint32_t
 }
 
 bool ParsePanel(const BYTE* payload, uint32_t payloadLength, uint32_t& raidType,
-    uint32_t& currentPower, uint32_t& firstOption, wchar_t* buffName, size_t buffCapacity,
-    uint32_t& resetSeconds, uint16_t& optionCount)
+    uint32_t& currentPower, uint32_t& resetSeconds, uint16_t& optionCount, uint32_t& currentScore)
 {
     PacketReader reader{ payload, payload + payloadLength };
     const BYTE* title = nullptr;
@@ -581,9 +592,7 @@ bool ParsePanel(const BYTE* payload, uint32_t payloadLength, uint32_t& raidType,
         !reader.ReadU32(raidType) || !reader.ReadU32(ignored) || !reader.ReadU32(currentPower) ||
         !reader.ReadU16(optionCount)) return false;
     ExtractStage(title, titleLength);
-    firstOption = 0;
-    PanelOption options[16]{};
-    size_t savedOptionCount = 0;
+    g_optionCount = 0;
     for (uint16_t optionIndex = 0; optionIndex < optionCount; ++optionIndex) {
         uint32_t optionLv = 0;
         uint32_t npcIcon = 0;
@@ -599,27 +608,24 @@ bool ParsePanel(const BYTE* payload, uint32_t payloadLength, uint32_t& raidType,
         const BYTE* optionBuffName = nullptr;
         uint16_t optionBuffLength = 0;
         if (!reader.ReadUtf(optionBuffName, optionBuffLength)) return false;
-        if (savedOptionCount < _countof(options)) {
-            PanelOption& option = options[savedOptionCount++];
+        if (g_optionCount < _countof(g_options)) {
+            PanelOption& option = g_options[g_optionCount++];
             option.optionLv = optionLv;
             option.score = static_cast<int32_t>(rawScore);
             CopyUtfToWide(optionBuffName, optionBuffLength, option.buffName, _countof(option.buffName));
         }
         if (!reader.Skip(12) || !reader.SkipUtf()) return false;
     }
-    uint32_t currentScore = 0;
     uint32_t totalScore = 0;
     if (!reader.SkipUtf() || !reader.ReadU32(currentScore) || !reader.ReadU32(totalScore)) return false;
-    for (size_t optionIndex = 0; optionIndex < savedOptionCount; ++optionIndex) {
-        const PanelOption& option = options[optionIndex];
-        const int64_t signedScore = static_cast<int64_t>(option.score);
-        const uint64_t requiredScore = static_cast<uint64_t>(
-            signedScore < 0 ? -signedScore : signedScore);
-        if (raidType == 2 && static_cast<uint64_t>(currentScore) < requiredScore) continue;
-        firstOption = option.optionLv;
-        if (buffName) wcscpy_s(buffName, buffCapacity, option.buffName);
-        break;
-    }
+    // 依需求積分（abs(score)）由低到高排序，選獎勵時從最低積分優先
+    std::sort(g_options, g_options + g_optionCount,
+        [](const PanelOption& a, const PanelOption& b) {
+            const int64_t costA = a.score < 0 ? -static_cast<int64_t>(a.score) : a.score;
+            const int64_t costB = b.score < 0 ? -static_cast<int64_t>(b.score) : b.score;
+            if (costA != costB) return costA < costB;
+            return a.optionLv < b.optionLv;
+        });
     return true;
 }
 
@@ -630,7 +636,8 @@ bool ParseRole(PacketReader& reader, Hero* hero)
     uint16_t tacticCount = 0;
     if (!reader.SkipUtf() || !reader.ReadU32(ignored)) return false;
     uint32_t currentHp = 0;
-    if (!reader.ReadU32(currentHp) || !reader.ReadU32(ignored) || !reader.ReadU32(ignored) ||
+    uint32_t hpMax = 0;
+    if (!reader.ReadU32(currentHp) || !reader.ReadU32(hpMax) || !reader.ReadU32(ignored) ||
         !reader.ReadU16(ignored16) || !reader.SkipUtf() || !reader.ReadU16(tacticCount)) return false;
     for (uint16_t index = 0; index < tacticCount; ++index) {
         if (!reader.ReadU32(ignored) || !reader.SkipUtf()) return false;
@@ -641,6 +648,7 @@ bool ParseRole(PacketReader& reader, Hero* hero)
     if (!reader.ReadUtf(extra, extraLength)) return false;
     if (hero) {
         hero->currentHp = currentHp;
+        hero->hpMax = hpMax;
         return ParseHeroExtra(extra, extraLength, *hero);
     }
     return true;
@@ -666,21 +674,19 @@ bool ParseFormation(const BYTE* payload, uint32_t payloadLength, BYTE& offon,
     return reader.ReadU32(battleId) && reader.SkipUtf();
 }
 
-bool ParseRecoveryFormation(const BYTE* payload, uint32_t payloadLength, bool& allDead)
+bool ParseRecoveryFormation(const BYTE* payload, uint32_t payloadLength,
+    uint32_t& recoverType, Hero* heroes, size_t& heroCount, uint32_t& recoverRate)
 {
     PacketReader reader{ payload, payload + payloadLength };
-    uint32_t ignored = 0;
-    uint16_t heroCount = 0;
-    if (!reader.ReadU32(ignored) || !reader.ReadU16(heroCount)) return false;
-    size_t usableCount = 0;
-    for (uint16_t index = 0; index < heroCount; ++index) {
+    uint16_t count = 0;
+    if (!reader.ReadU32(recoverType) || !reader.ReadU16(count)) return false;
+    heroCount = 0;
+    for (uint16_t index = 0; index < count; ++index) {
         Hero hero{};
         if (!ParseRole(reader, &hero)) return false;
-        if (hero.currentHp != 0 && !hero.disabled) ++usableCount;
+        if (heroCount < kMaxHeroes) heroes[heroCount++] = hero;
     }
-    if (!reader.ReadU32(ignored) || !reader.SkipUtf()) return false;
-    allDead = heroCount != 0 && usableCount == 0;
-    return true;
+    return reader.ReadU32(recoverRate) && reader.SkipUtf();
 }
 
 bool ParseBuffSelection(const BYTE* payload, uint32_t payloadLength, wchar_t* selectedName,
@@ -722,6 +728,9 @@ void ResetTransient()
     g_heroCount = 0;
     g_lastBuffLogStage[0] = L'\0';
     g_lastBuffLogText[0] = L'\0';
+    InterlockedExchange(&g_selectionTry, 0);
+    g_selectionStageText[0] = L'\0';
+    InterlockedExchange(&g_selectionRaidType, 0);
 }
 
 void QueueBuffLogOnce()
@@ -760,12 +769,10 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
         const LONG priorState = g_state;
         uint32_t raidType = 0;
         uint32_t currentPower = 0;
-        uint32_t firstOption = 0;
         uint32_t resetSeconds = 0;
         uint16_t optionCount = 0;
-        wchar_t optionBuff[128]{};
-        if (!ParsePanel(payload, payloadLength, raidType, currentPower, firstOption,
-                optionBuff, _countof(optionBuff), resetSeconds, optionCount)) {
+        uint32_t currentScore = 0;
+        if (!ParsePanel(payload, payloadLength, raidType, currentPower, resetSeconds, optionCount, currentScore)) {
             InterlockedIncrement(&g_parseError);
             return;
         }
@@ -794,20 +801,62 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
             InterlockedExchange(&g_state, kIdle);
             return;
         }
-        if (raidType == 2 && optionCount != 0 && firstOption == 0) {
+        if (optionCount == 0 || g_optionCount == 0) {
+            PauseForReset();
+            return;
+        }
+        if (raidType == 1) {
+            // 難度選擇：重置獎勵重試狀態，選第一個（最低難度）
+            InterlockedExchange(&g_selectionTry, 0);
+            g_selectionStageText[0] = L'\0';
+            InterlockedExchange(&g_selectionRaidType, 0);
+            InterlockedExchange(&g_selectedOption, static_cast<LONG>(g_options[0].optionLv));
+            InterlockedExchange(&g_selectionMode, 1);
+            InterlockedExchange(&g_state, kSendSelection);
+            return;
+        }
+        // raidType 2/3：獎勵／恢復選擇，依需求積分由低到高；卡住則重試同一項、再卡則遞進下一項
+        if (wcscmp(g_selectionStageText, g_stageText) != 0 ||
+            g_selectionRaidType != static_cast<LONG>(raidType)) {
+            wcscpy_s(g_selectionStageText, g_stageText);
+            InterlockedExchange(&g_selectionRaidType, static_cast<LONG>(raidType));
+            InterlockedExchange(&g_selectionTry, 0);
+        }
+        uint32_t affordableLv[16]{};
+        size_t affordableCount = 0;
+        for (size_t index = 0; index < g_optionCount; ++index) {
+            const int64_t cost = g_options[index].score < 0 ?
+                -static_cast<int64_t>(g_options[index].score) : g_options[index].score;
+            if (cost <= static_cast<int64_t>(currentScore)) {
+                if (affordableCount < _countof(affordableLv)) {
+                    affordableLv[affordableCount++] = g_options[index].optionLv;
+                }
+            }
+        }
+        if (affordableCount == 0) {
             InterlockedExchange(&g_pendingLog, 3);
             InterlockedExchange(&g_state, kSendRecoverySkip);
             return;
         }
-        if (optionCount == 0 || firstOption == 0) {
-            PauseForReset();
+        const LONG tryIndex = g_selectionTry;
+        const size_t optionIndex = static_cast<size_t>(tryIndex) / 2;
+        if (optionIndex >= affordableCount) {
+            InterlockedExchange(&g_pendingLog, 3);
+            InterlockedExchange(&g_state, kSendRecoverySkip);
             return;
         }
-        InterlockedExchange(&g_selectedOption, static_cast<LONG>(firstOption));
+        const uint32_t chosenLv = affordableLv[optionIndex];
+        InterlockedExchange(&g_selectedOption, static_cast<LONG>(chosenLv));
         InterlockedExchange(&g_selectionMode, static_cast<LONG>(raidType));
         if (raidType == 2) {
-            wcscpy_s(g_buffText, optionBuff[0] ? optionBuff : L"?");
+            for (size_t index = 0; index < g_optionCount; ++index) {
+                if (g_options[index].optionLv == chosenLv) {
+                    wcscpy_s(g_buffText, g_options[index].buffName[0] ? g_options[index].buffName : L"?");
+                    break;
+                }
+            }
         }
+        InterlockedExchange(&g_selectionTry, tryIndex + 1);
         InterlockedExchange(&g_state, kSendSelection);
         return;
     }
@@ -861,15 +910,58 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
         return;
     }
     if (packetOpcode == 0x52C2 && g_state == kWaitingRecovery) {
-        bool allDead = false;
-        if (!ParseRecoveryFormation(payload, payloadLength, allDead)) {
+        uint32_t recoverType = 0;
+        uint32_t recoverRate = 0;
+        Hero heroes[kMaxHeroes]{};
+        size_t heroCount = 0;
+        if (!ParseRecoveryFormation(payload, payloadLength, recoverType, heroes, heroCount, recoverRate)) {
             InterlockedIncrement(&g_parseError);
             return;
         }
-        if (allDead) {
-            PauseForReset();
+        uint32_t target = 0;
+        bool hasTarget = false;
+        if (recoverType == 2) {
+            // 全體恢復：52C1(0)
+            target = 0;
+            hasTarget = true;
+        } else if (recoverType == 3) {
+            // 復活：第一個陣亡武將 (currentHp == 0)
+            for (size_t index = 0; index < heroCount; ++index) {
+                if (heroes[index].currentHp == 0 && !heroes[index].disabled) {
+                    target = heroes[index].heroId;
+                    hasTarget = true;
+                    break;
+                }
+            }
+        } else if (recoverType == 1) {
+            // 治療：第一個受傷武將 (0 < currentHp < hpMax)
+            for (size_t index = 0; index < heroCount; ++index) {
+                if (heroes[index].currentHp > 0 &&
+                    heroes[index].hpMax > heroes[index].currentHp &&
+                    !heroes[index].disabled) {
+                    target = heroes[index].heroId;
+                    hasTarget = true;
+                    break;
+                }
+            }
+        }
+        if (hasTarget) {
+            // 恢復選項成功命中（有可恢復武將）：重置選獎勵重試計數，下一輪恢復仍從最低積分選
+            InterlockedExchange(&g_selectionTry, 0);
+            InterlockedExchange(&g_recoverTarget, static_cast<LONG>(target));
+            InterlockedExchange(&g_recoverType, static_cast<LONG>(recoverType));
+            InterlockedExchange(&g_pendingLog, 4);
+            InterlockedExchange(&g_state, kSendRecover);
         } else {
-            InterlockedExchange(&g_state, kSendRecoverySkip);
+            size_t aliveCount = 0;
+            for (size_t index = 0; index < heroCount; ++index) {
+                if (heroes[index].currentHp != 0 && !heroes[index].disabled) ++aliveCount;
+            }
+            if (heroCount != 0 && aliveCount == 0) {
+                PauseForReset();
+            } else {
+                InterlockedExchange(&g_state, kSendRecoverySkip);
+            }
         }
     }
 }
@@ -883,6 +975,15 @@ void DrainPendingLog()
         GameLog::Write(L"\x5DD4\x5CF0\x9010\x9E7F \x9078\x64C7 %s", g_buffText);
     } else if (pending == 3) {
         GameLog::Write(L"\x9010\x9E7F\x5DD4\x5CF0 \x7A4D\x5206\x4E0D\x8DB3");
+    } else if (pending == 4) {
+        const LONG recoverType = g_recoverType;
+        if (recoverType == 3) {
+            GameLog::Write(L"\x5DD4\x5CF0\x9010\x9E7F \x5FA9\x6D3B");
+        } else if (recoverType == 2) {
+            GameLog::Write(L"\x5DD4\x5CF0\x9010\x9E7F \x5168\x9AD4\x6062\x5FA9");
+        } else {
+            GameLog::Write(L"\x5DD4\x5CF0\x9010\x9E7F \x6CBB\x7642");
+        }
     }
 }
 
@@ -940,6 +1041,15 @@ void TickImpl()
         InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kIdlePollMs));
         InterlockedExchange(&g_state, kWaitingBattle);
         SendPacket(0x52C4, nullptr, 0);
+        return;
+    }
+    if (state == kSendRecover) {
+        BYTE payload[4]{};
+        BYTE* cursor = payload;
+        WriteU32(cursor, static_cast<uint32_t>(g_recoverTarget));
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kIdlePollMs));
+        InterlockedExchange(&g_state, kWaitingBattle);
+        SendPacket(0x52C1, payload, sizeof(payload));
         return;
     }
     if (state == kSendFastBattleRetry) {
@@ -1035,8 +1145,13 @@ constexpr DWORD kMoveStepDelayMs = 1200;
 constexpr DWORD kFastBattleDelayMs = 2000;
 constexpr DWORD kAfterBattleDelayMs = 1800;
 constexpr DWORD kNoCandidateDelayMs = 30000;
-constexpr size_t kMaxCityId = 252;
+constexpr size_t kMaxCityId = 4095;
 constexpr size_t kMaxHeroes = 16;
+// 幻境難度：普通/中級/高級，grade 1~3（49D8 回包會給「有無下一難度」，此為後備上限）
+constexpr LONG kMaxDreamGrade = 3;
+constexpr DWORD kNoCandidateBackoffMinMs = 3000;
+constexpr DWORD kNoCandidateBackoffMaxMs = 300000;
+constexpr DWORD kSkipLogRepeatMs = 10000;
 
 enum State : LONG
 {
@@ -1121,6 +1236,11 @@ volatile LONG g_checkingCity = 0;
 volatile LONG g_moveTarget = 0;
 volatile LONG g_battleId = 0;
 volatile LONG g_dailyPauseDate = 0;
+volatile LONG g_timesExhausted = 0;
+volatile LONG g_hasNextGrade = -1; // 49D8 回包：是否有下一難度（-1 未知，0 無，1 有）
+volatile LONG g_passLogGrade = -1; // 49D8 節流 Log：上次記錄的 grade
+volatile LONG g_passLogHasNext = -1; // 49D8 節流 Log：上次記錄的 hasNext
+volatile LONG g_passLogTick = 0; // 49D8 節流 Log：上次記錄的 tick
 volatile LONG g_parseErrors = 0;
 volatile LONG g_routerHits = 0;
 volatile LONG g_roadLoaded = 0;
@@ -1131,8 +1251,21 @@ volatile LONG g_testStepSends = 0;
 volatile LONG g_testBattleInfoSends = 0;
 volatile LONG g_testStartBattleSends = 0;
 volatile LONG g_testBattleEnds = 0;
+volatile LONG g_noCandidateBackoff = kNoCandidateBackoffMinMs;
+volatile LONG g_skipLogCity = 0;
+volatile LONG g_skipLogTick = 0;
+volatile LONG g_queryLogCity = 0;
+volatile LONG g_queryLogTick = 0;
+// 已領取過的累積通關獎勵檔位（cityNum = 累計佔領城市數），防伺服器更新延遲導致重複領取
+BYTE g_claimedProgress[kMaxCityId + 1]{};
 std::vector<uint16_t> g_adjacency[kMaxCityId + 1];
 BYTE g_cityUnlocked[kMaxCityId + 1]{};
+BYTE g_cityCountry[kMaxCityId + 1]{};
+BYTE g_cityOccupied[kMaxCityId + 1]{};
+wchar_t g_cityNames[kMaxCityId + 1][32]{};
+volatile LONG g_cityNamesLoaded = 0;
+volatile LONG g_cityNamesLoadFailed = 0;
+BYTE g_myCountry = 0;
 std::vector<Candidate> g_candidates;
 std::vector<uint16_t> g_movePath;
 size_t g_moveIndex = 0;
@@ -1142,7 +1275,10 @@ SRWLOCK g_lock = SRWLOCK_INIT;
 
 bool IsEnabled()
 {
-    return TaskDispatchUi::g_huanJingSwitch != 0;
+    if (TaskDispatchUi::g_huanJingSwitch == 0 || g_mainBase == 0) {
+        return false;
+    }
+    return *reinterpret_cast<volatile uint32_t*>(g_mainBase + 0x230284) != 0;
 }
 
 bool TickReached(DWORD now, LONG target)
@@ -1218,6 +1354,9 @@ void ResetTransient()
     InterlockedExchange(&g_checkingCity, 0);
     InterlockedExchange(&g_moveTarget, 0);
     InterlockedExchange(&g_battleId, 0);
+    InterlockedExchange(&g_noCandidateBackoff, static_cast<LONG>(kNoCandidateBackoffMinMs));
+    InterlockedExchange(&g_hasNextGrade, -1);
+    std::memset(g_claimedProgress, 0, sizeof(g_claimedProgress));
 }
 
 bool AppendRoadEdge(uint16_t first, uint16_t second)
@@ -1310,6 +1449,105 @@ bool LoadRoadGraph()
     return true;
 }
 
+// city.xml 每行：<city id="1" name="敦煌" intro="null" terrain="3" x="328" y="155"/>
+// 解析 id 與 name（UTF-8），建立 cityId → 中文名對應，供 Log 顯示。
+bool ParseCityNamesBytes(const char* data, size_t size)
+{
+    if (!data || size == 0) return false;
+    size_t parsed = 0;
+    const char* cursor = data;
+    const char* end = data + size;
+    static constexpr char idMarker[] = "<city id=\"";
+    static constexpr char nameMarker[] = "name=\"";
+    while (cursor < end) {
+        const char* city = std::strstr(cursor, idMarker);
+        if (!city || city >= end) break;
+        const char* number = city + sizeof(idMarker) - 1;
+        uint32_t id = 0;
+        bool idDigit = false;
+        while (number < end && *number >= '0' && *number <= '9') {
+            idDigit = true;
+            id = id * 10 + static_cast<uint32_t>(*number++ - '0');
+        }
+        if (!idDigit || id == 0 || id > kMaxCityId) {
+            cursor = city + 1;
+            continue;
+        }
+        const char* name = std::strstr(number, nameMarker);
+        if (!name || name >= end) break;
+        const char* value = name + sizeof(nameMarker) - 1;
+        const char* close = value;
+        while (close < end && *close != '"') ++close;
+        if (close == value || close >= end) {
+            cursor = city + 1;
+            continue;
+        }
+        // UTF-8 → wchar_t
+        const int nameLen = static_cast<int>(close - value);
+        wchar_t buffer[32]{};
+        const int converted = MultiByteToWideChar(CP_UTF8, 0, value, nameLen, buffer, 31);
+        if (converted > 0 && converted < 31) {
+            buffer[converted] = 0;
+            wcscpy_s(g_cityNames[id], 32, buffer);
+            ++parsed;
+        }
+        cursor = close + 1;
+    }
+    return parsed > 0;
+}
+
+bool LoadCityNames()
+{
+    if (g_cityNamesLoaded != 0) return true;
+    if (g_cityNamesLoadFailed != 0) return false;
+
+    wchar_t programFiles[MAX_PATH]{};
+    DWORD length = GetEnvironmentVariableW(L"ProgramFiles(x86)", programFiles, _countof(programFiles));
+    if (length == 0 || length >= _countof(programFiles)) {
+        wcscpy_s(programFiles, L"C:\\Program Files (x86)");
+    }
+    std::wstring path(programFiles);
+    path += L"\\\x4E00\x7D71\x5929\x4E0B\\media\\zh_TW\\config\\dreamland\\city.xml";
+
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        InterlockedExchange(&g_cityNamesLoadFailed, 1);
+        return false;
+    }
+
+    LARGE_INTEGER fileSize{};
+    bool success = GetFileSizeEx(file, &fileSize) != FALSE &&
+        fileSize.QuadPart > 0 && fileSize.QuadPart <= 4 * 1024 * 1024;
+    std::vector<char> bytes;
+    if (success) {
+        bytes.resize(static_cast<size_t>(fileSize.QuadPart) + 1);
+        DWORD read = 0;
+        success = ReadFile(file, bytes.data(), static_cast<DWORD>(fileSize.QuadPart), &read, nullptr) != FALSE &&
+            read == static_cast<DWORD>(fileSize.QuadPart);
+        bytes[read] = '\0';
+    }
+    CloseHandle(file);
+
+    if (success) {
+        success = ParseCityNamesBytes(bytes.data(), static_cast<size_t>(fileSize.QuadPart));
+    }
+    if (!success) {
+        InterlockedExchange(&g_cityNamesLoadFailed, 1);
+        return false;
+    }
+
+    InterlockedExchange(&g_cityNamesLoaded, 1);
+    return true;
+}
+
+const wchar_t* CityName(uint32_t cityId)
+{
+    if (cityId == 0 || cityId > kMaxCityId) return L"";
+    if (g_cityNames[cityId][0] == 0) return L"";
+    return g_cityNames[cityId];
+}
+
 std::vector<uint16_t> FindShortestPath(uint16_t start, uint16_t target)
 {
     std::vector<uint16_t> empty;
@@ -1328,7 +1566,9 @@ std::vector<uint16_t> FindShortestPath(uint16_t start, uint16_t target)
         const uint16_t current = queue[head++];
         for (uint16_t next : g_adjacency[current]) {
             if (next == 0 || next > kMaxCityId || visited[next]) continue;
-            if (next != target && next != start && g_cityUnlocked[next] == 0) continue;
+            // 移動路徑中途只能走「已佔領」城市（49E3 cityState != 0），未佔領/敵城只能當最終目標，
+            // 目標城市豁免；避免路徑穿越未佔領城市導致伺服器拒絕移動而斷線
+            if (next != target && next != start && g_cityOccupied[next] == 0) continue;
             visited[next] = 1;
             previous[next] = current;
             if (next == target) {
@@ -1358,10 +1598,12 @@ bool SkipBuff(PacketReader& reader)
         reader.SkipUtf() && reader.ReadU32(ignored) && reader.ReadByte(byte) && reader.SkipUtf();
 }
 
-bool ParseMap(const BYTE* payload, uint32_t payloadLength, LONG& grade, LONG& currentTimes, LONG& progressReward)
+bool ParseMap(const BYTE* payload, uint32_t payloadLength, LONG& grade, LONG& currentTimes,
+    LONG& progressReward, uint32_t& initCityId)
 {
     PacketReader reader{ payload, payload + payloadLength };
     BYTE parsedUnlocked[kMaxCityId + 1]{};
+    BYTE parsedCountry[kMaxCityId + 1]{};
     uint16_t cityCount = 0;
     if (!reader.ReadU16(cityCount) || cityCount > 512) return false;
     for (uint16_t index = 0; index < cityCount; ++index) {
@@ -1376,6 +1618,7 @@ bool ParseMap(const BYTE* payload, uint32_t payloadLength, LONG& grade, LONG& cu
             buffCount > 256) return false;
         if (cityId > 0 && cityId <= kMaxCityId) {
             parsedUnlocked[cityId] = unlocked != 0 ? 1 : 0;
+            parsedCountry[cityId] = country;
         }
         for (uint16_t buff = 0; buff < buffCount; ++buff) {
             if (!SkipBuff(reader)) return false;
@@ -1401,12 +1644,15 @@ bool ParseMap(const BYTE* payload, uint32_t payloadLength, LONG& grade, LONG& cu
     if (!reader.ReadU32(initCity) || !reader.ReadU32(country) || !reader.ReadU32(parsedGrade) ||
         !reader.SkipUtf() || !reader.ReadU32(parsedTimes) || !reader.ReadU32(maxTimes) ||
         !reader.ReadU32(killed) || !reader.ReadByte(parsedProgress) || !reader.SkipUtf()) return false;
+    initCityId = initCity;
 
     grade = static_cast<LONG>(parsedGrade);
     currentTimes = static_cast<LONG>(parsedTimes);
     progressReward = parsedProgress != 0 ? 1 : 0;
     AcquireSRWLockExclusive(&g_lock);
     std::memcpy(g_cityUnlocked, parsedUnlocked, sizeof(g_cityUnlocked));
+    std::memcpy(g_cityCountry, parsedCountry, sizeof(g_cityCountry));
+    g_myCountry = static_cast<BYTE>(country & 0xFF);
     ReleaseSRWLockExclusive(&g_lock);
     return grade > 0;
 }
@@ -1442,7 +1688,9 @@ bool ParseProgressReward(const BYTE* payload, uint32_t payloadLength, uint32_t& 
             if (!reader.ReadU16(type) || !reader.ReadU32(value) || !reader.SkipUtf()) return false;
         }
         if (!reader.SkipUtf()) return false;
-        if (claimCity == 0 && rewardState == 1) claimCity = cityNum;
+        // 跳過已領取過的檔位（伺服器更新延遲時 rewardState 可能仍為 1，避免重複領取）
+        const bool alreadyClaimed = cityNum <= kMaxCityId && g_claimedProgress[cityNum] != 0;
+        if (claimCity == 0 && rewardState == 1 && !alreadyClaimed) claimCity = cityNum;
     }
     return reader.SkipUtf();
 }
@@ -1459,18 +1707,44 @@ bool ParsePreview(const BYTE* payload, uint32_t payloadLength, uint32_t& grade, 
         uint32_t treasureState = 0;
         if (!reader.ReadU32(cityId) || !reader.SkipUtf() || !reader.SkipUtf() ||
             !reader.ReadU32(cityState) || !reader.ReadU32(treasureState) || !reader.SkipUtf()) return false;
+        // 記錄每城是否已佔領（cityState != 0 = 已佔領），供 BFS 判斷「中途只能走已佔領城」
+        if (cityId > 0 && cityId <= kMaxCityId) {
+            g_cityOccupied[cityId] = (cityState != 0) ? 1 : 0;
+        }
         if (cityState == 0) cityIds.push_back(cityId);
     }
     return reader.SkipUtf();
 }
 
-bool ParseCityInfo(const BYTE* payload, uint32_t payloadLength, bool& unlocked, BYTE& state)
+// 49D8 (GC_ENTER_DREAM_PASS)：進圖/通關後伺服器推送的難度資訊
+// [grade int][hasPrev byte][hasNext byte][msg UTF]
+bool ParsePass(const BYTE* payload, uint32_t payloadLength, LONG& grade, LONG& hasNext)
+{
+    PacketReader reader{ payload, payload + payloadLength };
+    uint32_t parsedGrade = 0;
+    BYTE hasPrev = 0;
+    BYTE next = 0;
+    if (!reader.ReadU32(parsedGrade) || !reader.ReadByte(hasPrev) || !reader.ReadByte(next) ||
+        !reader.SkipUtf()) return false;
+    grade = static_cast<LONG>(parsedGrade);
+    hasNext = next != 0 ? 1 : 0;
+    return grade > 0;
+}
+
+bool ParseCityInfo(const BYTE* payload, uint32_t payloadLength,
+    bool& unlocked, BYTE& state)
 {
     PacketReader reader{ payload, payload + payloadLength };
     uint32_t ignored = 0;
     uint16_t count = 0;
     unlocked = true;
     state = 0xFF;
+    // 49DB 回包結構（AS DreamlandGCMessage.GC_DREAM_LAND_CITY_INFO）：
+    // [grade int][gradeName UTF][heroId int][heroName UTF][descs short+UTF*]
+    // [preCities short + (cityId int, name UTF, alreadyHave byte, extra UTF)*]
+    // [bonuses short + (type short, value int, extra UTF)*][state byte][limit int][limitDesc UTF][extra UTF]
+    // 注意：回包「不含」被查的城市 id，第一個 int 是 grade（實測查 61/99/54/20/102/144/189 恆為 1）。
+    // 城市 id 由請求端 g_checkingCity 決定（AS onCityInfo 也只用 _checkingCityId，忽略回包首參數）。
     if (!reader.ReadU32(ignored) || !reader.SkipUtf() || !reader.ReadU32(ignored) ||
         !reader.SkipUtf() || !reader.ReadU16(count) || count > 256) return false;
     for (uint16_t index = 0; index < count; ++index) {
@@ -1608,16 +1882,40 @@ void SendNextCandidate(DWORD now)
     }
     ReleaseSRWLockExclusive(&g_lock);
     if (!hasCandidate) {
+        InterlockedExchange(&g_checkingCity, 0);
+        LONG backoff = g_noCandidateBackoff;
+        if (backoff < static_cast<LONG>(kNoCandidateBackoffMinMs)) {
+            backoff = static_cast<LONG>(kNoCandidateBackoffMinMs);
+        }
+        LONG nextBackoff = backoff * 2;
+        if (nextBackoff > static_cast<LONG>(kNoCandidateBackoffMaxMs)) {
+            nextBackoff = static_cast<LONG>(kNoCandidateBackoffMaxMs);
+        }
+        InterlockedExchange(&g_noCandidateBackoff, nextBackoff);
         InterlockedExchange(&g_state, kIdle);
-        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kNoCandidateDelayMs));
-        GameLog::Write(L"\x5E7B\x5883\xFF1A\x6C92\x6709\x53EF\x79FB\x52D5\x7684\x672A\x4F54\x9818\x57CE\x6C60");
+        InterlockedExchange(&g_nextTick, static_cast<LONG>(now + backoff));
+        GameLog::Write(L"\x5E7B\x5883\xFF1A\x6C92\x6709\x53EF\x79FB\x52D5\x7684\x672A\x4F54\x9818\x57CE\x6C60\xFF0C%u\x79D2\x5F8C\x91CD\x67E5", backoff / 1000);
         return;
     }
+    InterlockedExchange(&g_noCandidateBackoff, static_cast<LONG>(kNoCandidateBackoffMinMs));
     InterlockedExchange(&g_checkingCity, static_cast<LONG>(candidate.cityId));
     AcquireSRWLockExclusive(&g_lock);
     g_movePath = candidate.path;
     g_moveIndex = 0;
     ReleaseSRWLockExclusive(&g_lock);
+    // 診斷 LOG：查詢城市（相同城市 10 秒內不重複，供確認 49DA 請求與 49DB 回包對應）
+    {
+        const DWORD lastQuery = static_cast<DWORD>(g_queryLogTick);
+        if (candidate.cityId != static_cast<uint32_t>(g_queryLogCity) ||
+            now - lastQuery >= kSkipLogRepeatMs) {
+            InterlockedExchange(&g_queryLogCity, static_cast<LONG>(candidate.cityId));
+            InterlockedExchange(&g_queryLogTick, static_cast<LONG>(now));
+            GameLog::Write(L"\x5E7B\x5883\xFF1A\x67E5\x57CE\x6C60 %u\xFF08%s\xFF09",
+                static_cast<unsigned>(candidate.cityId), CityName(candidate.cityId));
+        }
+    }
+    // AS 權威（AutoDreamlandFeature.checkNextCandidate）：49DA = [grade][cityId]
+    // DreamlandCGMessage.CG_DREAM_LAND_CITY_INFO(grade, cityId) → writeInt(grade); writeInt(cityId)
     SendTwoU32(0x49DA, static_cast<uint32_t>(g_grade), candidate.cityId);
     SetWaiting(kWaitingCityInfo, now);
 }
@@ -1632,9 +1930,37 @@ void SendMoveRequest(DWORD now)
         SendNextCandidate(now);
         return;
     }
+    const uint16_t target = path.back();
+    if (target == 0 || target > kMaxCityId) {
+        SendNextCandidate(now);
+        return;
+    }
+    // 依目前所在城市重新計算路徑：中途城市必須已解鎖且為我方國家（目標豁免），
+    // 對齊 AS 在 49DB 通過後重新以 A* 計算路徑的行為。
+    // 注意：地圖 unlocked 是「城市解鎖/可通行」語意，不是「已佔領」，
+    // 因此不可用 unlocked 判斷目標是否可挑戰（目標由 49E3 cityState 與 49DB state 保證未佔領）。
+    const uint16_t currentCityNow = static_cast<uint16_t>(g_currentCity);
+    if (currentCityNow == target) {
+        // 玩家已位於目標城市（例如手動移動完成）：不需要再移動，直接請求戰鬥資訊
+        InterlockedIncrement(&g_testBattleInfoSends);
+        SendTwoU32(0x49DC, static_cast<uint32_t>(g_grade), static_cast<uint32_t>(target));
+        SetWaiting(kWaitingBattleInfo, now);
+        return;
+    }
+    std::vector<uint16_t> fresh = FindShortestPath(currentCityNow, target);
+    if (fresh.size() < 2) {
+        SendNextCandidate(now);
+        return;
+    }
+    path = fresh;
+    AcquireSRWLockExclusive(&g_lock);
+    g_movePath = fresh;
+    g_moveIndex = 0;
+    ReleaseSRWLockExclusive(&g_lock);
 
     std::vector<BYTE> payload(8 + path.size() * 2);
     BYTE* cursor = payload.data();
+    // WPE 確認：49D2 = [grade(int)][target(short)][count(short)][path(short[])]
     WriteU32(cursor, static_cast<uint32_t>(g_grade));
     WriteU16(cursor, path.back());
     WriteU16(cursor, static_cast<uint16_t>(path.size()));
@@ -1648,14 +1974,15 @@ void SendMoveRequest(DWORD now)
     ReleaseSRWLockExclusive(&g_lock);
     BYTE stepPayload[6]{};
     cursor = stepPayload;
+    // WPE 確認：49D3 = [grade(int)][city(short)]
     WriteU32(cursor, static_cast<uint32_t>(g_grade));
     WriteU16(cursor, firstStep);
     InterlockedIncrement(&g_testStepSends);
     SendPacket(0x49D3, stepPayload, sizeof(stepPayload));
     InterlockedExchange(&g_moveTarget, path.back());
     SetWaiting(kWaitingMoveAck, now);
-    GameLog::Write(L"\x5E7B\x5883\xFF1A\x79FB\x52D5\x81F3\x57CE\x6C60 %u",
-        static_cast<unsigned>(path.back()));
+    GameLog::Write(L"\x5E7B\x5883\xFF1A\x79FB\x52D5\x81F3\x57CE\x6C60 %u\xFF08%s\xFF09",
+        static_cast<unsigned>(path.back()), CityName(path.back()));
 }
 
 void SendNextMoveStep(DWORD now)
@@ -1680,6 +2007,7 @@ void SendNextMoveStep(DWORD now)
 
     BYTE payload[6]{};
     BYTE* cursor = payload;
+    // WPE 確認：49D3 = [grade(int)][city(short)]
     WriteU32(cursor, static_cast<uint32_t>(g_grade));
     WriteU16(cursor, nextCity);
     InterlockedIncrement(&g_testStepSends);
@@ -1721,7 +2049,8 @@ void HandleMap(const BYTE* payload, uint32_t payloadLength, DWORD now)
     LONG grade = 0;
     LONG currentTimes = 0;
     LONG progress = 0;
-    if (!ParseMap(payload, payloadLength, grade, currentTimes, progress)) {
+    uint32_t initCityId = 0;
+    if (!ParseMap(payload, payloadLength, grade, currentTimes, progress, initCityId)) {
         InterlockedIncrement(&g_parseErrors);
         return;
     }
@@ -1729,13 +2058,21 @@ void HandleMap(const BYTE* payload, uint32_t payloadLength, DWORD now)
     InterlockedExchange(&g_currentTimes, currentTimes);
     InterlockedExchange(&g_progressReward, progress);
     InterlockedExchange(&g_haveMap, 1);
+    // 進圖後若尚未收到 49D9 角色同步，先以地圖初始城市當作目前位置，避免卡在等同步
+    if (g_haveCurrentCity == 0 && initCityId != 0 && initCityId <= kMaxCityId) {
+        InterlockedExchange(&g_currentCity, static_cast<LONG>(initCityId));
+        InterlockedExchange(&g_haveCurrentCity, 1);
+    }
+    InterlockedExchange(&g_noCandidateBackoff, static_cast<LONG>(kNoCandidateBackoffMinMs));
 
     if (currentTimes <= 0) {
-        SYSTEMTIME local{};
-        GetLocalTime(&local);
-        InterlockedExchange(&g_dailyPauseDate, DateKey(local));
+        // 挑戰次數用完：暫停到隔日 0 點（每日重置）後自動恢復，直到所有難度都通關才永久停。
+        // 註：g_dailyPauseDate 為「今天日期」，TickImpl 在跨天後清除並恢復掃描。
+        SYSTEMTIME localTime{};
+        GetLocalTime(&localTime);
+        InterlockedExchange(&g_dailyPauseDate, DateKey(localTime));
         ResetTransient();
-        GameLog::Write(L"\x5E7B\x5883\xFF1A\x6311\x6230\x6B21\x6578\x5DF2\x7528\x5B8C\xFF0C\x9694\x65E5 00:01 \x518D\x57F7\x884C");
+        GameLog::Write(L"\x5E7B\x5883\xFF1A\x6311\x6230\x6B21\x6578\x5DF2\x7528\x5B8C\xFF0C\x9694\x65E5\x6062\x5FA9");
         return;
     }
     if (g_state != kWaitingMap) {
@@ -1746,6 +2083,56 @@ void HandleMap(const BYTE* payload, uint32_t payloadLength, DWORD now)
         return;
     }
     if (g_haveCurrentCity != 0) SendPreview(now);
+}
+
+// 49D8 難度資訊：記錄有無下一難度，供「當前難度已通關」時切換難度用
+void HandlePass(const BYTE* payload, uint32_t payloadLength, DWORD now)
+{
+    LONG grade = 0;
+    LONG hasNext = 0;
+    if (!ParsePass(payload, payloadLength, grade, hasNext)) {
+        InterlockedIncrement(&g_parseErrors);
+        return;
+    }
+    InterlockedExchange(&g_hasNextGrade, hasNext);
+    // 節流 Log：確認 49D8 是否到達及 hasNext 值，供實機核對難度推進
+    if (grade != g_passLogGrade || hasNext != g_passLogHasNext ||
+        now - static_cast<DWORD>(g_passLogTick) >= kSkipLogRepeatMs) {
+        InterlockedExchange(&g_passLogGrade, grade);
+        InterlockedExchange(&g_passLogHasNext, hasNext);
+        InterlockedExchange(&g_passLogTick, static_cast<LONG>(now));
+        GameLog::Write(L"\x5E7B\x5883\xFF1A\x96E3\x5EA6\x8CC7\x8A0A grade=%d hasNext=%d", grade, hasNext);
+    }
+}
+
+// 判斷是否有下一難度：以已確認的難度上限（grade 1/2/3，最高 3）為準。
+// 49D8 的 hasNext 僅在「明確說 0（無下一難度）」時提前停；未知(-1)或說 1 都以 g_grade < 3 兜底，
+// 避免 49D8 未到達或時序錯亂導致誤判「還有下一難度」而反覆切難度空轉。
+bool HasNextGrade()
+{
+    const LONG hasNext = g_hasNextGrade;
+    if (hasNext == 0) return false;
+    return g_grade < kMaxDreamGrade;
+}
+
+// 切換到下一難度：重置當前難度地圖/位置狀態後進圖 grade+1
+void SendNextGrade(DWORD now)
+{
+    const LONG nextGrade = g_grade + 1;
+    std::memset(g_cityOccupied, 0, sizeof(g_cityOccupied));
+    InterlockedExchange(&g_haveMap, 0);
+    InterlockedExchange(&g_haveCurrentCity, 0);
+    InterlockedExchange(&g_currentCity, 0);
+    InterlockedExchange(&g_checkingCity, 0);
+    InterlockedExchange(&g_hasNextGrade, -1);
+    AcquireSRWLockExclusive(&g_lock);
+    g_candidates.clear();
+    g_movePath.clear();
+    g_moveIndex = 0;
+    ReleaseSRWLockExclusive(&g_lock);
+    GameLog::Write(L"\x5E7B\x5883\xFF1A\x96E3\x5EA6 %u \x5DF2\x901A\x95DC\xFF0C\x5207\x63DB\x4E0B\x4E00\x96E3\x5EA6 %u",
+        static_cast<unsigned>(g_grade), static_cast<unsigned>(nextGrade));
+    SendEnterMap(static_cast<uint32_t>(nextGrade), now);
 }
 
 void HandleSync(const BYTE* payload, uint32_t payloadLength, DWORD now)
@@ -1759,6 +2146,7 @@ void HandleSync(const BYTE* payload, uint32_t payloadLength, DWORD now)
     InterlockedExchange(&g_grade, grade);
     InterlockedExchange(&g_currentCity, city);
     InterlockedExchange(&g_haveCurrentCity, 1);
+    InterlockedExchange(&g_noCandidateBackoff, static_cast<LONG>(kNoCandidateBackoffMinMs));
     if (g_state == kWaitingMap && g_haveMap != 0 &&
         g_currentTimes > 0 && g_progressReward == 0) SendPreview(now);
 }
@@ -1773,6 +2161,8 @@ void HandleProgress(const BYTE* payload, uint32_t payloadLength, DWORD now)
         return;
     }
     if (claimCity != 0) {
+        // 標記已領取，避免伺服器更新延遲時重複領取同一檔位
+        if (claimCity <= kMaxCityId) g_claimedProgress[claimCity] = 1;
         SendTwoU32(0x49E5, grade, claimCity);
         InterlockedExchange(&g_state, kWaitingProgressReward);
         InterlockedExchange(&g_nextTick, static_cast<LONG>(now + 700));
@@ -1795,6 +2185,14 @@ void HandlePreview(const BYTE* payload, uint32_t payloadLength, DWORD now)
     }
     std::vector<Candidate> candidates;
     const uint16_t current = static_cast<uint16_t>(g_currentCity);
+    // 玩家所在城市若為未佔領（cityState == 0），表示已移動到可挑戰城市，
+    // 直接請求戰鬥資訊，不再把它排除在候選之外
+    if (current != 0 && current <= kMaxCityId && g_cityOccupied[current] == 0) {
+        InterlockedIncrement(&g_testBattleInfoSends);
+        SendTwoU32(0x49DC, static_cast<uint32_t>(g_grade), static_cast<uint32_t>(current));
+        SetWaiting(kWaitingBattleInfo, now);
+        return;
+    }
     for (uint32_t cityId : cityIds) {
         if (cityId == static_cast<uint32_t>(current) || cityId > kMaxCityId) continue;
         Candidate candidate{};
@@ -1806,6 +2204,25 @@ void HandlePreview(const BYTE* payload, uint32_t payloadLength, DWORD now)
         if (first.path.size() != second.path.size()) return first.path.size() < second.path.size();
         return first.cityId < second.cityId;
     });
+    // 難度已通關的判準：49E3 中「除目前城市外」沒有 cityState==0 的未佔領城市。
+    // 若只是有未佔領城市但找不到路徑（前置未完成），則走 SendNextCandidate 退避，不切難度。
+    bool anyUnoccupiedElsewhere = false;
+    for (uint32_t cityId : cityIds) {
+        if (cityId != static_cast<uint32_t>(current) && cityId <= kMaxCityId) {
+            anyUnoccupiedElsewhere = true;
+            break;
+        }
+    }
+    if (!anyUnoccupiedElsewhere) {
+        if (HasNextGrade()) {
+            SendNextGrade(now);
+        } else {
+            InterlockedExchange(&g_timesExhausted, 1);
+            ResetTransient();
+            GameLog::Write(L"\x5E7B\x5883\xFF1A\x6240\x6709\x96E3\x5EA6\x5DF2\x901A\x95DC");
+        }
+        return;
+    }
     AcquireSRWLockExclusive(&g_lock);
     g_candidates.swap(candidates);
     ReleaseSRWLockExclusive(&g_lock);
@@ -1815,22 +2232,36 @@ void HandlePreview(const BYTE* payload, uint32_t payloadLength, DWORD now)
 void HandleCityInfo(const BYTE* payload, uint32_t payloadLength, DWORD now)
 {
     if (g_state != kWaitingCityInfo) return;
+    // 49DB 回包不含城市 id，以請求端記下的 g_checkingCity 為準（AS onCityInfo 亦然）
+    const uint32_t cityId = static_cast<uint32_t>(g_checkingCity);
     bool unlocked = false;
     BYTE state = 0xFF;
     if (!ParseCityInfo(payload, payloadLength, unlocked, state)) {
         InterlockedIncrement(&g_parseErrors);
+        SendNextCandidate(now);
         return;
     }
     if (state == 0 && unlocked) {
         SendMoveRequest(now);
     } else {
+        // 前置未完成或已佔領：節流記錄一次 LOG 後跳下一個候選
+        const DWORD lastSkipTick = static_cast<DWORD>(g_skipLogTick);
+        if (cityId != static_cast<uint32_t>(g_skipLogCity) ||
+            now - lastSkipTick >= kSkipLogRepeatMs) {
+            InterlockedExchange(&g_skipLogCity, static_cast<LONG>(cityId));
+            InterlockedExchange(&g_skipLogTick, static_cast<LONG>(now));
+            GameLog::Write(L"\x5E7B\x5883\xFF1A\x7565\x904E\x57CE\x6C60 %u\xFF08%s\xFF09\xFF08\x524D\x7F6E\x672A\x5B8C\x6210\x6216\x5DF2\x64C1\x6709\xFF09",
+                cityId, CityName(cityId));
+        }
         SendNextCandidate(now);
     }
 }
 
 void HandleMoveAck(const BYTE* payload, uint32_t payloadLength, DWORD now)
 {
-    if (g_state != kWaitingMoveAck) return;
+    // GC_DREAM_LAND_START_MOVE / 49D4：任何移動開始都同步目前所在城市，
+    // 包括玩家手動移動的回包，避免 DLL 用過期位置找候選/算路徑。
+    // 只有 DLL 自己移動（kWaitingMoveAck）時才推進下一步，手動移動只同步位置。
     PacketReader reader{ payload, payload + payloadLength };
     uint32_t grade = 0;
     uint16_t fromCity = 0;
@@ -1841,6 +2272,12 @@ void HandleMoveAck(const BYTE* payload, uint32_t payloadLength, DWORD now)
         return;
     }
     InterlockedExchange(&g_currentCity, toCity);
+    InterlockedExchange(&g_haveCurrentCity, 1);
+    if (g_state != kWaitingMoveAck) {
+        // 手動移動：位置已同步，重置退避後等待既有流程繼續（不推進 DLL 自己的移動步驟）
+        InterlockedExchange(&g_noCandidateBackoff, static_cast<LONG>(kNoCandidateBackoffMinMs));
+        return;
+    }
     InterlockedExchange(&g_state, kMoveStepDelay);
     InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kMoveStepDelayMs));
     InterlockedExchange(&g_deadlineTick, static_cast<LONG>(now + kResponseTimeoutMs));
@@ -1942,6 +2379,10 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
             InterlockedIncrement(&g_routerHits);
             HandleTreasure(payload, payloadLength, now);
             break;
+        case 0x49D8:
+            InterlockedIncrement(&g_routerHits);
+            HandlePass(payload, payloadLength, now);
+            break;
         default:
             break;
     }
@@ -1964,14 +2405,19 @@ void TickImpl()
         return;
     }
     if (InterlockedExchange(&g_wasEnabled, 1) == 0) ResetTransient();
-    if (g_testBypassReady == 0 && !IsNativeEntryReady()) return;
+    // IsNativeEntryReady() checks whether the 开掛 button (ID 1010) is Enabled.
+    // That is inverted: the button is enabled when 开掛 is OFF and disabled when ON.
+    // Master switch is 0x230284 (checked in IsEnabled). Do not gate on button enabled state.
 
-    SYSTEMTIME local{};
-    GetLocalTime(&local);
-    const LONG pauseDate = g_dailyPauseDate;
-    if (pauseDate != 0) {
-        const LONG today = DateKey(local);
-        if (today == pauseDate || (local.wHour == 0 && local.wMinute < 1)) return;
+    // 所有難度已通關：永久停止，直到重新開啟程式（g_timesExhausted 為 DLL 全域，載入時歸零）
+    if (g_timesExhausted != 0) return;
+
+    // 挑戰次數用完的每日暫停：同一天不執行，隔日 0 點重置後自動恢復
+    if (g_dailyPauseDate != 0) {
+        SYSTEMTIME localTime{};
+        GetLocalTime(&localTime);
+        const LONG today = DateKey(localTime);
+        if (g_dailyPauseDate == today) return;
         InterlockedExchange(&g_dailyPauseDate, 0);
     }
 
@@ -1990,7 +2436,13 @@ void TickImpl()
                 InterlockedExchange(&g_nextTick, static_cast<LONG>(now + kNoCandidateDelayMs));
                 return;
             }
-            SendEnterMap(0, now);
+            LoadCityNames(); // 載入 cityId → 中文名對應（僅供 Log，失敗不影響流程）
+            if (g_haveMap != 0 && g_haveCurrentCity != 0 && g_currentTimes > 0) {
+                // 已在地圖且所在城市已知：直接重新預覽候選城市，避免每次重進圖造成空轉
+                SendPreview(now);
+            } else {
+                SendEnterMap(0, now);
+            }
             break;
         case kWaitingProgressReward:
             SendProgressQuery(now);
@@ -2155,6 +2607,7 @@ constexpr DWORD kCreateGateMagic = 0x4C444731;
 constexpr DWORD kSoloPanelQueryDelayMs = 3000;
 constexpr DWORD kSoloPanelQueryIntervalMs = 3000;
 constexpr DWORD kSoloResumeWindowMs = 120000;
+constexpr DWORD kConsolidateDelayMs = 15000;
 
 struct SharedCreateGate
 {
@@ -2217,6 +2670,8 @@ BYTE g_bufTeam4[4]{};
 BYTE g_bufOrder[256]{};
 BYTE g_orderExpected[3][kOrderMemberMaxBytes]{};
 uint32_t g_orderExpectedLens[3]{};
+volatile LONG g_consolidateDone = 0;
+volatile LONG g_consolidateDueTick = 0;
 
 bool BuildTickCode(uintptr_t base, CodeBuffer& code);
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
@@ -10344,6 +10799,16 @@ void Send4296ById(uint32_t teamId)
     SendPacket(0x4296, g_bufTeam4, sizeof(g_bufTeam4));
 }
 
+void Send429D()
+{
+    const uint32_t teamId = static_cast<uint32_t>(g_teamId);
+    g_bufTeam4[0] = static_cast<BYTE>((teamId >> 24) & 0xFF);
+    g_bufTeam4[1] = static_cast<BYTE>((teamId >> 16) & 0xFF);
+    g_bufTeam4[2] = static_cast<BYTE>((teamId >> 8) & 0xFF);
+    g_bufTeam4[3] = static_cast<BYTE>(teamId & 0xFF);
+    SendPacket(0x429D, g_bufTeam4, sizeof(g_bufTeam4));
+}
+
 bool SaveExpectedOrder(const BYTE* member0, uint32_t len0, const BYTE* member1, uint32_t len1, const BYTE* member2, uint32_t len2)
 {
     const BYTE* members[] = { member2, member0, member1 };
@@ -10571,6 +11036,8 @@ void ResetState()
     InterlockedExchange(&g_createTeamMissCount, 0);
     InterlockedExchange(&g_createFinalCheck, 0);
     InterlockedExchange(&g_restoredTeamId, 0);
+    InterlockedExchange(&g_consolidateDone, 0);
+    InterlockedExchange(&g_consolidateDueTick, 0);
     std::memset(g_orderExpected, 0, sizeof(g_orderExpected));
     std::memset(g_orderExpectedLens, 0, sizeof(g_orderExpectedLens));
 }
@@ -10961,6 +11428,7 @@ void Handle42A1(const BYTE* payload, uint32_t payloadLength)
                 InterlockedExchange(&g_state, 3);
                 InterlockedExchange(&g_createTeamMissCount, 0);
                 InterlockedExchange(&g_createFinalCheck, 0);
+                InterlockedExchange(&g_consolidateDone, 0);
                 InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
                 return;
             }
@@ -10978,6 +11446,7 @@ void Handle42A1(const BYTE* payload, uint32_t payloadLength)
                 InterlockedExchange(&g_state, 3);
                 InterlockedExchange(&g_createTeamMissCount, 0);
                 InterlockedExchange(&g_createFinalCheck, 0);
+                InterlockedExchange(&g_consolidateDone, 0);
                 InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
                 return;
             }
@@ -11064,6 +11533,11 @@ void Handle42A2(const BYTE* payload, uint32_t payloadLength)
         return;
     }
 
+    // 42A2 第一個 int 是自己的 teamId（AS GC_ARMY_RAID_TEAM_INFO param1）
+    if (payloadLength >= 4) {
+        InterlockedExchange(&g_teamId, static_cast<LONG>(ReadBe32(payload)));
+    }
+
     const BYTE* cursor = payload + 4;
     const BYTE* end = payload + payloadLength;
     if (!SkipUtf(cursor, end) || cursor + 6 > end) {
@@ -11073,6 +11547,18 @@ void Handle42A2(const BYTE* payload, uint32_t payloadLength)
     cursor += 4;
     const uint16_t memberCount = ReadBe16(cursor);
     cursor += 2;
+
+    // 合併：自己房一直只有 1 人、超過等待時間且本輪尚未合併 → 解散 → 查列表 → 加入更靠前的同難度房
+    if (memberCount == 1 && g_consolidateDone == 0 &&
+        static_cast<LONG>(GetGameTick() - static_cast<DWORD>(g_consolidateDueTick)) >= 0) {
+        InterlockedExchange(&g_consolidateDone, 1);
+        Send429D();
+        Send4294();
+        InterlockedExchange(&g_state, 7);
+        InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+        return;
+    }
+
     if (memberCount != 3) {
         return;
     }
@@ -11218,13 +11704,35 @@ bool WaitBeforeCreateTeam()
 
 void Handle42A4(const BYTE* payload, uint32_t payloadLength)
 {
-    if (g_state != 3 && g_state != 4) {
+    if (g_state != 3 && g_state != 4 && g_state != 7) {
         return;
     }
 
     if (!ParseTeams(payload, payloadLength)) {
         InterlockedExchange(&g_createFinalCheck, 0);
         ReleaseCreateGate();
+        Finish();
+        return;
+    }
+    if (g_state == 7) {
+        // 合併：依伺服器列表順序找第一個「同難度 + 1 人」房 → 加入；否則重建自己的房
+        const LONG count = g_teamCount < static_cast<LONG>(kMaxTeams) ? g_teamCount : static_cast<LONG>(kMaxTeams);
+        for (LONG i = 0; i < count; ++i) {
+            if (g_teamDungeonIds[i] != static_cast<uint16_t>(g_currentId) || g_teamPeople[i] != 1) {
+                continue;
+            }
+            InterlockedExchange(&g_battleMode, 3);
+            InterlockedExchange(&g_teamId, g_teamIds[i]);
+            Send4296();
+            Send4293();
+            WriteJoinLog();
+            Finish();
+            return;
+        }
+        InterlockedExchange(&g_battleMode, 3);
+        InterlockedExchange(&g_consolidateDueTick, static_cast<LONG>(GetGameTick() + kConsolidateDelayMs));
+        Send4297();
+        WriteDungeonLog(kLogCreateFormat, g_logIndex);
         Finish();
         return;
     }
@@ -11253,6 +11761,7 @@ void Handle42A4(const BYTE* payload, uint32_t payloadLength)
 
         InterlockedExchange(&g_createFinalCheck, 0);
         InterlockedExchange(&g_battleMode, 3);
+        InterlockedExchange(&g_consolidateDueTick, static_cast<LONG>(GetGameTick() + kConsolidateDelayMs));
         Send4297();
         KeepCreateGateLeaseAfterSend();
         WriteDungeonLog(kLogCreateFormat, g_logIndex);
@@ -12176,11 +12685,277 @@ DWORD WINAPI AuthorizationThread(LPVOID)
 
 }
 
+namespace AutoOpenAgent
+{
+// 登入完成（開掛鈕 1010 變 enabled）後自動點「開掛」。
+// 若登入時已斷線（LOG 最新狀態為「網絡斷線」），先點「刷新」(0x3EC) 重連，
+// 等「自動重連」出現且開掛鈕重新 enabled 後再點「開掛」。
+const wchar_t kDisconnectText[] = L"\x7DB2\x7D61\x65B7\x7DDA";  // 網絡斷線
+const wchar_t kReconnectText[] = L"\x81EA\x52D5\x91CD\x9023";  // 自動重連
+constexpr UINT kOpenButtonId = 1010;                            // 開掛
+constexpr UINT kRefreshButtonId = 0x3EC;                        // 刷新
+
+HWND MainHwnd()
+{
+    if (g_mainBase == 0) {
+        return nullptr;
+    }
+    HWND hwnd = *reinterpret_cast<HWND volatile*>(g_mainBase + 0x2300A4);
+    return (hwnd && IsWindow(hwnd)) ? hwnd : nullptr;
+}
+
+HWND Button(UINT controlId)
+{
+    HWND mainHwnd = MainHwnd();
+    return mainHwnd ? GetDlgItem(mainHwnd, controlId) : nullptr;
+}
+
+bool OpenButtonEnabled()
+{
+    HWND hwnd = Button(kOpenButtonId);
+    return hwnd && IsWindowEnabled(hwnd) != FALSE;
+}
+
+const wchar_t* FindLastSubstring(const wchar_t* haystack, const wchar_t* needle)
+{
+    if (!haystack || !needle || !*needle) {
+        return nullptr;
+    }
+    const wchar_t* found = nullptr;
+    const wchar_t* p = haystack;
+    while ((p = std::wcsstr(p, needle)) != nullptr) {
+        found = p;
+        ++p;
+    }
+    return found;
+}
+
+size_t CountOccurrences(const wchar_t* text, const wchar_t* needle)
+{
+    if (!text || !needle || !*needle) {
+        return 0;
+    }
+    size_t count = 0;
+    const wchar_t* p = text;
+    while ((p = std::wcsstr(p, needle)) != nullptr) {
+        ++count;
+        ++p;
+    }
+    return count;
+}
+
+// LOG 最新狀態是否為「斷線」：最後一次「網絡斷線」比最後一次「自動重連」更晚，
+// 或根本還沒出現過「自動重連」。
+bool LogLatestDisconnected()
+{
+    const wchar_t* text = GameLog::CurrentText();
+    if (!text || !*text) {
+        return false;
+    }
+    const wchar_t* lastDisconnect = FindLastSubstring(text, kDisconnectText);
+    if (!lastDisconnect) {
+        return false;
+    }
+    const wchar_t* lastReconnect = FindLastSubstring(text, kReconnectText);
+    if (!lastReconnect) {
+        return true;
+    }
+    return lastDisconnect > lastReconnect;
+}
+
+void ClickButton(UINT controlId)
+{
+    HWND hwnd = Button(controlId);
+    if (hwnd && IsWindow(hwnd)) {
+        SendMessageW(hwnd, BM_CLICK, 0, 0);
+    }
+}
+
+DWORD WINAPI Thread(LPVOID)
+{
+    bool seenDisabled = false;     // 是否見過開掛鈕 disabled（代表 OnInitDialog 已跑過、非啟動預設 enabled）
+    bool initialHandled = false;   // 是否已處理過「第一次登入」
+    size_t lastReconnectCount = 0; // 上次自動開掛時 LOG 中「自動重連」的出現次數
+
+    for (;;) {
+        // 等開掛鈕 enabled（= 開掛 OFF、可點）；等待期間記錄「見過 disabled」。
+        // 注意：OpenButtonEnabled() 在對話框尚未建立（GetDlgItem 回 null）時也回 false，
+        // 但那不是「disabled」。只有當按鈕真的存在且 disabled 才設 seenDisabled，
+        // 否則一啟動就會把 seenDisabled 設 true，之後誤把 template 預設 enabled 當成登入。
+        while (!OpenButtonEnabled()) {
+            if (Button(kOpenButtonId) != nullptr) {
+                seenDisabled = true;
+            }
+            Sleep(100);
+        }
+
+        // 開掛鈕在啟動初期（dialog template 預設）會短暫 enabled，之後 OnInitDialog
+        // 才把它 disabled 並顯示「等待進入遊戲」。若還沒見過 disabled，表示現在是
+        // 啟動預設的 enabled，不是登入完成 → 等它先變 disabled 再回主循環。
+        // 最多等 8 秒；若一直 enabled（極少見：DLL 太晚載入、已錯過 disabled 階段）
+        // 則視為已登入繼續，避免永久卡住。
+        if (!seenDisabled) {
+            DWORD skipStart = GetTickCount();
+            while (OpenButtonEnabled() && (GetTickCount() - skipStart) < 8000) {
+                Sleep(100);
+            }
+            if (!OpenButtonEnabled()) {
+                continue;
+            }
+            seenDisabled = true;
+        }
+
+        // 判斷這是一次「登入/重連」（要自動開）還是「使用者停掛」（不要自動開）。
+        // 「登入」訊號 = 第一次登入，或 LOG 出現新的「自動重連」。
+        const size_t reconnectCount = CountOccurrences(GameLog::CurrentText(), kReconnectText);
+        const bool isLogin = !initialHandled || reconnectCount > lastReconnectCount;
+
+        if (!isLogin) {
+            // 停掛造成的 enabled：等使用者手動再開（變 disabled），
+            // 或出現新的「自動重連」後再回到主循環重新判斷。
+            while (OpenButtonEnabled() &&
+                   CountOccurrences(GameLog::CurrentText(), kReconnectText) <= lastReconnectCount) {
+                Sleep(200);
+            }
+            continue;
+        }
+
+        // 稍候讓斷線 LOG 落定
+        Sleep(400);
+
+        // 登入時已斷線 → 先點刷新重連
+        if (LogLatestDisconnected()) {
+            ClickButton(kRefreshButtonId);
+
+            // 等最新狀態變為「已重連」（自動重連 比 網絡斷線 更晚）
+            DWORD reconnectStart = GetTickCount();
+            while ((GetTickCount() - reconnectStart) < 30000 && LogLatestDisconnected()) {
+                Sleep(200);
+            }
+
+            // 重連後等開掛鈕重新 enabled
+            DWORD enabledStart = GetTickCount();
+            while ((GetTickCount() - enabledStart) < 10000 && !OpenButtonEnabled()) {
+                Sleep(100);
+            }
+
+            // 仍未重連成功或仍不可點 → 退後重試整段
+            if (LogLatestDisconnected() || !OpenButtonEnabled()) {
+                Sleep(3000);
+                continue;
+            }
+        }
+
+        // 點開掛
+        ClickButton(kOpenButtonId);
+
+        // 記錄本次自動開掛的基準，避免把「停掛」造成的 enabled 誤判為登入
+        lastReconnectCount = CountOccurrences(GameLog::CurrentText(), kReconnectText);
+        initialHandled = true;
+
+        // 等開掛鈕變 disabled（確認已開啟），避免立刻重複點
+        DWORD offStart = GetTickCount();
+        while ((GetTickCount() - offStart) < 5000 && OpenButtonEnabled()) {
+            Sleep(100);
+        }
+    }
+    return 0;
+}
+
+}
+
+namespace BeforeUnloadGuard
+{
+// 登入後內嵌 IE 會跳出「是否要離開此頁面」的 beforeunload 對話框。
+// 這是很舊的程式，JS 注入無效；改用原生方式：偵測該對話框視窗，自動按下「離開這個網頁」。
+volatile LONG g_started = 0;
+
+void DebugLog(const wchar_t* text)
+{
+    wchar_t path[MAX_PATH]{};
+    if (GetTempPathW(_countof(path), path) == 0) {
+        return;
+    }
+    wcscat_s(path, L"beforeunload_debug.log");
+    HANDLE f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t line[1024]{};
+    _snwprintf_s(line, _countof(line), _TRUNCATE, L"[%02u:%02u:%02u] %s\r\n",
+        st.wHour, st.wMinute, st.wSecond, text);
+    DWORD bytes = static_cast<DWORD>(wcslen(line) * sizeof(wchar_t));
+    DWORD written = 0;
+    WriteFile(f, line, bytes, &written, nullptr);
+    CloseHandle(f);
+}
+
+// 找按鈕文字包含「離開」的子按鈕
+BOOL CALLBACK FindLeaveButtonProc(HWND hwnd, LPARAM lParam)
+{
+    HWND* out = reinterpret_cast<HWND*>(lParam);
+    wchar_t text[256]{};
+    if (GetWindowTextW(hwnd, text, _countof(text)) > 0 &&
+        std::wcsstr(text, L"\x96E2\x958B") != nullptr) {  // 「離開」
+        *out = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+// 找標題含「Internet Explorer」的對話框（class #32770），按下「離開」
+BOOL CALLBACK FindIeDialogProc(HWND hwnd, LPARAM)
+{
+    wchar_t cls[64]{};
+    if (GetClassNameW(hwnd, cls, _countof(cls)) <= 0 || std::wcscmp(cls, L"#32770") != 0) {
+        return TRUE;
+    }
+    wchar_t title[256]{};
+    if (GetWindowTextW(hwnd, title, _countof(title)) <= 0 ||
+        std::wcsstr(title, L"Internet Explorer") == nullptr) {
+        return TRUE;
+    }
+    HWND leaveBtn = nullptr;
+    EnumChildWindows(hwnd, FindLeaveButtonProc, reinterpret_cast<LPARAM>(&leaveBtn));
+    if (leaveBtn != nullptr) {
+        SendMessageW(leaveBtn, BM_CLICK, 0, 0);
+        DebugLog(L"dismissed ie leave dialog");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+DWORD WINAPI DismissThread(LPVOID)
+{
+    for (;;) {
+        EnumWindows(FindIeDialogProc, 0);
+        Sleep(100);
+    }
+    return 0;
+}
+
+void Start()
+{
+    if (InterlockedCompareExchange(&g_started, 1, 0) != 0) {
+        return;
+    }
+    HANDLE thread = CreateThread(nullptr, 0, DismissThread, nullptr, 0, nullptr);
+    if (thread != nullptr) {
+        CloseHandle(thread);
+    }
+}
+
+}
+
 DWORD WINAPI MainThread(LPVOID)
 {
     HMODULE mainModule = GetModuleHandleA(nullptr);
     uintptr_t base = reinterpret_cast<uintptr_t>(mainModule);
     g_mainBase = base;
+    BeforeUnloadGuard::Start();
     TaskDispatchUi::Start();
     LureSwitchUi::Start();
     PatchResult results[kPatchCount]{};
@@ -12299,6 +13074,11 @@ DWORD WINAPI MainThread(LPVOID)
         return 0;
     }
     CloseHandle(authorizationThread);
+
+    HANDLE autoOpenAgentThread = CreateThread(nullptr, 0, AutoOpenAgent::Thread, nullptr, 0, nullptr);
+    if (autoOpenAgentThread) {
+        CloseHandle(autoOpenAgentThread);
+    }
 
     return 0;
 }
