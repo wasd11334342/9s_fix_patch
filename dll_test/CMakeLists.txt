@@ -14,6 +14,7 @@ add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
 
 add_library(MyPatch SHARED
     dllmain.cpp
+    launcher_gate.cpp
     native_optimization.cpp
     license_tls_client.cpp
     license_tls_resources.rc)

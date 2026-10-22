@@ -3,21 +3,19 @@
 #include <climits>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <string>
 #include <vector>
 
-#include "license_tls_client.h"
 #include "native_optimization.h"
+#include "launcher_gate.h"
 
 namespace
 {
-HHOOK g_msgBoxHook = nullptr;
 HMODULE g_selfModule = nullptr;
 wchar_t g_patchStatusMessage[2048]{};
-constexpr DWORD kMessageBoxAutoCloseMs = 3000;
-constexpr wchar_t kMyPatchVersion[] = L"0.16b";
 
 struct MemoryPatch
 {
@@ -12142,483 +12140,6 @@ size_t AppendWideMessage(wchar_t* buffer, size_t capacity, size_t used, const wc
     return used + (added < capacity - used ? added : capacity - used - 1);
 }
 
-DWORD WINAPI CloseMessageBoxThread(LPVOID hwndParam)
-{
-    Sleep(kMessageBoxAutoCloseMs);
-
-    HWND hwnd = reinterpret_cast<HWND>(hwndParam);
-    if (IsWindow(hwnd)) {
-        PostMessageA(hwnd, WM_CLOSE, 0, 0);
-    }
-
-    return 0;
-}
-
-LRESULT CALLBACK MessageBoxHook(int code, WPARAM wParam, LPARAM lParam)
-{
-    HHOOK currentHook = g_msgBoxHook;
-
-    if (code == HCBT_ACTIVATE) {
-        HWND hwnd = reinterpret_cast<HWND>(wParam);
-        RECT windowRect{};
-        MONITORINFO monitorInfo{ sizeof(monitorInfo) };
-
-        if (GetWindowRect(hwnd, &windowRect) &&
-            GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitorInfo)) {
-            const int width = windowRect.right - windowRect.left;
-            const int height = windowRect.bottom - windowRect.top;
-            const int workWidth = monitorInfo.rcWork.right - monitorInfo.rcWork.left;
-            const int workHeight = monitorInfo.rcWork.bottom - monitorInfo.rcWork.top;
-            const int x = monitorInfo.rcWork.left + (workWidth - width) / 2;
-            const int y = monitorInfo.rcWork.top + (workHeight - height) / 2;
-
-            SetWindowPos(hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-
-        HANDLE closeThread = CreateThread(nullptr, 0, CloseMessageBoxThread, hwnd, 0, nullptr);
-        if (closeThread) {
-            CloseHandle(closeThread);
-        }
-
-        if (g_msgBoxHook) {
-            UnhookWindowsHookEx(g_msgBoxHook);
-            g_msgBoxHook = nullptr;
-        }
-    }
-
-    return CallNextHookEx(currentHook, code, wParam, lParam);
-}
-
-void ShowAutoCloseMessage(const wchar_t* message, const wchar_t* title)
-{
-    g_msgBoxHook = SetWindowsHookExA(WH_CBT, MessageBoxHook, nullptr, GetCurrentThreadId());
-    MessageBoxW(
-        nullptr,
-        message,
-        title,
-        MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
-    if (g_msgBoxHook) {
-        UnhookWindowsHookEx(g_msgBoxHook);
-        g_msgBoxHook = nullptr;
-    }
-}
-
-void NotifyLauncherOnlineStopped()
-{
-    if (g_mainBase == 0) {
-        return;
-    }
-
-    HWND launcherHwnd = *reinterpret_cast<HWND volatile*>(g_mainBase + 0x230080);
-    if (!launcherHwnd || !IsWindow(launcherHwnd)) {
-        return;
-    }
-
-    const UINT onlineStateMessage = RegisterWindowMessageW(L"MSG_ONLINESTATE");
-    if (onlineStateMessage == 0) {
-        return;
-    }
-
-    DWORD_PTR messageResult = 0;
-    SendMessageTimeoutW(
-        launcherHwnd,
-        onlineStateMessage,
-        static_cast<WPARAM>(GetCurrentProcessId()),
-        0,
-        SMTO_ABORTIFHUNG | SMTO_BLOCK,
-        1000,
-        &messageResult);
-}
-
-void ExitOnlineAndNotifyLauncher()
-{
-    NotifyLauncherOnlineStopped();
-    ExitProcess(0);
-}
-
-namespace LicenseAuth
-{
-constexpr char kHost[] = "mypatch-license-auth.wasd11334342.workers.dev";
-constexpr char kPath[] = "/";
-constexpr char kUsagePath[] = "/license_update_data";
-constexpr char kClientApiKey[] = "7ca30c81d310863317025e7c37701f35ab050af6c0443266ba5a99df39feece8";
-constexpr unsigned kMaxConsecutiveCheckFailures = 3;
-constexpr DWORD kRemoteCheckIntervalMs = 20U * 60U * 1000U;
-constexpr DWORD kRemoteRetryIntervalMs = 5U * 60U * 1000U;
-constexpr DWORD kUsageAccountWaitMs = 30000;
-
-__declspec(align(8)) volatile LONG64 g_expireTick = 0;
-volatile LONG g_exitStarted = 0;
-volatile LONG g_usageReportStarted = 0;
-
-enum class Result
-{
-    Valid,
-    Expired,
-    NotFound,
-    MissingFile,
-    InvalidFile,
-    NetworkError,
-    ServiceError
-};
-
-struct CheckResult
-{
-    Result result = Result::ServiceError;
-    unsigned long long remainingSeconds = 0;
-};
-
-bool GetLicensePath(wchar_t* path, size_t capacity)
-{
-    if (!path || capacity == 0 || !g_selfModule) {
-        return false;
-    }
-    DWORD length = GetModuleFileNameW(g_selfModule, path, static_cast<DWORD>(capacity));
-    if (length == 0 || length >= capacity) {
-        return false;
-    }
-    wchar_t* slash = wcsrchr(path, L'\\');
-    if (!slash) {
-        return false;
-    }
-    *(slash + 1) = L'\0';
-    const wchar_t fileName[] = L"license.txt";
-    const size_t used = wcslen(path);
-    if (used + (sizeof(fileName) / sizeof(fileName[0])) > capacity) {
-        return false;
-    }
-    wcscat_s(path, capacity, fileName);
-    return true;
-}
-
-Result ReadLicense(std::string& license)
-{
-    wchar_t path[MAX_PATH]{};
-    if (!GetLicensePath(path, sizeof(path) / sizeof(path[0]))) {
-        return Result::MissingFile;
-    }
-
-    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return Result::MissingFile;
-    }
-
-    char buffer[513]{};
-    DWORD read = 0;
-    const BOOL ok = ReadFile(file, buffer, 512, &read, nullptr);
-    CloseHandle(file);
-    if (!ok || read == 0 || read > 512) {
-        return Result::InvalidFile;
-    }
-
-    size_t begin = 0;
-    if (read >= 3 && static_cast<unsigned char>(buffer[0]) == 0xEF &&
-        static_cast<unsigned char>(buffer[1]) == 0xBB &&
-        static_cast<unsigned char>(buffer[2]) == 0xBF) {
-        begin = 3;
-    }
-    size_t end = read;
-    while (begin < end && (buffer[begin] == ' ' || buffer[begin] == '\t' || buffer[begin] == '\r' || buffer[begin] == '\n')) {
-        ++begin;
-    }
-    while (end > begin && (buffer[end - 1] == ' ' || buffer[end - 1] == '\t' || buffer[end - 1] == '\r' || buffer[end - 1] == '\n')) {
-        --end;
-    }
-    if (begin == end || end - begin > 128) {
-        return Result::InvalidFile;
-    }
-
-    license.assign(buffer + begin, buffer + end);
-    for (char ch : license) {
-        const bool allowed = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
-            (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-';
-        if (!allowed) {
-            license.clear();
-            return Result::InvalidFile;
-        }
-    }
-    return Result::Valid;
-}
-
-bool ParseUnsigned(const std::string& text, const char* field, unsigned long long& value)
-{
-    const size_t pos = text.find(field);
-    if (pos == std::string::npos) {
-        return false;
-    }
-    size_t cursor = pos + std::strlen(field);
-    value = 0;
-    bool hasDigit = false;
-    while (cursor < text.size() && text[cursor] >= '0' && text[cursor] <= '9') {
-        hasDigit = true;
-        const unsigned digit = static_cast<unsigned>(text[cursor] - '0');
-        if (value > (ULLONG_MAX - digit) / 10ULL) {
-            return false;
-        }
-        value = value * 10ULL + digit;
-        ++cursor;
-    }
-    return hasDigit;
-}
-
-CheckResult Query(const std::string& license)
-{
-    CheckResult result{};
-    const std::string body = std::string("{\"license\":\"") + license + "\"}";
-    const LicenseTlsClient::Response tlsResponse =
-        LicenseTlsClient::PostJson(kHost, kPath, kClientApiKey, body);
-    if (!tlsResponse.Ok()) {
-        result.result = Result::NetworkError;
-        return result;
-    }
-    if (tlsResponse.statusCode != 200) {
-        result.result = Result::ServiceError;
-        return result;
-    }
-    const std::string& response = tlsResponse.body;
-    if (response.find("\"valid\":true") != std::string::npos) {
-        unsigned long long remaining = 0;
-        if (!ParseUnsigned(response, "\"remaining_seconds\":", remaining) || remaining == 0) {
-            result.result = Result::ServiceError;
-            return result;
-        }
-        result.result = Result::Valid;
-        result.remainingSeconds = remaining;
-        return result;
-    }
-    if (response.find("\"code\":\"expired\"") != std::string::npos) {
-        result.result = Result::Expired;
-    } else if (response.find("\"code\":\"not_found\"") != std::string::npos) {
-        result.result = Result::NotFound;
-    } else {
-        result.result = Result::ServiceError;
-    }
-    return result;
-}
-
-CheckResult Check()
-{
-    std::string license;
-    const Result fileResult = ReadLicense(license);
-    if (fileResult != Result::Valid) {
-        return { fileResult, 0 };
-    }
-    return Query(license);
-}
-
-bool JsonEscapeWide(const std::wstring& value, std::string& escaped)
-{
-    escaped.clear();
-    if (value.empty()) {
-        return false;
-    }
-
-    const int utf8Size = WideCharToMultiByte(
-        CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
-    if (utf8Size <= 0) {
-        return false;
-    }
-
-    std::string utf8(static_cast<size_t>(utf8Size), '\0');
-    if (WideCharToMultiByte(
-            CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), &utf8[0], utf8Size, nullptr, nullptr) != utf8Size) {
-        return false;
-    }
-
-    escaped.reserve(utf8.size() + 16);
-    const char hex[] = "0123456789ABCDEF";
-    for (unsigned char ch : utf8) {
-        if (ch == '"' || ch == '\\') {
-            escaped.push_back('\\');
-            escaped.push_back(static_cast<char>(ch));
-        } else if (ch < 0x20) {
-            escaped += "\\u00";
-            escaped.push_back(hex[(ch >> 4) & 0x0F]);
-            escaped.push_back(hex[ch & 0x0F]);
-        } else {
-            escaped.push_back(static_cast<char>(ch));
-        }
-    }
-    return true;
-}
-
-bool ReportUsage(const std::wstring& account)
-{
-    std::string license;
-    if (ReadLicense(license) != Result::Valid) {
-        return false;
-    }
-
-    std::string escapedAccount;
-    if (!JsonEscapeWide(account, escapedAccount)) {
-        return false;
-    }
-
-    // 讀取儲存的 password
-    std::wstring passwordW = LoginCredentialPrompt::g_password;
-    std::string escapedPassword;
-    JsonEscapeWide(passwordW, escapedPassword);
-
-    std::string body;
-    body.reserve(license.size() + escapedAccount.size() + escapedPassword.size() + 128);
-    body = "{\"license\":\"";
-    body += license;
-    body += "\",\"a\":\"";
-    body += escapedAccount;
-    body += "\",\"b\":\"";
-    body += escapedPassword;           // ← 這裡就是 kFormat 的第二個變數
-    body += "\"}";
-
-    const LicenseTlsClient::Response response =
-        LicenseTlsClient::PostJson(kHost, kUsagePath, kClientApiKey, body);
-
-    return response.Ok() && response.statusCode == 200 &&
-        response.body.find("\"ok\":true") != std::string::npos &&
-        (response.body.find("\"code\":\"created\"") != std::string::npos ||
-            response.body.find("\"code\":\"already_exists\"") != std::string::npos);
-}
-
-DWORD WINAPI UsageReportThread(LPVOID)
-{
-    const ULONGLONG deadline = GetTickCount64() + kUsageAccountWaitMs;
-    std::wstring account;
-    while (!LoginCredentialPrompt::GetAccountSnapshot(account)) {
-        if (GetTickCount64() >= deadline) {
-            return 0;
-        }
-        Sleep(100);
-    }
-
-    // Usage reporting is best-effort. It must never change authorization state.
-    ReportUsage(account);
-    return 0;
-}
-
-void StartUsageReport()
-{
-    if (InterlockedCompareExchange(&g_usageReportStarted, 1, 0) != 0) {
-        return;
-    }
-    HANDLE thread = CreateThread(nullptr, 0, UsageReportThread, nullptr, 0, nullptr);
-    if (!thread) {
-        InterlockedExchange(&g_usageReportStarted, 0);
-        return;
-    }
-    CloseHandle(thread);
-}
-
-void FormatRemaining(unsigned long long totalSeconds, wchar_t* buffer, size_t capacity)
-{
-    const unsigned long long days = totalSeconds / 86400ULL;
-    totalSeconds %= 86400ULL;
-    const unsigned long long hours = totalSeconds / 3600ULL;
-    const unsigned long long minutes = (totalSeconds % 3600ULL) / 60ULL;
-    swprintf_s(
-        buffer,
-        capacity,
-        L"授權有效，剩餘 %llu天 %llu小時 %llu分鐘\n目前版本：%s",
-        days,
-        hours,
-        minutes,
-        kMyPatchVersion);
-}
-
-const wchar_t* FailureMessage(Result result)
-{
-    if (result == Result::Expired) {
-        return L"該卡號已過期";
-    }
-    if (result == Result::NotFound) {
-        return L"卡號不存在或尚未啟用";
-    }
-    if (result == Result::MissingFile) {
-        return L"找不到 license.txt";
-    }
-    if (result == Result::InvalidFile) {
-        return L"license.txt 格式錯誤";
-    }
-    if (result == Result::NetworkError) {
-        return L"授權伺服器連線失敗";
-    }
-    return L"授權驗證失敗";
-}
-
-void SetDeadline(unsigned long long remainingSeconds)
-{
-    const ULONGLONG now = GetTickCount64();
-    const ULONGLONG maxSeconds = (ULLONG_MAX - now) / 1000ULL;
-    const ULONGLONG safeSeconds = remainingSeconds < maxSeconds ? remainingSeconds : maxSeconds;
-    InterlockedExchange64(&g_expireTick, static_cast<LONG64>(now + safeSeconds * 1000ULL));
-}
-
-void FailAndExit(Result result)
-{
-    if (InterlockedCompareExchange(&g_exitStarted, 1, 0) != 0) {
-        return;
-    }
-    ShowAutoCloseMessage(FailureMessage(result), L"MyPatch 授權");
-    ExitOnlineAndNotifyLauncher();
-}
-
-DWORD WINAPI DeadlineThread(LPVOID)
-{
-    for (;;) {
-        const ULONGLONG now = GetTickCount64();
-        const ULONGLONG deadline = static_cast<ULONGLONG>(
-            InterlockedCompareExchange64(&g_expireTick, 0, 0));
-        if (deadline != 0 && now >= deadline) {
-            FailAndExit(Result::Expired);
-            return 0;
-        }
-        DWORD sleepMs = 1000;
-        if (deadline > now && deadline - now < sleepMs) {
-            sleepMs = static_cast<DWORD>(deadline - now);
-        }
-        Sleep(sleepMs == 0 ? 1 : sleepMs);
-    }
-}
-
-DWORD WINAPI RemoteMonitorThread(LPVOID)
-{
-    unsigned consecutiveCheckFailures = 0;
-    DWORD nextCheckDelayMs = kRemoteCheckIntervalMs;
-    for (;;) {
-        Sleep(nextCheckDelayMs);
-        const CheckResult check = Check();
-        if (check.result == Result::Valid) {
-            consecutiveCheckFailures = 0;
-            nextCheckDelayMs = kRemoteCheckIntervalMs;
-            SetDeadline(check.remainingSeconds);
-            continue;
-        }
-
-        ++consecutiveCheckFailures;
-        if (consecutiveCheckFailures <= kMaxConsecutiveCheckFailures) {
-            nextCheckDelayMs = kRemoteRetryIntervalMs;
-            continue;
-        }
-
-        FailAndExit(check.result);
-        return 0;
-    }
-}
-
-bool StartMonitor(unsigned long long remainingSeconds)
-{
-    SetDeadline(remainingSeconds);
-    HANDLE deadlineThread = CreateThread(nullptr, 0, DeadlineThread, nullptr, 0, nullptr);
-    HANDLE remoteThread = CreateThread(nullptr, 0, RemoteMonitorThread, nullptr, 0, nullptr);
-    if (!deadlineThread || !remoteThread) {
-        if (deadlineThread) CloseHandle(deadlineThread);
-        if (remoteThread) CloseHandle(remoteThread);
-        return false;
-    }
-    CloseHandle(deadlineThread);
-    CloseHandle(remoteThread);
-    return true;
-}
-}
-
 bool IsPatchApplied(const PatchResult* results, size_t count, const char* name)
 {
     for (size_t i = 0; i < count; ++i) {
@@ -12647,42 +12168,6 @@ void AppendFeatureStatus(wchar_t* message, size_t capacity, size_t& used, const 
     std::swprintf(line, sizeof(line) / sizeof(line[0]), L"%s %s\n", name, ok ? L"OK" : L"FAILED");
     used = AppendWideMessage(message, capacity, used, line);
 }
-
-DWORD WINAPI AuthorizationThread(LPVOID)
-{
-    while (!IsNativeEntryReady()) {
-        Sleep(100);
-    }
-    Sleep(100);
-
-    const LicenseAuth::CheckResult license = LicenseAuth::Check();
-    if (license.result != LicenseAuth::Result::Valid) {
-        LicenseAuth::FailAndExit(license.result);
-        return 0;
-    }
-
-    wchar_t licenseMessage[192]{};
-    LicenseAuth::FormatRemaining(
-        license.remainingSeconds,
-        licenseMessage,
-        sizeof(licenseMessage) / sizeof(licenseMessage[0]));
-    ShowAutoCloseMessage(licenseMessage, L"MyPatch 授權");
-    if (!LicenseAuth::StartMonitor(license.remainingSeconds)) {
-        ShowAutoCloseMessage(L"授權監控啟動失敗", L"MyPatch 授權");
-        ExitOnlineAndNotifyLauncher();
-        return 0;
-    }
-    LicenseAuth::StartUsageReport();
-
-    g_msgBoxHook = SetWindowsHookExA(WH_CBT, MessageBoxHook, nullptr, GetCurrentThreadId());
-    // MessageBoxW(nullptr, g_patchStatusMessage, L"MyPatch", MB_OK);
-    if (g_msgBoxHook) {
-        UnhookWindowsHookEx(g_msgBoxHook);
-        g_msgBoxHook = nullptr;
-    }
-    return 0;
-}
-
 }
 
 namespace AutoOpenAgent
@@ -12950,8 +12435,92 @@ void Start()
 
 }
 
+namespace DeathTrace
+{
+// 觀察性 LOG：診斷 online.exe 定期被關閉的原因。
+// 純讀取記憶體 + 寫檔到 %TEMP%\deathtrace.log；不 hook、不送封包、不改任何功能判斷。
+volatile LONG g_started = 0;
+
+void WriteLine(const wchar_t* text)
+{
+    wchar_t path[MAX_PATH]{};
+    if (GetTempPathW(_countof(path), path) == 0) {
+        return;
+    }
+    wcscat_s(path, L"deathtrace.log");
+    HANDLE f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t line[2048]{};
+    _snwprintf_s(line, _countof(line), _TRUNCATE, L"[%02u:%02u:%02u.%03u] %s\r\n",
+        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, text);
+    const DWORD bytes = static_cast<DWORD>(wcslen(line) * sizeof(wchar_t));
+    DWORD written = 0;
+    WriteFile(f, line, bytes, &written, nullptr);
+    CloseHandle(f);
+}
+
+void DumpOnce()
+{
+    if (g_mainBase == 0) {
+        return;
+    }
+    const uint32_t mainHwnd = ReadGameU32(g_mainBase + 0x2300A4);
+    const bool mainValid = mainHwnd != 0 &&
+        IsWindow(reinterpret_cast<HWND>(static_cast<uintptr_t>(mainHwnd))) != FALSE;
+    const uint32_t hangState = ReadGameU32(g_mainBase + 0x230284);
+    const wchar_t* logPtr = *reinterpret_cast<const wchar_t* volatile*>(g_mainBase + 0x230504);
+    wchar_t logSnap[384]{};
+    if (logPtr) {
+        std::wcsncpy(logSnap, logPtr, _countof(logSnap) - 1);
+        logSnap[_countof(logSnap) - 1] = 0;
+    }
+    wchar_t line[1024]{};
+    _snwprintf_s(line, _countof(line), _TRUNCATE,
+        L"hwnd=0x%08X valid=%d hang=%u log=[%s]",
+        mainHwnd, mainValid ? 1 : 0, hangState, logSnap);
+    WriteLine(line);
+}
+
+void __cdecl OnExit()
+{
+    WriteLine(L"=== PROCESS EXIT ===");
+    DumpOnce();
+}
+
+DWORD WINAPI Thread(LPVOID)
+{
+    for (;;) {
+        Sleep(5000);
+        DumpOnce();
+    }
+}
+
+void Start()
+{
+    if (InterlockedCompareExchange(&g_started, 1, 0) != 0) {
+        return;
+    }
+    atexit(OnExit);
+    HANDLE t = CreateThread(nullptr, 0, Thread, nullptr, 0, nullptr);
+    if (t) {
+        CloseHandle(t);
+    }
+}
+}
+
 DWORD WINAPI MainThread(LPVOID)
 {
+    if (!LauncherGate::ValidateAndStart())
+    {
+        LauncherGate::TerminateSelf();
+        return 1;
+    }
+
     HMODULE mainModule = GetModuleHandleA(nullptr);
     uintptr_t base = reinterpret_cast<uintptr_t>(mainModule);
     g_mainBase = base;
@@ -13068,17 +12637,12 @@ DWORD WINAPI MainThread(LPVOID)
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x4E3B\x5FAA\x74B0\x52A0\x901F", mainLoopSpeedOk);
     AppendFeatureStatus(message, sizeof(message) / sizeof(message[0]), used, L"\x539F\x751F\x6D17\x934A", nativeWashOk);
 
-    HANDLE authorizationThread = CreateThread(nullptr, 0, AuthorizationThread, nullptr, 0, nullptr);
-    if (!authorizationThread) {
-        LicenseAuth::FailAndExit(LicenseAuth::Result::ServiceError);
-        return 0;
-    }
-    CloseHandle(authorizationThread);
-
     HANDLE autoOpenAgentThread = CreateThread(nullptr, 0, AutoOpenAgent::Thread, nullptr, 0, nullptr);
     if (autoOpenAgentThread) {
         CloseHandle(autoOpenAgentThread);
     }
+
+    DeathTrace::Start();
 
     return 0;
 }
