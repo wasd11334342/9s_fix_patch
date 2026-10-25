@@ -1243,6 +1243,7 @@ volatile LONG g_parseErrors = 0;
 volatile LONG g_routerHits = 0;
 volatile LONG g_roadLoaded = 0;
 volatile LONG g_roadLoadFailed = 0;
+volatile LONG g_roadLastError = 0;
 volatile LONG g_testBypassReady = 0;
 volatile LONG g_testMoveSends = 0;
 volatile LONG g_testStepSends = 0;
@@ -1400,24 +1401,71 @@ bool ParseRoadBytes(const char* data, size_t size)
     return edgeCount > 0;
 }
 
+std::wstring ExecutableDirectory()
+{
+    std::vector<wchar_t> buffer(MAX_PATH);
+    for (;;) {
+        const DWORD length = GetModuleFileNameW(
+            nullptr,
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()));
+        if (length == 0) {
+            return std::wstring();
+        }
+        if (length < buffer.size() - 1) {
+            std::wstring path(buffer.data(), length);
+            const size_t slash = path.find_last_of(L"\\/");
+            return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+        }
+        if (buffer.size() >= 32768) {
+            return std::wstring();
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+}
+
+std::wstring BuildLocalDreamlandPath(const wchar_t* fileName)
+{
+    const std::wstring root = ExecutableDirectory();
+    if (root.empty() || !fileName || !*fileName) return std::wstring();
+    std::wstring path = root;
+    if (path.back() != L'\\' && path.back() != L'/') {
+        path += L'\\';
+    }
+    path += L"dreamland\\";
+    path += fileName;
+    return path;
+}
+
+HANDLE OpenLocalDreamlandConfig(const wchar_t* fileName)
+{
+    const std::wstring path = BuildLocalDreamlandPath(fileName);
+    if (path.empty()) {
+        SetLastError(ERROR_PATH_NOT_FOUND);
+        return INVALID_HANDLE_VALUE;
+    }
+    return CreateFileW(
+        path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+}
+
 bool LoadRoadGraph()
 {
     if (g_roadLoaded != 0) return true;
-    if (g_roadLoadFailed != 0) return false;
 
-    wchar_t programFiles[MAX_PATH]{};
-    DWORD length = GetEnvironmentVariableW(L"ProgramFiles(x86)", programFiles, _countof(programFiles));
-    if (length == 0 || length >= _countof(programFiles)) {
-        wcscpy_s(programFiles, L"C:\\Program Files (x86)");
-    }
-    std::wstring path(programFiles);
-    path += L"\\\x4E00\x7D71\x5929\x4E0B\\media\\zh_TW\\config\\dreamland\\road.xml";
-
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE file = OpenLocalDreamlandConfig(L"road.xml");
     if (file == INVALID_HANDLE_VALUE) {
         InterlockedExchange(&g_roadLoadFailed, 1);
-        GameLog::Write(L"\x5E7B\x5883\xFF1A\x7121\x6CD5\x8B80\x53D6 road.xml");
+        const DWORD openError = GetLastError();
+        const LONG errorKey = static_cast<LONG>(openError == 0 ? ERROR_FILE_NOT_FOUND : openError);
+        if (InterlockedExchange(&g_roadLastError, errorKey) != errorKey) {
+            GameLog::Write(L"\x5E7B\x5883\xFF1A\x7121\x6CD5\x8B80\x53D6 road.xml");
+        }
         return false;
     }
 
@@ -1439,10 +1487,15 @@ bool LoadRoadGraph()
     }
     if (!success) {
         InterlockedExchange(&g_roadLoadFailed, 1);
-        GameLog::Write(L"\x5E7B\x5883\xFF1A\x9053\x8DEF\x8A2D\x5B9A\x89E3\x6790\x5931\x6557");
+        const LONG errorKey = static_cast<LONG>(ERROR_BAD_FORMAT);
+        if (InterlockedExchange(&g_roadLastError, errorKey) != errorKey) {
+            GameLog::Write(L"\x5E7B\x5883\xFF1A\x7121\x6CD5\x8B80\x53D6 road.xml");
+        }
         return false;
     }
 
+    InterlockedExchange(&g_roadLoadFailed, 0);
+    InterlockedExchange(&g_roadLastError, 0);
     InterlockedExchange(&g_roadLoaded, 1);
     return true;
 }
@@ -1497,18 +1550,8 @@ bool ParseCityNamesBytes(const char* data, size_t size)
 bool LoadCityNames()
 {
     if (g_cityNamesLoaded != 0) return true;
-    if (g_cityNamesLoadFailed != 0) return false;
 
-    wchar_t programFiles[MAX_PATH]{};
-    DWORD length = GetEnvironmentVariableW(L"ProgramFiles(x86)", programFiles, _countof(programFiles));
-    if (length == 0 || length >= _countof(programFiles)) {
-        wcscpy_s(programFiles, L"C:\\Program Files (x86)");
-    }
-    std::wstring path(programFiles);
-    path += L"\\\x4E00\x7D71\x5929\x4E0B\\media\\zh_TW\\config\\dreamland\\city.xml";
-
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE file = OpenLocalDreamlandConfig(L"city.xml");
     if (file == INVALID_HANDLE_VALUE) {
         InterlockedExchange(&g_cityNamesLoadFailed, 1);
         return false;
@@ -1535,6 +1578,7 @@ bool LoadCityNames()
         return false;
     }
 
+    InterlockedExchange(&g_cityNamesLoadFailed, 0);
     InterlockedExchange(&g_cityNamesLoaded, 1);
     return true;
 }
@@ -12435,84 +12479,6 @@ void Start()
 
 }
 
-namespace DeathTrace
-{
-// 觀察性 LOG：診斷 online.exe 定期被關閉的原因。
-// 純讀取記憶體 + 寫檔到 %TEMP%\deathtrace.log；不 hook、不送封包、不改任何功能判斷。
-volatile LONG g_started = 0;
-
-void WriteLine(const wchar_t* text)
-{
-    wchar_t path[MAX_PATH]{};
-    if (GetTempPathW(_countof(path), path) == 0) {
-        return;
-    }
-    wcscat_s(path, L"deathtrace.log");
-    HANDLE f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) {
-        return;
-    }
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
-    wchar_t line[2048]{};
-    _snwprintf_s(line, _countof(line), _TRUNCATE, L"[%02u:%02u:%02u.%03u] %s\r\n",
-        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, text);
-    const DWORD bytes = static_cast<DWORD>(wcslen(line) * sizeof(wchar_t));
-    DWORD written = 0;
-    WriteFile(f, line, bytes, &written, nullptr);
-    CloseHandle(f);
-}
-
-void DumpOnce()
-{
-    if (g_mainBase == 0) {
-        return;
-    }
-    const uint32_t mainHwnd = ReadGameU32(g_mainBase + 0x2300A4);
-    const bool mainValid = mainHwnd != 0 &&
-        IsWindow(reinterpret_cast<HWND>(static_cast<uintptr_t>(mainHwnd))) != FALSE;
-    const uint32_t hangState = ReadGameU32(g_mainBase + 0x230284);
-    const wchar_t* logPtr = *reinterpret_cast<const wchar_t* volatile*>(g_mainBase + 0x230504);
-    wchar_t logSnap[384]{};
-    if (logPtr) {
-        std::wcsncpy(logSnap, logPtr, _countof(logSnap) - 1);
-        logSnap[_countof(logSnap) - 1] = 0;
-    }
-    wchar_t line[1024]{};
-    _snwprintf_s(line, _countof(line), _TRUNCATE,
-        L"hwnd=0x%08X valid=%d hang=%u log=[%s]",
-        mainHwnd, mainValid ? 1 : 0, hangState, logSnap);
-    WriteLine(line);
-}
-
-void __cdecl OnExit()
-{
-    WriteLine(L"=== PROCESS EXIT ===");
-    DumpOnce();
-}
-
-DWORD WINAPI Thread(LPVOID)
-{
-    for (;;) {
-        Sleep(5000);
-        DumpOnce();
-    }
-}
-
-void Start()
-{
-    if (InterlockedCompareExchange(&g_started, 1, 0) != 0) {
-        return;
-    }
-    atexit(OnExit);
-    HANDLE t = CreateThread(nullptr, 0, Thread, nullptr, 0, nullptr);
-    if (t) {
-        CloseHandle(t);
-    }
-}
-}
-
 DWORD WINAPI MainThread(LPVOID)
 {
     if (!LauncherGate::ValidateAndStart())
@@ -12641,8 +12607,6 @@ DWORD WINAPI MainThread(LPVOID)
     if (autoOpenAgentThread) {
         CloseHandle(autoOpenAgentThread);
     }
-
-    DeathTrace::Start();
 
     return 0;
 }

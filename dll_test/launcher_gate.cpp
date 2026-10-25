@@ -47,15 +47,15 @@ bool ReadState(GateState& state)
     if (!g_view)
         return false;
 
-    bool locked = false;
     if (g_mutex)
     {
-        const DWORD wait = WaitForSingleObject(g_mutex, 1000);
-        locked = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+        const DWORD wait = WaitForSingleObject(g_mutex, INFINITE);
+        if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)
+            return false;
     }
 
     std::memcpy(&state, g_view, sizeof(state));
-    if (locked)
+    if (g_mutex)
         ReleaseMutex(g_mutex);
     return true;
 }

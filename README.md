@@ -34,3 +34,5 @@
 2026/10/05 更版，修正巔峰逐鹿不會選擇恢復兵力或是復活的BUFF、修正幻境邏輯
 
 2026/10/23 更版（0.17b），移除 DLL 內建授權查詢、監控、提示與 usage 回報；新增啟動器 PID／token／心跳 gate 與 watchdog；新增 deathtrace 診斷；版本資源更新為 0.17b
+
+2026/10/25 更版（0.18b），幻境地圖與城市設定改從 Online.exe 同目錄的 dreamland 資料夾讀取；載入失敗改為後續重試，移除 deathtrace 診斷，調整 launcher gate 共享狀態讀取鎖定；版本資源更新為 0.18b
