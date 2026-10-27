@@ -1,3 +1,6 @@
+### 介面展示
+<img width="513" height="738" alt="image" src="https://github.com/user-attachments/assets/70daca32-2de5-4071-a60d-54bc0591d670" />
+
 ### 使用說明：
 1.須將cpp檔編譯成DLL，第一頁的cpp是初版，用來測試DLL有沒有載入成功，用dll_test裡面的cpp，編譯指令為：cmake --build build --config Release\
 \
