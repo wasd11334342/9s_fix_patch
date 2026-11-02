@@ -18,6 +18,7 @@ constexpr int kMaxConsecutiveFailures = 2;
 constexpr wchar_t kMappingName[] = L"Local\\9sLauncherGate_v1";
 constexpr wchar_t kMutexName[] = L"Local\\9sLauncherGateMutex_v1";
 constexpr wchar_t kLauncherTitle[] = L"9s啟動器";
+constexpr wchar_t kTestLauncherTitle[] = L"9s啟動器（測試）";
 
 #pragma pack(push, 8)
 struct GateState
@@ -92,19 +93,22 @@ bool ProcessAlive(DWORD pid)
     return alive;
 }
 
-bool WindowBelongsToLauncher(HWND hwnd, DWORD pid)
+bool WindowBelongsToLauncher(HWND hwnd, const GateState& state)
 {
     if (!hwnd || !IsWindow(hwnd))
         return false;
 
     DWORD ownerPid = 0;
     GetWindowThreadProcessId(hwnd, &ownerPid);
-    if (ownerPid != pid)
-        return false;
 
     wchar_t title[128]{};
     GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
-    return _wcsicmp(title, kLauncherTitle) == 0;
+    if (ownerPid == state.launcherPid)
+        return _wcsicmp(title, kLauncherTitle) == 0;
+
+    // 測試啟動器會把自己登記在 Gate PID 清單，Online 才能把 MSG_KEEPLIVE
+    // 回給測試啟動器，而不是只回到正式啟動器。
+    return HasPid(state, ownerPid) && _wcsicmp(title, kTestLauncherTitle) == 0;
 }
 
 HWND LauncherHwndFromCommandLine()
@@ -158,7 +162,7 @@ bool ValidateState(const GateState& state, DWORD selfPid)
         return false;
     if (!ProcessAlive(state.launcherPid))
         return false;
-    if (!WindowBelongsToLauncher(g_launcherHwnd, state.launcherPid))
+    if (!WindowBelongsToLauncher(g_launcherHwnd, state))
         return false;
     return true;
 }
