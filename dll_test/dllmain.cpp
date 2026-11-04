@@ -2786,6 +2786,12 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
 void OnEnabledChanged(LONG enabled);
 }
 
+namespace CrossLeagueSignup
+{
+void Tick();
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+}
+
 namespace CountryTransport
 {
 extern volatile LONG g_uiSwitch;
@@ -2823,6 +2829,7 @@ constexpr UINT kZhaoXianNaKeCheckboxId = 0x7B06;
 constexpr UINT kTeamBattleRewardCheckboxId = 0x7B07;
 constexpr UINT kDianFengZhuLuCheckboxId = 0x7B08;
 constexpr UINT kHuanJingCheckboxId = 0x7B09;
+constexpr UINT kCrossLeagueSignupCheckboxId = 0x7B0D;
 constexpr UINT kPrivateMessage = 0x8439;
 constexpr UINT kTimerId = 0x843A;
 const wchar_t kBattleTokenConfigSection[] = L"MAIN";
@@ -2832,6 +2839,11 @@ const wchar_t kZhaoXianNaKeConfigKey[] = L"bZhaoXianNaKe";
 const wchar_t kTeamBattleRewardConfigKey[] = L"bTeamBattleReward";
 const wchar_t kDianFengZhuLuConfigKey[] = L"bDianFengZhuLu";
 const wchar_t kHuanJingConfigKey[] = L"bHuanJing";
+const wchar_t kCrossLeagueSignupConfigKey[] = L"bCrossLeagueSignup";
+const wchar_t kCrossLeagueGroupText[] = L"\x8DE8\x670D";
+const wchar_t kCrossLeagueSignupCheckboxText[] =
+    L"\x806F\x76DF\x722D\x9738\x5831\x540D";
+const wchar_t kCrossArenaAnchorText[] = L"\x7AF6\x6280\x5834";
 
 volatile LONG g_started = 0;
 volatile LONG g_switch = 0;
@@ -2840,6 +2852,7 @@ volatile LONG g_zhaoXianNaKeSwitch = 1;
 volatile LONG g_teamBattleRewardSwitch = 1;
 volatile LONG g_dianFengZhuLuSwitch = 1;
 volatile LONG g_huanJingSwitch = 1;
+volatile LONG g_crossLeagueSignupSwitch = 0;
 volatile LONG g_lastValue = 0;
 volatile LONG g_hitCount = 0;
 volatile LONG g_status = 0;
@@ -2849,12 +2862,14 @@ volatile LONG g_zhaoXianNaKeKeyReady = 0;
 volatile LONG g_teamBattleRewardKeyReady = 0;
 volatile LONG g_dianFengZhuLuKeyReady = 0;
 volatile LONG g_huanJingKeyReady = 0;
+volatile LONG g_crossLeagueSignupKeyReady = 0;
 volatile LONG g_taskDispatchDirty = 0;
 volatile LONG g_battleTokenDirty = 0;
 volatile LONG g_zhaoXianNaKeDirty = 0;
 volatile LONG g_teamBattleRewardDirty = 0;
 volatile LONG g_dianFengZhuLuDirty = 0;
 volatile LONG g_huanJingDirty = 0;
+volatile LONG g_crossLeagueSignupDirty = 0;
 HWND g_settingsHwnd = nullptr;
 HWND g_parentHwnd = nullptr;
 HWND g_checkboxHwnd = nullptr;
@@ -2863,14 +2878,23 @@ HWND g_zhaoXianNaKeCheckboxHwnd = nullptr;
 HWND g_teamBattleRewardCheckboxHwnd = nullptr;
 HWND g_dianFengZhuLuCheckboxHwnd = nullptr;
 HWND g_huanJingCheckboxHwnd = nullptr;
+HWND g_crossLeagueGroupHwnd = nullptr;
+HWND g_crossLeagueSignupCheckboxHwnd = nullptr;
+HWND g_crossLeagueParentHwnd = nullptr;
 HWND g_weeklyHwnd = nullptr;
 HWND g_dailyHwnd = nullptr;
+HWND g_crossArenaAnchorHwnd = nullptr;
 WNDPROC g_oldProc = nullptr;
 WNDPROC g_settingsOldProc = nullptr;
+WNDPROC g_crossLeagueOldProc = nullptr;
 int g_x = 0;
 int g_y = 0;
 int g_w = 0;
 int g_h = 0;
+int g_crossLeagueGroupX = 0;
+int g_crossLeagueGroupY = 0;
+int g_crossLeagueGroupW = 0;
+int g_crossLeagueGroupH = 0;
 
 const wchar_t kSettingsTitle[] = L"\x8A2D\x7F6E";
 const wchar_t kCheckboxText[] = L"\x4EFB\x52D9\x6D3E\x9063";
@@ -7156,6 +7180,7 @@ bool BuildMainCode(uintptr_t base, CodeBuffer& code)
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&TeamBattleReward::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&DianFengZhuLu::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&HuanJing::Tick)) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&CrossLeagueSignup::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&AutoExpBook::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&CountryTransport::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&SecretTreasure::Tick)) &&
@@ -10236,6 +10261,67 @@ bool LoadHuanJingSwitch()
     }
 }
 
+bool PersistCrossLeagueSignupSwitch(LONG value)
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) {
+        return false;
+    }
+
+    __try {
+        if (!WritePrivateProfileStringW(
+                kBattleTokenConfigSection,
+                kCrossLeagueSignupConfigKey,
+                value != 0 ? L"1" : L"0",
+                path)) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    InterlockedExchange(&g_crossLeagueSignupKeyReady, 1);
+    InterlockedExchange(&g_crossLeagueSignupDirty, 0);
+    return true;
+}
+
+bool LoadCrossLeagueSignupSwitch()
+{
+    const wchar_t* path = nullptr;
+    if (!TryGetConfigPath(&path)) {
+        return false;
+    }
+
+    __try {
+        wchar_t value[16]{};
+        const wchar_t missingMarker[] = { 0xFFFF, 0x0000 };
+        const DWORD length = GetPrivateProfileStringW(
+            kBattleTokenConfigSection,
+            kCrossLeagueSignupConfigKey,
+            missingMarker,
+            value,
+            _countof(value),
+            path);
+        const bool missing = length == 0 ||
+            (length == 1 && value[0] == missingMarker[0] && value[1] == L'\0');
+        if (missing) {
+            InterlockedExchange(&g_crossLeagueSignupSwitch, 0);
+            return PersistCrossLeagueSignupSwitch(0);
+        }
+
+        const LONG enabled = GetPrivateProfileIntW(
+            kBattleTokenConfigSection,
+            kCrossLeagueSignupConfigKey,
+            0,
+            path) != 0 ? 1 : 0;
+        InterlockedExchange(&g_crossLeagueSignupSwitch, enabled);
+        InterlockedExchange(&g_crossLeagueSignupKeyReady, 1);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void WriteSwitch(uint32_t value)
 {
     if (g_mainBase == 0) {
@@ -10329,6 +10415,19 @@ void SyncHuanJingSwitch()
     PersistHuanJingSwitch(value);
 }
 
+void SyncCrossLeagueSignupSwitch()
+{
+    if (!g_crossLeagueSignupCheckboxHwnd || !IsWindow(g_crossLeagueSignupCheckboxHwnd)) {
+        return;
+    }
+
+    const LONG value =
+        SendMessageW(g_crossLeagueSignupCheckboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
+    InterlockedExchange(&g_crossLeagueSignupSwitch, value);
+    InterlockedExchange(&g_crossLeagueSignupDirty, 1);
+    PersistCrossLeagueSignupSwitch(value);
+}
+
 void RefreshPersistentSwitches()
 {
     if (g_taskDispatchKeyReady == 0) {
@@ -10411,6 +10510,20 @@ void RefreshPersistentSwitches()
                 g_huanJingSwitch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
         }
     }
+
+    if (g_crossLeagueSignupKeyReady == 0) {
+        const bool ready = g_crossLeagueSignupDirty != 0
+            ? PersistCrossLeagueSignupSwitch(g_crossLeagueSignupSwitch)
+            : LoadCrossLeagueSignupSwitch();
+        if (ready && g_crossLeagueSignupCheckboxHwnd &&
+            IsWindow(g_crossLeagueSignupCheckboxHwnd)) {
+            SendMessageW(
+                g_crossLeagueSignupCheckboxHwnd,
+                BM_SETCHECK,
+                g_crossLeagueSignupSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+                0);
+        }
+    }
 }
 
 LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -10422,12 +10535,30 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         PersistTeamBattleRewardSwitch(g_teamBattleRewardSwitch);
         PersistDianFengZhuLuSwitch(g_dianFengZhuLuSwitch);
         PersistHuanJingSwitch(g_huanJingSwitch);
+        PersistCrossLeagueSignupSwitch(g_crossLeagueSignupSwitch);
         CountryTransport::PersistSwitch(CountryTransport::g_uiSwitch);
         SecretTreasure::PersistSwitch(SecretTreasure::g_uiSwitch);
     }
 
     return g_settingsOldProc
         ? CallWindowProcW(g_settingsOldProc, hwnd, message, wParam, lParam)
+        : DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK CrossLeagueParentWndProc(
+    HWND hwnd,
+    UINT message,
+    WPARAM wParam,
+    LPARAM lParam)
+{
+    if (message == WM_COMMAND &&
+        LOWORD(wParam) == kCrossLeagueSignupCheckboxId &&
+        HIWORD(wParam) == BN_CLICKED) {
+        SyncCrossLeagueSignupSwitch();
+    }
+
+    return g_crossLeagueOldProc
+        ? CallWindowProcW(g_crossLeagueOldProc, hwnd, message, wParam, lParam)
         : DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
@@ -10465,6 +10596,12 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         SyncHuanJingSwitch();
         return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
     }
+    if (message == WM_COMMAND && LOWORD(wParam) == kCrossLeagueSignupCheckboxId &&
+        HIWORD(wParam) == BN_CLICKED) {
+        SyncCrossLeagueSignupSwitch();
+        return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam)
+                         : DefWindowProcW(hwnd, message, wParam, lParam);
+    }
 
     if (message == WM_TIMER && wParam == kTimerId) {
         RefreshPersistentSwitches();
@@ -10482,6 +10619,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             LoadTeamBattleRewardSwitch();
             LoadDianFengZhuLuSwitch();
             LoadHuanJingSwitch();
+            LoadCrossLeagueSignupSwitch();
             CountryTransport::RefreshPersistentSwitch();
             SecretTreasure::RefreshPersistentSwitch();
             if (!g_checkboxHwnd) {
@@ -10574,6 +10712,37 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                     nullptr,
                     nullptr);
             }
+            if (g_crossLeagueParentHwnd && !g_crossLeagueGroupHwnd) {
+                g_crossLeagueGroupHwnd = CreateWindowExW(
+                    0,
+                    L"Button",
+                    kCrossLeagueGroupText,
+                    0x50000007,
+                    g_crossLeagueGroupX,
+                    g_crossLeagueGroupY,
+                    g_crossLeagueGroupW,
+                    g_crossLeagueGroupH,
+                    g_crossLeagueParentHwnd,
+                    nullptr,
+                    nullptr,
+                    nullptr);
+            }
+            if (g_crossLeagueParentHwnd && !g_crossLeagueSignupCheckboxHwnd) {
+                g_crossLeagueSignupCheckboxHwnd = CreateWindowExW(
+                    0,
+                    L"Button",
+                    kCrossLeagueSignupCheckboxText,
+                    0x50018003,
+                    g_crossLeagueGroupX + 16,
+                    g_crossLeagueGroupY + 28,
+                    g_crossLeagueGroupW - 32,
+                    g_h,
+                    g_crossLeagueParentHwnd,
+                    reinterpret_cast<HMENU>(
+                        static_cast<UINT_PTR>(kCrossLeagueSignupCheckboxId)),
+                    nullptr,
+                    nullptr);
+            }
             CountryTransport::EnsureCheckbox(g_parentHwnd, g_x - g_w - 6, g_y, g_w, g_h);
             SecretTreasure::EnsureCheckbox(
                 g_parentHwnd,
@@ -10600,6 +10769,14 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                     }
                     if (g_huanJingCheckboxHwnd) {
                         SendMessageW(g_huanJingCheckboxHwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+                    }
+                    if (g_crossLeagueGroupHwnd) {
+                        SendMessageW(g_crossLeagueGroupHwnd, WM_SETFONT,
+                            reinterpret_cast<WPARAM>(font), TRUE);
+                    }
+                    if (g_crossLeagueSignupCheckboxHwnd) {
+                        SendMessageW(g_crossLeagueSignupCheckboxHwnd, WM_SETFONT,
+                            reinterpret_cast<WPARAM>(font), TRUE);
                     }
                     CountryTransport::SetCheckboxFont(font);
                     SecretTreasure::SetCheckboxFont(font);
@@ -10639,6 +10816,17 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                         g_huanJingSwitch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
                     ShowWindow(g_huanJingCheckboxHwnd, SW_SHOW);
                 }
+                if (g_crossLeagueGroupHwnd) {
+                    ShowWindow(g_crossLeagueGroupHwnd, SW_SHOW);
+                }
+                if (g_crossLeagueSignupCheckboxHwnd) {
+                    SendMessageW(
+                        g_crossLeagueSignupCheckboxHwnd,
+                        BM_SETCHECK,
+                        g_crossLeagueSignupSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+                        0);
+                    ShowWindow(g_crossLeagueSignupCheckboxHwnd, SW_SHOW);
+                }
                 CountryTransport::ShowCheckbox();
                 SecretTreasure::ShowCheckbox();
                 SetTimer(g_parentHwnd, kTimerId, 1000, nullptr);
@@ -10656,6 +10844,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             PersistTeamBattleRewardSwitch(g_teamBattleRewardSwitch);
             PersistDianFengZhuLuSwitch(g_dianFengZhuLuSwitch);
             PersistHuanJingSwitch(g_huanJingSwitch);
+            PersistCrossLeagueSignupSwitch(g_crossLeagueSignupSwitch);
             CountryTransport::PersistSwitch(CountryTransport::g_uiSwitch);
             SecretTreasure::PersistSwitch(SecretTreasure::g_uiSwitch);
             KillTimer(g_parentHwnd, kTimerId);
@@ -10677,6 +10866,12 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             if (g_huanJingCheckboxHwnd && IsWindow(g_huanJingCheckboxHwnd)) {
                 DestroyWindow(g_huanJingCheckboxHwnd);
             }
+            if (g_crossLeagueSignupCheckboxHwnd && IsWindow(g_crossLeagueSignupCheckboxHwnd)) {
+                DestroyWindow(g_crossLeagueSignupCheckboxHwnd);
+            }
+            if (g_crossLeagueGroupHwnd && IsWindow(g_crossLeagueGroupHwnd)) {
+                DestroyWindow(g_crossLeagueGroupHwnd);
+            }
             CountryTransport::DestroyCheckbox();
             SecretTreasure::DestroyCheckbox();
             g_checkboxHwnd = nullptr;
@@ -10685,6 +10880,18 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             g_teamBattleRewardCheckboxHwnd = nullptr;
             g_dianFengZhuLuCheckboxHwnd = nullptr;
             g_huanJingCheckboxHwnd = nullptr;
+            g_crossLeagueSignupCheckboxHwnd = nullptr;
+            g_crossLeagueGroupHwnd = nullptr;
+            if (g_crossLeagueOldProc &&
+                g_crossLeagueParentHwnd &&
+                IsWindow(g_crossLeagueParentHwnd)) {
+                SetWindowLongPtrW(
+                    g_crossLeagueParentHwnd,
+                    GWLP_WNDPROC,
+                    reinterpret_cast<LONG_PTR>(g_crossLeagueOldProc));
+            }
+            g_crossLeagueOldProc = nullptr;
+            g_crossLeagueParentHwnd = nullptr;
             WriteSwitch(0);
             InterlockedExchange(&g_status, 8);
             return 1;
@@ -10706,6 +10913,12 @@ struct EnumState
 BOOL CALLBACK EnumChildProc(HWND hwnd, LPARAM lParam)
 {
     EnumState* state = reinterpret_cast<EnumState*>(lParam);
+    wchar_t text[64]{};
+    GetWindowTextW(hwnd, text, _countof(text));
+    if (std::wcscmp(text, kCrossArenaAnchorText) == 0) {
+        g_crossArenaAnchorHwnd = hwnd;
+    }
+
     const int id = GetDlgCtrlID(hwnd) & 0xFFFF;
     HWND parent = GetParent(hwnd);
     if (!parent) {
@@ -10754,6 +10967,7 @@ bool FindAndInstall()
     EnumState state{};
     g_weeklyHwnd = nullptr;
     g_dailyHwnd = nullptr;
+    g_crossArenaAnchorHwnd = nullptr;
     EnumChildWindows(g_settingsHwnd, EnumChildProc, reinterpret_cast<LPARAM>(&state));
     if (!g_weeklyHwnd || !g_dailyHwnd) {
         return false;
@@ -10763,6 +10977,12 @@ bool FindAndInstall()
 
     g_parentHwnd = GetParent(g_weeklyHwnd);
     if (!g_parentHwnd) {
+        return false;
+    }
+    g_crossLeagueParentHwnd = g_crossArenaAnchorHwnd
+        ? GetParent(g_crossArenaAnchorHwnd)
+        : nullptr;
+    if (!g_crossLeagueParentHwnd) {
         return false;
     }
 
@@ -10778,6 +10998,25 @@ bool FindAndInstall()
     g_h = weeklyRect.bottom - weeklyRect.top;
     g_x = weeklyPoint.x - g_w - 6;
     g_y = weeklyPoint.y;
+    g_crossLeagueGroupX = g_x;
+    g_crossLeagueGroupY = g_y + (g_h * 6) + 12;
+    g_crossLeagueGroupW = g_w * 3 > 260 ? g_w * 3 : 260;
+    g_crossLeagueGroupH = g_h + 30 > 64 ? g_h + 30 : 64;
+    if (g_crossArenaAnchorHwnd && g_crossLeagueParentHwnd) {
+        RECT arenaRect{};
+        if (GetWindowRect(g_crossArenaAnchorHwnd, &arenaRect)) {
+            POINT arenaTop{ arenaRect.left, arenaRect.top };
+            POINT arenaBottom{ arenaRect.left, arenaRect.bottom };
+            if (ScreenToClient(g_crossLeagueParentHwnd, &arenaTop) &&
+                ScreenToClient(g_crossLeagueParentHwnd, &arenaBottom)) {
+                g_crossLeagueGroupX = arenaTop.x;
+                g_crossLeagueGroupY = arenaBottom.y + 8;
+                const int arenaWidth = arenaRect.right - arenaRect.left;
+                g_crossLeagueGroupW = arenaWidth > 260 ? arenaWidth : 260;
+                g_crossLeagueGroupH = g_h + 30 > 64 ? g_h + 30 : 64;
+            }
+        }
+    }
     InterlockedExchange(&g_status, 4);
 
     g_settingsOldProc = reinterpret_cast<WNDPROC>(
@@ -10790,6 +11029,23 @@ bool FindAndInstall()
         SetWindowLongPtrW(g_settingsHwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_settingsOldProc));
         g_settingsOldProc = nullptr;
         return false;
+    }
+    if (g_crossLeagueParentHwnd != g_parentHwnd) {
+        g_crossLeagueOldProc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(
+                g_crossLeagueParentHwnd,
+                GWLP_WNDPROC,
+                reinterpret_cast<LONG_PTR>(CrossLeagueParentWndProc)));
+        if (!g_crossLeagueOldProc) {
+            SetWindowLongPtrW(
+                g_parentHwnd,
+                GWLP_WNDPROC,
+                reinterpret_cast<LONG_PTR>(g_oldProc));
+            SetWindowLongPtrW(g_settingsHwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_settingsOldProc));
+            g_oldProc = nullptr;
+            g_settingsOldProc = nullptr;
+            return false;
+        }
     }
     InterlockedExchange(&g_status, 5);
 
@@ -10819,6 +11075,9 @@ DWORD WINAPI SetupThread(LPVOID)
         if (g_huanJingKeyReady == 0) {
             LoadHuanJingSwitch();
         }
+        if (g_crossLeagueSignupKeyReady == 0) {
+            LoadCrossLeagueSignupSwitch();
+        }
         if (FindAndInstall()) {
             return 0;
         }
@@ -10839,6 +11098,176 @@ void Start()
     if (thread) {
         CloseHandle(thread);
     }
+}
+
+}
+
+namespace CrossLeagueSignup
+{
+
+constexpr uint32_t kEnter = 0x4544;
+constexpr uint32_t kSignupPanel = 0x4546;
+constexpr uint32_t kSignup = 0x4547;
+constexpr uint32_t kOpenMap = 0x4545;
+constexpr uint32_t kStateChange = 0x4564;
+
+// 封包尾端 20 6A / 20 D8 是 GameSocket 自動追加的 messageIndex，不是 body。
+const wchar_t kSignupLog[] =
+    L"\x806F\x76DF\x722D\x9738 \x5831\x540D";
+const wchar_t kAlreadySignupLog[] =
+    L"\x806F\x76DF\x722D\x9738 \x5DF2\x5831\x540D";
+const wchar_t kNotOpenLog[] =
+    L"\x806F\x76DF\x722D\x9738 \x76EE\x524D\x672A\x958B\x653E";
+
+volatile LONG g_queryIssued = 0;
+volatile LONG g_waiting = 0;
+volatile LONG g_resolved = 0;
+
+struct Reader
+{
+    const BYTE* cursor = nullptr;
+    const BYTE* end = nullptr;
+
+    bool ReadU16(uint16_t& value)
+    {
+        if (!cursor || cursor + 2 > end) return false;
+        value = ReadBe16Unaligned(cursor);
+        cursor += 2;
+        return true;
+    }
+
+    bool ReadU32(uint32_t& value)
+    {
+        if (!cursor || cursor + 4 > end) return false;
+        value = ReadBe32Unaligned(cursor);
+        cursor += 4;
+        return true;
+    }
+
+    bool SkipUtf()
+    {
+        uint16_t length = 0;
+        if (!ReadU16(length) || length > static_cast<size_t>(end - cursor)) return false;
+        cursor += length;
+        return true;
+    }
+};
+
+void SendEmpty(uint32_t opcode)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360)(opcode, nullptr, 0);
+}
+
+void WriteOnce(const wchar_t* text)
+{
+    if (InterlockedCompareExchange(&g_resolved, 1, 0) == 0) {
+        InterlockedExchange(&g_waiting, 0);
+        GameLog::Write(L"%s", text);
+    }
+}
+
+bool ParseSignupPanel(
+    const BYTE* payload,
+    uint32_t payloadLength,
+    int32_t& leftTime,
+    int32_t& signUpState)
+{
+    if (!payload || payloadLength < 14) return false;
+
+    Reader reader{ payload, payload + payloadLength };
+    uint16_t regionCount = 0;
+    if (!reader.ReadU16(regionCount) || regionCount > 16) return false;
+
+    for (uint16_t index = 0; index < regionCount; ++index) {
+        uint32_t ignored = 0;
+        if (!reader.ReadU32(ignored) ||
+            !reader.ReadU32(ignored) ||
+            !reader.ReadU32(ignored) ||
+            !reader.SkipUtf() ||
+            !reader.SkipUtf() ||
+            !reader.SkipUtf()) {
+            return false;
+        }
+    }
+
+    uint32_t minLevel = 0;
+    uint32_t remaining = 0;
+    uint32_t state = 0;
+    if (!reader.ReadU32(minLevel) ||
+        !reader.ReadU32(remaining) ||
+        !reader.ReadU32(state)) {
+        return false;
+    }
+
+    leftTime = static_cast<int32_t>(remaining);
+    signUpState = static_cast<int32_t>(state);
+    return true;
+}
+
+void HandleSignupPanel(const BYTE* payload, uint32_t payloadLength)
+{
+    if (g_waiting == 0 || g_resolved != 0) return;
+
+    int32_t leftTime = 0;
+    int32_t signUpState = 0;
+    if (!ParseSignupPanel(payload, payloadLength, leftTime, signUpState)) {
+        return;
+    }
+
+    // AS CrossAllianceRegister：0=可報名、1=已報名、其他=不可報名。
+    if (signUpState == 1) {
+        WriteOnce(kAlreadySignupLog);
+        return;
+    }
+
+    if (signUpState == 0 && leftTime > 0) {
+        SendEmpty(kSignup);
+        WriteOnce(kSignupLog);
+        return;
+    }
+
+    WriteOnce(kNotOpenLog);
+}
+
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
+{
+    if (g_waiting == 0 || g_resolved != 0) return;
+
+    switch (opcode & 0xFFFF) {
+    case kSignupPanel:
+        HandleSignupPanel(payload, payloadLength);
+        break;
+    case kStateChange:
+        if (payload && payloadLength >= 8) {
+            const int32_t activityState =
+                static_cast<int32_t>(ReadBe32Unaligned(payload));
+            if (activityState == 0 || activityState == 5) {
+                WriteOnce(kNotOpenLog);
+            }
+        }
+        break;
+    case kOpenMap:
+        WriteOnce(kNotOpenLog);
+        break;
+    default:
+        break;
+    }
+}
+
+void Tick()
+{
+    if (g_mainBase == 0 || TaskDispatchUi::g_crossLeagueSignupSwitch == 0) {
+        return;
+    }
+
+    if (InterlockedCompareExchange(&g_queryIssued, 1, 0) != 0) {
+        return;
+    }
+
+    InterlockedExchange(&g_resolved, 0);
+    InterlockedExchange(&g_waiting, 1);
+    SendEmpty(kEnter);
 }
 
 }
@@ -15932,6 +16361,7 @@ __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* pa
     TeamBattleReward::HandleRecvPacket(opcode, payload, payloadLength);
     DianFengZhuLu::HandleRecvPacket(opcode, payload, payloadLength);
     HuanJing::HandleRecvPacket(opcode, payload, payloadLength);
+    CrossLeagueSignup::HandleRecvPacket(opcode, payload, payloadLength);
     ExpeditionGuard::HandleRecvPacket(opcode);
     const BYTE* const legionPayload = payload;
     const uint32_t legionPayloadLength = payloadLength;
