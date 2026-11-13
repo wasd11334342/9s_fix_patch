@@ -2821,6 +2821,27 @@ void DestroyCheckbox();
 bool PersistSwitch(LONG value);
 }
 
+namespace AutoOpenBox
+{
+extern volatile LONG g_uiSwitch;
+void Tick();
+void ConfirmTick();
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+bool HandleUiCommand(WPARAM wParam);
+void RefreshPersistentSwitch();
+void EnsureCheckbox(HWND parent, int x, int y, int width, int height);
+void SetCheckboxFont(HFONT font);
+void ShowCheckbox();
+void DestroyCheckbox();
+bool PersistSwitch(LONG value);
+}
+
+namespace ShenBingPu
+{
+void Tick();
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+}
+
 namespace TaskDispatchUi
 {
 constexpr UINT kCheckboxId = 0x0439;
@@ -2920,6 +2941,7 @@ constexpr size_t kMaxTeams = 10;
 constexpr size_t kOrderMemberMaxBytes = 128;
 constexpr LONG kOrderRetryMax = 3;
 constexpr LONG kCreateTeamMissMax = 6;
+constexpr LONG kConsolidateRefreshMax = 1;
 constexpr DWORD kCreateGateLeaseMs = 8000;
 constexpr DWORD kCreateGateMagic = 0x4C444731;
 constexpr DWORD kSoloPanelQueryDelayMs = 3000;
@@ -2966,6 +2988,8 @@ volatile LONG g_teamOrderRetries = 0;
 volatile LONG g_createTeamMissCount = 0;
 volatile LONG g_createFinalCheck = 0;
 volatile LONG g_createGateOwned = 0;
+volatile LONG g_consolidateOwnTeamId = 0;
+volatile LONG g_consolidateRefreshCount = 0;
 volatile LONG g_restoredTeamId = 0;
 volatile LONG g_unlimitPassedOnce = 0;
 volatile LONG g_battleMode = 0;
@@ -5214,7 +5238,7 @@ void Tick()
                 StopTerminal(kStopExpMaxLog);
                 return;
             }
-            if (haveItems && itemTotal < 100) {
+            if (haveItems && itemTotal == 0) {
                 StopTerminal(kStopNoItemLog);
                 return;
             }
@@ -5256,12 +5280,13 @@ void Tick()
     if (!ReadExpBookStacks(stacks, _countof(stacks), stackCount, itemTotal)) {
         return;
     }
-    if (itemTotal < 100) {
+    if (itemTotal == 0) {
         StopTerminal(kStopNoItemLog);
         return;
     }
 
-    const uint32_t batchTarget = itemTotal >= 1000 ? 1000 : 100;
+    const uint32_t batchTarget = static_cast<uint32_t>(
+        itemTotal < 1000 ? itemTotal : 1000);
     const int64_t remainingExp =
         static_cast<int64_t>(selected.expMax) - selected.currentExp;
     const uint64_t expLimitedUses = remainingExp > 0
@@ -7150,6 +7175,7 @@ __declspec(noinline) void __stdcall IndependentTimerTick(void* owner)
     TeamBattleReward::Tick();
     DianFengZhuLu::Tick();
     HuanJing::Tick();
+    AutoOpenBox::ConfirmTick();
     NativeOptimization::Tick(g_mainBase);
 
     if (SetTimer(hwnd, kIndependentTimerId, IndependentTimerInterval(), nullptr) != 0) {
@@ -7182,16 +7208,22 @@ bool BuildMainCode(uintptr_t base, CodeBuffer& code)
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&HuanJing::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&CrossLeagueSignup::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&AutoExpBook::Tick)) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&AutoOpenBox::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&CountryTransport::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&SecretTreasure::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&DashTick)) &&
         AppendPopad(code) &&
         AppendByte(code, 0x9D) &&
         AppendCmpDwordAbsImm8(code, action, 1) &&
-        AppendJeShort(code, 0x01) &&
+        AppendJeShort(code, 0x0A) &&
+        AppendByte(code, 0x9C) &&
+        AppendPushad(code) &&
+        AppendRel32Instruction(code, 0xE8, base + 0x39280) &&
+        AppendPopad(code) &&
+        AppendByte(code, 0x9D) &&
         AppendByte(code, 0xC3) &&
         AppendByte(code, 0x56) &&
-        AppendRel32Instruction(code, 0xE8, base + 0x38B90) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&ShenBingPu::Tick)) &&
         AppendRel32Instruction(code, 0xE9, base + 0x351F6);
 }
 
@@ -10538,6 +10570,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         PersistCrossLeagueSignupSwitch(g_crossLeagueSignupSwitch);
         CountryTransport::PersistSwitch(CountryTransport::g_uiSwitch);
         SecretTreasure::PersistSwitch(SecretTreasure::g_uiSwitch);
+        AutoOpenBox::PersistSwitch(AutoOpenBox::g_uiSwitch);
     }
 
     return g_settingsOldProc
@@ -10568,6 +10601,9 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
     }
     if (message == WM_COMMAND && SecretTreasure::HandleUiCommand(wParam)) {
+        return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+    if (message == WM_COMMAND && AutoOpenBox::HandleUiCommand(wParam)) {
         return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
     }
     if (message == WM_COMMAND && (LOWORD(wParam) == kCheckboxId)) {
@@ -10607,6 +10643,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         RefreshPersistentSwitches();
         CountryTransport::RefreshPersistentSwitch();
         SecretTreasure::RefreshPersistentSwitch();
+        AutoOpenBox::RefreshPersistentSwitch();
         SyncSwitch();
         return 1;
     }
@@ -10622,6 +10659,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             LoadCrossLeagueSignupSwitch();
             CountryTransport::RefreshPersistentSwitch();
             SecretTreasure::RefreshPersistentSwitch();
+            AutoOpenBox::RefreshPersistentSwitch();
             if (!g_checkboxHwnd) {
                 g_checkboxHwnd = CreateWindowExW(
                     0,
@@ -10750,6 +10788,12 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                 g_y + g_h,
                 g_w,
                 g_h);
+            AutoOpenBox::EnsureCheckbox(
+                g_parentHwnd,
+                g_x - g_w - 6,
+                g_y + (g_h * 2),
+                g_w,
+                g_h);
 
             if (g_checkboxHwnd) {
                 HFONT font = reinterpret_cast<HFONT>(SendMessageW(g_weeklyHwnd, WM_GETFONT, 0, 0));
@@ -10780,6 +10824,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                     }
                     CountryTransport::SetCheckboxFont(font);
                     SecretTreasure::SetCheckboxFont(font);
+                    AutoOpenBox::SetCheckboxFont(font);
                 }
                 ShowWindow(g_checkboxHwnd, SW_SHOW);
                 if (g_battleTokenCheckboxHwnd) {
@@ -10829,6 +10874,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                 }
                 CountryTransport::ShowCheckbox();
                 SecretTreasure::ShowCheckbox();
+                AutoOpenBox::ShowCheckbox();
                 SetTimer(g_parentHwnd, kTimerId, 1000, nullptr);
                 SendMessageW(g_checkboxHwnd, BM_SETCHECK, g_switch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
                 SyncSwitch();
@@ -10847,6 +10893,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             PersistCrossLeagueSignupSwitch(g_crossLeagueSignupSwitch);
             CountryTransport::PersistSwitch(CountryTransport::g_uiSwitch);
             SecretTreasure::PersistSwitch(SecretTreasure::g_uiSwitch);
+            AutoOpenBox::PersistSwitch(AutoOpenBox::g_uiSwitch);
             KillTimer(g_parentHwnd, kTimerId);
             if (g_checkboxHwnd && IsWindow(g_checkboxHwnd)) {
                 DestroyWindow(g_checkboxHwnd);
@@ -10874,6 +10921,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             }
             CountryTransport::DestroyCheckbox();
             SecretTreasure::DestroyCheckbox();
+            AutoOpenBox::DestroyCheckbox();
             g_checkboxHwnd = nullptr;
             g_battleTokenCheckboxHwnd = nullptr;
             g_zhaoXianNaKeCheckboxHwnd = nullptr;
@@ -12920,6 +12968,1167 @@ void Tick()
         TickImpl();
     } __finally {
         InterlockedExchange(&g_tickRunning, 0);
+    }
+}
+
+}
+
+namespace AutoOpenBox
+{
+
+constexpr UINT kCheckboxId = 0x7B0E;
+constexpr uintptr_t kItemArrayOffset = 0x230664;
+constexpr uintptr_t kItemCountOffset = 0x230668;
+constexpr uint32_t kOpenChestOpcode = 0x0BC2;
+constexpr uint16_t kStorageBagId = 1;
+constexpr uint32_t kMaxItemCount = 512;
+constexpr uint32_t kSoulWarehouseOpcode = 0x4C5A;
+constexpr uint32_t kSoulWarehouseItemsOpcode = 0x4C5C;
+constexpr uint32_t kSoulDestroyInfoOpcode = 0x4C66;
+constexpr uint32_t kSoulDestroyInfoResultOpcode = 0x4C67;
+constexpr uint32_t kSoulDestroySaveOpcode = 0x4C68;
+constexpr DWORD kSoulResponseTimeoutMs = 10000;
+constexpr DWORD kSoulIdleRecheckMs = 10 * 60 * 1000;
+constexpr LONG kMaxSoulVerifyPasses = 3;
+constexpr uint16_t kMaxSoulPages = 32;
+constexpr size_t kMaxSoulCandidates = 512;
+constexpr size_t kMaxSoulIdBytes = 64;
+const wchar_t kConfigSection[] = L"MAIN";
+const wchar_t kConfigKey[] = L"bAutoOpenBox";
+const wchar_t kCheckboxText[] = L"\x81EA\x52D5\x958B\x7BB1";
+const wchar_t kUseLogFormat[] = L"\x4F7F\x7528 %s";
+
+const wchar_t* const kTargetNames[] = {
+    L"\x5C07\x661F\x798F\x888B",
+    L"\x4E94\x884C\x77F3\x798F\x888B",
+    L"\x6D17\x7149\x798F\x888B",
+    L"\x6230\x9B42-\x7532\x96A8\x6A5F\x5BF6\x7BB1",
+    L"\x6230\x9B42-\x4E59\x96A8\x6A5F\x5BF6\x7BB1",
+    L"\x6230\x9B42-\x4E19\x96A8\x6A5F\x5BF6\x7BB1",
+    L"\x6230\x9B42-\x4E01\x96A8\x6A5F\x5BF6\x7BB1",
+    L"\x6230\x9B42-\x620A\x96A8\x6A5F\x5BF6\x7BB1",
+    L"\x6230\x9B42-\x5DF1\x96A8\x6A5F\x5BF6\x7BB1",
+};
+
+volatile LONG g_uiSwitch = 0;
+volatile LONG g_uiSwitchKeyReady = 0;
+volatile LONG g_uiSwitchDirty = 0;
+volatile LONG g_enabled = 0;
+HWND g_checkboxHwnd = nullptr;
+
+enum OpenPhase : LONG
+{
+    kDecomposePhase = 0,
+    kOpenPhase = 1
+};
+
+enum DecomposeState : LONG
+{
+    kDecomposeIdle = 0,
+    kWaitingWarehouse = 1,
+    kSendDestroyInfo = 2,
+    kWaitingDestroyInfo = 3,
+    kWaitingAfterSave = 4
+};
+
+struct SoulCandidate
+{
+    uint16_t idLength = 0;
+    uint32_t fightSoulType = 0;
+    char id[kMaxSoulIdBytes]{};
+};
+
+volatile LONG g_openPhase = kDecomposePhase;
+volatile LONG g_decomposeState = kDecomposeIdle;
+volatile LONG g_decomposeDeadlineTick = 0;
+volatile LONG g_nextDecomposeActionTick = 0;
+volatile LONG g_nextDecomposeCheckTick = 0;
+volatile LONG g_openCycleHadBox = 0;
+volatile LONG g_verifyPass = 0;
+volatile LONG g_queryComplete = 0;
+volatile LONG g_seenPageMask = 0;
+volatile LONG g_seenPageCount = 0;
+volatile LONG g_totalPages = 0;
+volatile LONG g_candidateCount = 0;
+volatile LONG g_candidateIndex = 0;
+volatile LONG g_destroyInfoReady = 0;
+volatile LONG g_pendingSoulType = 0;
+volatile LONG g_pendingSoulIdLength = 0;
+SoulCandidate g_candidates[kMaxSoulCandidates]{};
+char g_pendingSoulId[kMaxSoulIdBytes]{};
+
+void ResetDecomposeCycle()
+{
+    InterlockedExchange(&g_openPhase, kDecomposePhase);
+    InterlockedExchange(&g_decomposeState, kDecomposeIdle);
+    InterlockedExchange(&g_decomposeDeadlineTick, 0);
+    InterlockedExchange(&g_nextDecomposeActionTick, 0);
+    InterlockedExchange(&g_nextDecomposeCheckTick, 0);
+    InterlockedExchange(&g_openCycleHadBox, 0);
+    InterlockedExchange(&g_verifyPass, 0);
+    InterlockedExchange(&g_queryComplete, 0);
+    InterlockedExchange(&g_seenPageMask, 0);
+    InterlockedExchange(&g_seenPageCount, 0);
+    InterlockedExchange(&g_totalPages, 0);
+    InterlockedExchange(&g_candidateCount, 0);
+    InterlockedExchange(&g_candidateIndex, 0);
+    InterlockedExchange(&g_destroyInfoReady, 0);
+    InterlockedExchange(&g_pendingSoulType, 0);
+    InterlockedExchange(&g_pendingSoulIdLength, 0);
+}
+
+void SetEnabled(LONG enabled)
+{
+    const LONG next = enabled != 0 ? 1 : 0;
+    const LONG previous = InterlockedExchange(&g_enabled, next);
+    if (previous != next) {
+        ResetDecomposeCycle();
+    }
+}
+
+bool PersistSwitch(LONG value)
+{
+    const wchar_t* path = nullptr;
+    if (!TaskDispatchUi::TryGetConfigPath(&path)) {
+        return false;
+    }
+
+    __try {
+        if (!WritePrivateProfileStringW(
+                kConfigSection,
+                kConfigKey,
+                value != 0 ? L"1" : L"0",
+                path)) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    InterlockedExchange(&g_uiSwitchKeyReady, 1);
+    InterlockedExchange(&g_uiSwitchDirty, 0);
+    return true;
+}
+
+bool LoadSwitch()
+{
+    const wchar_t* path = nullptr;
+    if (!TaskDispatchUi::TryGetConfigPath(&path)) {
+        return false;
+    }
+
+    __try {
+        wchar_t value[16]{};
+        const wchar_t missingMarker[] = { 0xFFFF, 0x0000 };
+        const DWORD length = GetPrivateProfileStringW(
+            kConfigSection,
+            kConfigKey,
+            missingMarker,
+            value,
+            _countof(value),
+            path);
+        const bool missing = length == 0 ||
+            (length == 1 && value[0] == missingMarker[0] && value[1] == L'\0');
+        if (missing) {
+            InterlockedExchange(&g_uiSwitch, 0);
+            SetEnabled(0);
+            return PersistSwitch(0);
+        }
+
+        const LONG enabled = GetPrivateProfileIntW(
+            kConfigSection,
+            kConfigKey,
+            0,
+            path) != 0 ? 1 : 0;
+        InterlockedExchange(&g_uiSwitch, enabled);
+        SetEnabled(enabled);
+        InterlockedExchange(&g_uiSwitchKeyReady, 1);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void RefreshPersistentSwitch()
+{
+    if (g_uiSwitchKeyReady != 0) {
+        return;
+    }
+
+    const bool ready = g_uiSwitchDirty != 0
+        ? PersistSwitch(g_uiSwitch)
+        : LoadSwitch();
+    if (ready && g_checkboxHwnd && IsWindow(g_checkboxHwnd)) {
+        SendMessageW(
+            g_checkboxHwnd,
+            BM_SETCHECK,
+            g_uiSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+            0);
+    }
+}
+
+void SyncUiSwitch()
+{
+    if (!g_checkboxHwnd || !IsWindow(g_checkboxHwnd)) {
+        return;
+    }
+
+    const LONG value =
+        SendMessageW(g_checkboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
+    InterlockedExchange(&g_uiSwitch, value);
+    SetEnabled(value);
+    InterlockedExchange(&g_uiSwitchDirty, 1);
+    PersistSwitch(value);
+}
+
+bool HandleUiCommand(WPARAM wParam)
+{
+    if (LOWORD(wParam) != kCheckboxId) {
+        return false;
+    }
+    SyncUiSwitch();
+    return true;
+}
+
+void EnsureCheckbox(HWND parent, int x, int y, int width, int height)
+{
+    if (g_checkboxHwnd && IsWindow(g_checkboxHwnd)) {
+        return;
+    }
+
+    g_checkboxHwnd = CreateWindowExW(
+        0,
+        L"Button",
+        kCheckboxText,
+        0x50018003,
+        x,
+        y,
+        width,
+        height,
+        parent,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kCheckboxId)),
+        nullptr,
+        nullptr);
+}
+
+void SetCheckboxFont(HFONT font)
+{
+    if (g_checkboxHwnd && IsWindow(g_checkboxHwnd) && font) {
+        SendMessageW(
+            g_checkboxHwnd,
+            WM_SETFONT,
+            reinterpret_cast<WPARAM>(font),
+            TRUE);
+    }
+}
+
+void ShowCheckbox()
+{
+    if (!g_checkboxHwnd || !IsWindow(g_checkboxHwnd)) {
+        return;
+    }
+
+    SendMessageW(
+        g_checkboxHwnd,
+        BM_SETCHECK,
+        g_uiSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+        0);
+    ShowWindow(g_checkboxHwnd, SW_SHOW);
+}
+
+void DestroyCheckbox()
+{
+    if (g_checkboxHwnd && IsWindow(g_checkboxHwnd)) {
+        DestroyWindow(g_checkboxHwnd);
+    }
+    g_checkboxHwnd = nullptr;
+}
+
+bool ReadItemName(uint32_t address, wchar_t* output, size_t capacity)
+{
+    if (!address || !output || capacity == 0) {
+        return false;
+    }
+    __try {
+        const wchar_t* text =
+            reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(address));
+        const uint32_t length = *(reinterpret_cast<const uint32_t*>(text) - 3);
+        if (length >= capacity || text[length] != L'\0') {
+            return false;
+        }
+        std::memcpy(output, text, static_cast<size_t>(length + 1) * sizeof(wchar_t));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool IsTargetName(const wchar_t* name)
+{
+    if (!name || !name[0]) {
+        return false;
+    }
+    for (const wchar_t* target : kTargetNames) {
+        if (_wcsicmp(name, target) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void SendOpenChest(uint16_t bagId, uint16_t index)
+{
+    BYTE payload[4] = {
+        static_cast<BYTE>((bagId >> 8) & 0xFF),
+        static_cast<BYTE>(bagId & 0xFF),
+        static_cast<BYTE>((index >> 8) & 0xFF),
+        static_cast<BYTE>(index & 0xFF),
+    };
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket =
+        reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(kOpenChestOpcode, payload, sizeof(payload));
+}
+
+class SoulPacketReader
+{
+public:
+    SoulPacketReader(const BYTE* data, uint32_t length)
+        : cursor_(data), end_(data ? data + length : nullptr)
+    {
+    }
+
+    bool ReadByte(BYTE& value)
+    {
+        if (!cursor_ || cursor_ >= end_) {
+            return false;
+        }
+        value = *cursor_++;
+        return true;
+    }
+
+    bool ReadU16(uint16_t& value)
+    {
+        if (!cursor_ || cursor_ + 2 > end_) {
+            return false;
+        }
+        value = ReadBe16Unaligned(cursor_);
+        cursor_ += 2;
+        return true;
+    }
+
+    bool ReadU32(uint32_t& value)
+    {
+        if (!cursor_ || cursor_ + 4 > end_) {
+            return false;
+        }
+        value = ReadBe32Unaligned(cursor_);
+        cursor_ += 4;
+        return true;
+    }
+
+    bool ReadUtf(char* output, size_t capacity, uint16_t& length)
+    {
+        if (!ReadU16(length) || length > static_cast<size_t>(end_ - cursor_)) {
+            return false;
+        }
+        if (output && capacity > 0) {
+            const size_t copyLength =
+                length < capacity - 1 ? length : capacity - 1;
+            if (copyLength > 0) {
+                std::memcpy(output, cursor_, copyLength);
+            }
+            output[copyLength] = '\0';
+        }
+        cursor_ += length;
+        return true;
+    }
+
+    bool SkipUtf()
+    {
+        uint16_t length = 0;
+        return ReadUtf(nullptr, 0, length);
+    }
+
+private:
+    const BYTE* cursor_ = nullptr;
+    const BYTE* end_ = nullptr;
+};
+
+void SendSoulPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket =
+        reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(opcode, payload, payloadLength);
+}
+
+void BeginWarehouseQuery(DWORD now, LONG verifyPass)
+{
+    InterlockedExchange(&g_verifyPass, verifyPass);
+    InterlockedExchange(&g_queryComplete, 0);
+    InterlockedExchange(&g_seenPageMask, 0);
+    InterlockedExchange(&g_seenPageCount, 0);
+    InterlockedExchange(&g_totalPages, 0);
+    InterlockedExchange(&g_candidateCount, 0);
+    InterlockedExchange(&g_candidateIndex, 0);
+    InterlockedExchange(&g_destroyInfoReady, 0);
+    InterlockedExchange(&g_decomposeState, kWaitingWarehouse);
+    InterlockedExchange(
+        &g_decomposeDeadlineTick,
+        static_cast<LONG>(now + kSoulResponseTimeoutMs));
+
+    const BYTE payload[4]{};
+    SendSoulPacket(kSoulWarehouseOpcode, payload, sizeof(payload));
+}
+
+void FinishDecomposeToOpen(DWORD now)
+{
+    InterlockedExchange(&g_decomposeState, kDecomposeIdle);
+    InterlockedExchange(&g_destroyInfoReady, 0);
+    InterlockedExchange(
+        &g_nextDecomposeCheckTick,
+        static_cast<LONG>(now + kSoulIdleRecheckMs));
+    InterlockedExchange(&g_openPhase, kOpenPhase);
+}
+
+bool AppendSoulCandidate(
+    const char* id,
+    uint16_t idLength,
+    uint32_t fightSoulType)
+{
+    if (!id || idLength == 0 || idLength >= kMaxSoulIdBytes ||
+        fightSoulType < 1 || fightSoulType > 6) {
+        return false;
+    }
+
+    const LONG count = InterlockedCompareExchange(&g_candidateCount, 0, 0);
+    if (count < 0 || static_cast<size_t>(count) >= kMaxSoulCandidates) {
+        return true;
+    }
+
+    SoulCandidate& candidate = g_candidates[count];
+    std::memcpy(candidate.id, id, idLength);
+    candidate.id[idLength] = '\0';
+    candidate.idLength = idLength;
+    candidate.fightSoulType = fightSoulType;
+    InterlockedIncrement(&g_candidateCount);
+    return true;
+}
+
+void HandleWarehouseItems(const BYTE* payload, uint32_t payloadLength)
+{
+    if (!payload || payloadLength == 0 ||
+        InterlockedCompareExchange(&g_decomposeState, 0, 0) !=
+            kWaitingWarehouse) {
+        return;
+    }
+
+    SoulPacketReader reader(payload, payloadLength);
+    uint16_t page = 0;
+    uint16_t totalPages = 0;
+    uint16_t itemCount = 0;
+    if (!reader.ReadU16(page) || !reader.ReadU16(totalPages) ||
+        !reader.ReadU16(itemCount) || page == 0 || page > totalPages ||
+        totalPages == 0 || totalPages > kMaxSoulPages) {
+        InterlockedExchange(&g_queryComplete, -1);
+        return;
+    }
+
+    if (page == 1) {
+        InterlockedExchange(&g_seenPageMask, 0);
+        InterlockedExchange(&g_seenPageCount, 0);
+        InterlockedExchange(&g_candidateCount, 0);
+        InterlockedExchange(&g_totalPages, totalPages);
+    } else if (static_cast<uint16_t>(
+                   InterlockedCompareExchange(&g_totalPages, 0, 0)) !=
+               totalPages) {
+        InterlockedExchange(&g_queryComplete, -1);
+        return;
+    }
+
+    const uint32_t pageBit = 1u << (page - 1);
+    if ((static_cast<uint32_t>(
+             InterlockedCompareExchange(&g_seenPageMask, 0, 0)) &
+         pageBit) != 0) {
+        return;
+    }
+
+    bool parsed = true;
+    for (uint16_t i = 0; i < itemCount && parsed; ++i) {
+        char id[kMaxSoulIdBytes]{};
+        uint16_t idLength = 0;
+        uint32_t fightSoulType = 0;
+        uint32_t quality = 0;
+        uint32_t nowLevel = 0;
+        uint32_t maxLevel = 0;
+        BYTE equipment = 0;
+        BYTE lock = 0;
+        uint16_t listCount = 0;
+
+        parsed = reader.ReadUtf(id, sizeof(id), idLength) &&
+            reader.ReadU32(fightSoulType) &&
+            reader.ReadU32(quality) &&
+            reader.SkipUtf() &&
+            reader.SkipUtf() &&
+            reader.ReadU32(nowLevel) &&
+            reader.ReadU32(maxLevel) &&
+            reader.ReadByte(equipment) &&
+            reader.SkipUtf() &&
+            reader.ReadByte(lock);
+
+        if (!parsed) {
+            break;
+        }
+
+        if (!reader.ReadU16(listCount)) {
+            parsed = false;
+            break;
+        }
+        for (uint16_t baseIndex = 0; baseIndex < listCount; ++baseIndex) {
+            if (!reader.SkipUtf() || !reader.SkipUtf() || !reader.SkipUtf()) {
+                parsed = false;
+                break;
+            }
+        }
+        if (!parsed) {
+            break;
+        }
+
+        if (!reader.ReadU16(listCount)) {
+            parsed = false;
+            break;
+        }
+        for (uint16_t randomIndex = 0; randomIndex < listCount; ++randomIndex) {
+            uint32_t ignoredNowLevel = 0;
+            uint32_t ignoredMaxLevel = 0;
+            if (!reader.SkipUtf() || !reader.SkipUtf() ||
+                !reader.ReadU32(ignoredNowLevel) ||
+                !reader.ReadU32(ignoredMaxLevel) || !reader.SkipUtf()) {
+                parsed = false;
+                break;
+            }
+        }
+        if (!parsed || !reader.SkipUtf()) {
+            parsed = false;
+            break;
+        }
+
+        if ((quality == 1 || quality == 2) &&
+            equipment == 0 && lock == 0) {
+            AppendSoulCandidate(id, idLength, fightSoulType);
+        }
+    }
+
+    if (!parsed) {
+        InterlockedExchange(&g_queryComplete, -1);
+        return;
+    }
+
+    InterlockedOr(&g_seenPageMask, static_cast<LONG>(pageBit));
+    const LONG seenPages = InterlockedIncrement(&g_seenPageCount);
+    const LONG expectedPages =
+        InterlockedCompareExchange(&g_totalPages, 0, 0);
+    if (seenPages == expectedPages) {
+        InterlockedExchange(&g_queryComplete, 1);
+    }
+}
+
+void SendSoulDestroyInfo(const SoulCandidate& candidate)
+{
+    if (candidate.idLength == 0 ||
+        candidate.idLength >= kMaxSoulIdBytes ||
+        candidate.fightSoulType < 1 ||
+        candidate.fightSoulType > 6) {
+        return;
+    }
+
+    InterlockedExchange(
+        &g_pendingSoulIdLength,
+        static_cast<LONG>(candidate.idLength));
+    InterlockedExchange(
+        &g_pendingSoulType,
+        static_cast<LONG>(candidate.fightSoulType));
+    std::memcpy(
+        g_pendingSoulId,
+        candidate.id,
+        static_cast<size_t>(candidate.idLength));
+    g_pendingSoulId[candidate.idLength] = '\0';
+    InterlockedExchange(&g_destroyInfoReady, 0);
+
+    BYTE payload[2 + kMaxSoulIdBytes + 4]{};
+    size_t cursor = 0;
+    payload[cursor++] =
+        static_cast<BYTE>((candidate.idLength >> 8) & 0xFF);
+    payload[cursor++] = static_cast<BYTE>(candidate.idLength & 0xFF);
+    std::memcpy(payload + cursor, candidate.id, candidate.idLength);
+    cursor += candidate.idLength;
+    payload[cursor++] =
+        static_cast<BYTE>((candidate.fightSoulType >> 24) & 0xFF);
+    payload[cursor++] =
+        static_cast<BYTE>((candidate.fightSoulType >> 16) & 0xFF);
+    payload[cursor++] =
+        static_cast<BYTE>((candidate.fightSoulType >> 8) & 0xFF);
+    payload[cursor++] =
+        static_cast<BYTE>(candidate.fightSoulType & 0xFF);
+    SendSoulPacket(
+        kSoulDestroyInfoOpcode,
+        payload,
+        static_cast<uint32_t>(cursor));
+}
+
+void SendSoulDestroySave()
+{
+    const LONG idLength = InterlockedCompareExchange(
+        &g_pendingSoulIdLength, 0, 0);
+    const LONG fightSoulType = InterlockedCompareExchange(
+        &g_pendingSoulType, 0, 0);
+    if (idLength <= 0 || idLength >= static_cast<LONG>(kMaxSoulIdBytes) ||
+        fightSoulType < 1 || fightSoulType > 6) {
+        return;
+    }
+
+    BYTE payload[2 + kMaxSoulIdBytes + 1 + 4]{};
+    size_t cursor = 0;
+    payload[cursor++] = static_cast<BYTE>((idLength >> 8) & 0xFF);
+    payload[cursor++] = static_cast<BYTE>(idLength & 0xFF);
+    std::memcpy(
+        payload + cursor,
+        g_pendingSoulId,
+        static_cast<size_t>(idLength));
+    cursor += static_cast<size_t>(idLength);
+    payload[cursor++] = 1;
+    const uint32_t type = static_cast<uint32_t>(fightSoulType);
+    payload[cursor++] = static_cast<BYTE>((type >> 24) & 0xFF);
+    payload[cursor++] = static_cast<BYTE>((type >> 16) & 0xFF);
+    payload[cursor++] = static_cast<BYTE>((type >> 8) & 0xFF);
+    payload[cursor++] = static_cast<BYTE>(type & 0xFF);
+    SendSoulPacket(
+        kSoulDestroySaveOpcode,
+        payload,
+        static_cast<uint32_t>(cursor));
+}
+
+bool TrySendSoulDestroySave(DWORD now)
+{
+    if (InterlockedCompareExchange(&g_enabled, 0, 0) == 0 ||
+        InterlockedCompareExchange(&g_decomposeState, 0, 0) !=
+            kWaitingDestroyInfo) {
+        return false;
+    }
+
+    if (InterlockedCompareExchange(&g_destroyInfoReady, 0, 1) != 1) {
+        return false;
+    }
+
+    if (InterlockedCompareExchange(
+            &g_decomposeState,
+            kWaitingAfterSave,
+            kWaitingDestroyInfo) != kWaitingDestroyInfo) {
+        InterlockedExchange(&g_destroyInfoReady, 1);
+        return false;
+    }
+
+    SendSoulDestroySave();
+    InterlockedExchange(
+        &g_decomposeDeadlineTick,
+        static_cast<LONG>(now + kSoulResponseTimeoutMs));
+    return true;
+}
+
+void ConfirmTick()
+{
+    TrySendSoulDestroySave(GetGameTick());
+}
+
+void HandleSoulDestroyInfo(const BYTE* payload, uint32_t payloadLength)
+{
+    if (!payload || payloadLength == 0 ||
+        InterlockedCompareExchange(&g_decomposeState, 0, 0) !=
+            kWaitingDestroyInfo) {
+        return;
+    }
+
+    SoulPacketReader reader(payload, payloadLength);
+    char id[kMaxSoulIdBytes]{};
+    uint16_t idLength = 0;
+    uint32_t fightSoulType = 0;
+    if (!reader.SkipUtf() ||
+        !reader.ReadUtf(id, sizeof(id), idLength) ||
+        !reader.ReadU32(fightSoulType) ||
+        !reader.SkipUtf()) {
+        return;
+    }
+
+    const LONG pendingLength = InterlockedCompareExchange(
+        &g_pendingSoulIdLength, 0, 0);
+    const LONG pendingType = InterlockedCompareExchange(
+        &g_pendingSoulType, 0, 0);
+    if (pendingLength != static_cast<LONG>(idLength) ||
+        pendingType != static_cast<LONG>(fightSoulType) ||
+        pendingLength <= 0 ||
+        pendingLength >= static_cast<LONG>(kMaxSoulIdBytes) ||
+        std::memcmp(
+            id,
+            g_pendingSoulId,
+            static_cast<size_t>(pendingLength)) != 0) {
+        return;
+    }
+
+    InterlockedExchange(&g_destroyInfoReady, 1);
+}
+
+void TickDecompose(DWORD now)
+{
+    const LONG state = InterlockedCompareExchange(&g_decomposeState, 0, 0);
+    if (state == kDecomposeIdle) {
+        const LONG nextAction = InterlockedCompareExchange(
+            &g_nextDecomposeActionTick, 0, 0);
+        if (static_cast<LONG>(
+                now - static_cast<DWORD>(nextAction)) < 0) {
+            return;
+        }
+        BeginWarehouseQuery(now, 0);
+        return;
+    }
+
+    if (state == kWaitingWarehouse) {
+        const LONG queryComplete = InterlockedCompareExchange(
+            &g_queryComplete, 0, 0);
+        if (queryComplete != 0) {
+            if (queryComplete < 0) {
+                FinishDecomposeToOpen(now);
+                return;
+            }
+            const LONG candidateCount = InterlockedCompareExchange(
+                &g_candidateCount, 0, 0);
+            if (candidateCount <= 0) {
+                FinishDecomposeToOpen(now);
+                return;
+            }
+            InterlockedExchange(&g_candidateIndex, 0);
+            InterlockedExchange(&g_decomposeState, kSendDestroyInfo);
+            InterlockedExchange(
+                &g_nextDecomposeActionTick,
+                static_cast<LONG>(now));
+            return;
+        }
+
+        const LONG deadline = InterlockedCompareExchange(
+            &g_decomposeDeadlineTick, 0, 0);
+        if (static_cast<LONG>(now - static_cast<DWORD>(deadline)) >= 0) {
+            FinishDecomposeToOpen(now);
+        }
+        return;
+    }
+
+    if (state == kSendDestroyInfo) {
+        const LONG nextAction = InterlockedCompareExchange(
+            &g_nextDecomposeActionTick, 0, 0);
+        if (static_cast<LONG>(
+                now - static_cast<DWORD>(nextAction)) < 0) {
+            return;
+        }
+
+        const LONG candidateCount = InterlockedCompareExchange(
+            &g_candidateCount, 0, 0);
+        LONG candidateIndex = InterlockedCompareExchange(
+            &g_candidateIndex, 0, 0);
+        if (candidateIndex < 0) {
+            candidateIndex = 0;
+            InterlockedExchange(&g_candidateIndex, candidateIndex);
+        }
+        if (candidateIndex >= candidateCount) {
+            const LONG verifyPass = InterlockedCompareExchange(
+                &g_verifyPass, 0, 0);
+            if (verifyPass >= kMaxSoulVerifyPasses) {
+                FinishDecomposeToOpen(now);
+            } else {
+                BeginWarehouseQuery(now, verifyPass + 1);
+            }
+            return;
+        }
+
+        SendSoulDestroyInfo(g_candidates[candidateIndex]);
+        InterlockedExchange(&g_destroyInfoReady, 0);
+        InterlockedExchange(&g_decomposeState, kWaitingDestroyInfo);
+        InterlockedExchange(
+            &g_decomposeDeadlineTick,
+            static_cast<LONG>(now + kSoulResponseTimeoutMs));
+        return;
+    }
+
+    if (state == kWaitingDestroyInfo) {
+        if (TrySendSoulDestroySave(now)) {
+            return;
+        }
+
+        const LONG deadline = InterlockedCompareExchange(
+            &g_decomposeDeadlineTick, 0, 0);
+        if (static_cast<LONG>(now - static_cast<DWORD>(deadline)) >= 0) {
+            InterlockedIncrement(&g_candidateIndex);
+            InterlockedExchange(&g_decomposeState, kSendDestroyInfo);
+        }
+        return;
+    }
+
+    if (state == kWaitingAfterSave) {
+        InterlockedIncrement(&g_candidateIndex);
+        InterlockedExchange(&g_decomposeState, kSendDestroyInfo);
+        InterlockedExchange(
+            &g_nextDecomposeActionTick,
+            static_cast<LONG>(now));
+    }
+}
+
+bool TryOpenOneChest()
+{
+    const uint32_t itemArray =
+        ReadGameU32(g_mainBase + kItemArrayOffset);
+    const uint32_t itemCount =
+        ReadGameU32(g_mainBase + kItemCountOffset);
+    if (itemArray == 0 || itemCount == 0 || itemCount > kMaxItemCount) {
+        return false;
+    }
+
+    for (const wchar_t* target : kTargetNames) {
+        for (uint32_t i = 0; i < itemCount; ++i) {
+            const uint32_t item =
+                ReadGameU32(itemArray + i * sizeof(uint32_t));
+            if (item == 0) {
+                continue;
+            }
+
+            const uint32_t key = ReadGameU32(item);
+            const uint16_t bagId =
+                static_cast<uint16_t>((key >> 16) & 0xFFFF);
+            const uint16_t index =
+                static_cast<uint16_t>(key & 0xFFFF);
+            if (bagId != kStorageBagId ||
+                ReadGameU16(item + 0x18) == 0) {
+                continue;
+            }
+
+            wchar_t name[64]{};
+            if (!ReadItemName(ReadGameU32(item + 0x14), name, _countof(name)) ||
+                _wcsicmp(name, target) != 0) {
+                continue;
+            }
+
+            SendOpenChest(bagId, index);
+            GameLog::Write(kUseLogFormat, name);
+            return true;
+        }
+    }
+    return false;
+}
+
+void HandleRecvPacket(
+    uint32_t opcode,
+    const BYTE* payload,
+    uint32_t payloadLength)
+{
+    if (g_mainBase == 0 ||
+        InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
+        return;
+    }
+
+    switch (opcode & 0xFFFF) {
+    case kSoulWarehouseItemsOpcode:
+        HandleWarehouseItems(payload, payloadLength);
+        break;
+    case kSoulDestroyInfoResultOpcode:
+        HandleSoulDestroyInfo(payload, payloadLength);
+        break;
+    default:
+        break;
+    }
+}
+
+void Tick()
+{
+    if (g_mainBase == 0 ||
+        InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
+        return;
+    }
+
+    __try {
+        const DWORD now = GetGameTick();
+        if (InterlockedCompareExchange(&g_openPhase, 0, 0) ==
+            kDecomposePhase) {
+            TickDecompose(now);
+            return;
+        }
+
+        if (TryOpenOneChest()) {
+            InterlockedExchange(&g_openCycleHadBox, 1);
+            InterlockedExchange(&g_nextDecomposeCheckTick, 0);
+            return;
+        }
+
+        const bool openedThisCycle =
+            InterlockedCompareExchange(&g_openCycleHadBox, 0, 0) != 0;
+        const DWORD nextCheck = static_cast<DWORD>(
+            InterlockedCompareExchange(&g_nextDecomposeCheckTick, 0, 0));
+        if (openedThisCycle ||
+            static_cast<LONG>(now - nextCheck) >= 0) {
+            InterlockedExchange(&g_openCycleHadBox, 0);
+            InterlockedExchange(&g_openPhase, kDecomposePhase);
+            InterlockedExchange(&g_decomposeState, kDecomposeIdle);
+            InterlockedExchange(
+                &g_nextDecomposeActionTick,
+                static_cast<LONG>(now));
+            TickDecompose(now);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+}
+
+}
+
+namespace ShenBingPu
+{
+
+constexpr uint32_t kPanelQueryOpcode = 0x33B5;
+constexpr uint32_t kPanelResultOpcode = 0x33B6;
+constexpr uint32_t kExtractResultOpcode = 0x33B8;
+constexpr uint32_t kExtractOpcode = 0x33B9;
+constexpr uint32_t kFreeSingleType = 1;
+constexpr uint32_t kItemSingleType = 2;
+constexpr uint32_t kYellowAndBelow = 1;
+constexpr DWORD kPanelTimeoutMs = 60000;
+constexpr DWORD kResultTimeoutMs = 60000;
+constexpr DWORD kIdleRefreshMs = 20 * 60 * 1000;
+constexpr uintptr_t kSystemSwitchOffset = 0x230324;
+constexpr uintptr_t kPropertiesOffset = 0x23051C;
+constexpr uintptr_t kPropertyLookupOffset = 0x309A0;
+constexpr uint32_t kUnlockPropertyId = 404;
+constexpr uint32_t kUnlockPropertyValue = 0x62;
+const wchar_t kRemainingLogFormat[] = L"\x795E\x5175\x7B26 %d";
+
+enum State : LONG
+{
+    kIdle = 0,
+    kWaitingPanel = 1,
+    kWaitingResult = 2
+};
+
+volatile LONG g_state = kIdle;
+volatile LONG g_deadlineTick = 0;
+volatile LONG g_nextRefreshTick = 0;
+volatile LONG g_panelValid = 0;
+volatile LONG g_panelEvent = 0;
+volatile LONG g_charmCount = -1;
+volatile LONG g_freeCount = 0;
+volatile LONG g_priceOfItem = 1;
+volatile LONG g_logAfterRefresh = 0;
+volatile LONG g_pendingLog = 0;
+volatile LONG g_pendingLogCount = 0;
+volatile LONG g_wasEnabled = 0;
+
+bool IsEnabled()
+{
+    return g_mainBase != 0 &&
+        ReadGameU32(g_mainBase + kSystemSwitchOffset) != 0;
+}
+
+bool IsUnlocked()
+{
+    if (g_mainBase == 0) {
+        return false;
+    }
+
+    __try {
+        using LookupFn = int(__thiscall*)(void*, int);
+        LookupFn lookup =
+            reinterpret_cast<LookupFn>(g_mainBase + kPropertyLookupOffset);
+        const uintptr_t record = static_cast<uintptr_t>(
+            lookup(
+                reinterpret_cast<void*>(g_mainBase + kPropertiesOffset),
+                static_cast<int>(kUnlockPropertyId)));
+        return record != 0 &&
+            ReadGameU32(record + 4) >= kUnlockPropertyValue;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void SendShenBingPacket(
+    uint32_t opcode,
+    const void* payload,
+    uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    SendPacketFn sendPacket =
+        reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360);
+    sendPacket(opcode, payload, payloadLength);
+}
+
+void ResetTransient()
+{
+    InterlockedExchange(&g_state, kIdle);
+    InterlockedExchange(&g_deadlineTick, 0);
+    InterlockedExchange(&g_nextRefreshTick, 0);
+    InterlockedExchange(&g_panelValid, 0);
+    InterlockedExchange(&g_panelEvent, 0);
+    InterlockedExchange(&g_logAfterRefresh, 0);
+    InterlockedExchange(&g_pendingLog, 0);
+}
+
+void SendPanelQuery()
+{
+    InterlockedExchange(
+        &g_deadlineTick,
+        static_cast<LONG>(GetGameTick() + kPanelTimeoutMs));
+    InterlockedExchange(&g_state, kWaitingPanel);
+    SendShenBingPacket(kPanelQueryOpcode, nullptr, 0);
+}
+
+void SendExtract(uint32_t type)
+{
+    BYTE payload[8]{};
+    payload[3] = static_cast<BYTE>(type & 0xFF);
+    payload[7] = static_cast<BYTE>(kYellowAndBelow & 0xFF);
+    InterlockedExchange(&g_logAfterRefresh, 1);
+    InterlockedExchange(
+        &g_deadlineTick,
+        static_cast<LONG>(GetGameTick() + kResultTimeoutMs));
+    InterlockedExchange(&g_state, kWaitingResult);
+    SendShenBingPacket(kExtractOpcode, payload, sizeof(payload));
+}
+
+void DrainPendingLog()
+{
+    if (InterlockedExchange(&g_pendingLog, 0) == 0) {
+        return;
+    }
+    const LONG remaining =
+        InterlockedCompareExchange(&g_pendingLogCount, 0, 0);
+    GameLog::Write(kRemainingLogFormat, remaining);
+}
+
+void HandlePanel(const BYTE* payload, uint32_t payloadLength)
+{
+    if (!payload || payloadLength < 16) {
+        return;
+    }
+
+    const LONG charmCount =
+        static_cast<LONG>(ReadBe32Unaligned(payload));
+    const LONG priceOfItem =
+        static_cast<LONG>(ReadBe32Unaligned(payload + 8));
+    const LONG freeCount =
+        static_cast<LONG>(ReadBe32Unaligned(payload + 12));
+    InterlockedExchange(&g_charmCount, charmCount);
+    InterlockedExchange(&g_priceOfItem, priceOfItem > 0 ? priceOfItem : 1);
+    InterlockedExchange(&g_freeCount, freeCount);
+    InterlockedExchange(&g_panelValid, 1);
+    InterlockedExchange(&g_panelEvent, 1);
+    InterlockedExchange(&g_state, kIdle);
+    InterlockedExchange(&g_deadlineTick, 0);
+    InterlockedExchange(&g_nextRefreshTick, 0);
+
+    if (InterlockedExchange(&g_logAfterRefresh, 0) != 0) {
+        InterlockedExchange(&g_pendingLogCount, charmCount);
+        InterlockedExchange(&g_pendingLog, 1);
+    }
+}
+
+void HandleRecvPacket(
+    uint32_t opcode,
+    const BYTE* payload,
+    uint32_t payloadLength)
+{
+    if (!IsEnabled()) {
+        return;
+    }
+
+    switch (opcode & 0xFFFF) {
+    case kPanelResultOpcode:
+        HandlePanel(payload, payloadLength);
+        break;
+    case kExtractResultOpcode:
+        if (InterlockedCompareExchange(
+                &g_state, 0, 0) != kWaitingResult) {
+            break;
+        }
+        InterlockedExchange(&g_state, kIdle);
+        InterlockedExchange(&g_deadlineTick, 0);
+        SendPanelQuery();
+        break;
+    default:
+        break;
+    }
+}
+
+void Tick()
+{
+    if (g_mainBase == 0) {
+        return;
+    }
+
+    const bool enabled = IsEnabled();
+    const bool wasEnabled =
+        InterlockedExchange(&g_wasEnabled, enabled ? 1 : 0) != 0;
+    if (!enabled) {
+        if (wasEnabled) {
+            ResetTransient();
+        }
+        return;
+    }
+    if (!wasEnabled) {
+        ResetTransient();
+    }
+    if (!IsUnlocked()) {
+        return;
+    }
+
+    DrainPendingLog();
+    const DWORD now = GetGameTick();
+    const LONG state = InterlockedCompareExchange(&g_state, 0, 0);
+    if (state == kWaitingPanel || state == kWaitingResult) {
+        const DWORD deadline = static_cast<DWORD>(
+            InterlockedCompareExchange(&g_deadlineTick, 0, 0));
+        if (static_cast<LONG>(now - deadline) >= 0) {
+            InterlockedExchange(&g_state, kIdle);
+            InterlockedExchange(&g_deadlineTick, 0);
+            InterlockedExchange(
+                &g_nextRefreshTick,
+                static_cast<LONG>(now + kIdleRefreshMs));
+        }
+        return;
+    }
+
+    if (InterlockedExchange(&g_panelEvent, 0) != 0) {
+        const LONG freeCount =
+            InterlockedCompareExchange(&g_freeCount, 0, 0);
+        if (freeCount > 0) {
+            SendExtract(kFreeSingleType);
+            return;
+        }
+
+        const LONG charmCount =
+            InterlockedCompareExchange(&g_charmCount, 0, 0);
+        const LONG priceOfItem =
+            InterlockedCompareExchange(&g_priceOfItem, 0, 0);
+        if (charmCount > 1 && priceOfItem > 0 &&
+            charmCount >= priceOfItem) {
+            SendExtract(kItemSingleType);
+            return;
+        }
+
+        InterlockedExchange(
+            &g_nextRefreshTick,
+            static_cast<LONG>(now + kIdleRefreshMs));
+        return;
+    }
+
+    const DWORD nextRefresh = static_cast<DWORD>(
+        InterlockedCompareExchange(&g_nextRefreshTick, 0, 0));
+    if (InterlockedCompareExchange(&g_panelValid, 0, 0) == 0 ||
+        static_cast<LONG>(now - nextRefresh) >= 0) {
+        SendPanelQuery();
     }
 }
 
@@ -15309,6 +16518,8 @@ void ResetState()
     InterlockedExchange(&g_teamOrderRetries, 0);
     InterlockedExchange(&g_createTeamMissCount, 0);
     InterlockedExchange(&g_createFinalCheck, 0);
+    InterlockedExchange(&g_consolidateOwnTeamId, 0);
+    InterlockedExchange(&g_consolidateRefreshCount, 0);
     InterlockedExchange(&g_restoredTeamId, 0);
     InterlockedExchange(&g_consolidateDone, 0);
     InterlockedExchange(&g_consolidateDueTick, 0);
@@ -15823,8 +17034,11 @@ void Handle42A2(const BYTE* payload, uint32_t payloadLength)
     cursor += 2;
 
     // 合併：自己房一直只有 1 人、超過等待時間且本輪尚未合併 → 解散 → 查列表 → 加入更靠前的同難度房
-    if (memberCount == 1 && g_consolidateDone == 0 &&
+    const LONG ownTeamId = g_teamId;
+    if (memberCount == 1 && ownTeamId != 0 && g_consolidateDone == 0 &&
         static_cast<LONG>(GetGameTick() - static_cast<DWORD>(g_consolidateDueTick)) >= 0) {
+        InterlockedExchange(&g_consolidateOwnTeamId, ownTeamId);
+        InterlockedExchange(&g_consolidateRefreshCount, 0);
         InterlockedExchange(&g_consolidateDone, 1);
         Send429D();
         Send4294();
@@ -15989,20 +17203,55 @@ void Handle42A4(const BYTE* payload, uint32_t payloadLength)
         return;
     }
     if (g_state == 7) {
-        // 合併：依伺服器列表順序找第一個「同難度 + 1 人」房 → 加入；否則重建自己的房
+        // 合併：依伺服器列表順序找第一個「同難度 + 1 人」房，且不得選回剛解散的自身房
+        const uint32_t consolidateOwnTeamId = static_cast<uint32_t>(g_consolidateOwnTeamId);
+        bool ownStillListed = false;
+        LONG targetIndex = -1;
         const LONG count = g_teamCount < static_cast<LONG>(kMaxTeams) ? g_teamCount : static_cast<LONG>(kMaxTeams);
         for (LONG i = 0; i < count; ++i) {
+            if (consolidateOwnTeamId != 0 && g_teamIds[i] == consolidateOwnTeamId) {
+                ownStillListed = true;
+                continue;
+            }
             if (g_teamDungeonIds[i] != static_cast<uint16_t>(g_currentId) || g_teamPeople[i] != 1) {
                 continue;
             }
+            targetIndex = i;
+            break;
+        }
+        if (targetIndex >= 0) {
+            InterlockedExchange(&g_consolidateOwnTeamId, 0);
+            InterlockedExchange(&g_consolidateRefreshCount, 0);
             InterlockedExchange(&g_battleMode, 3);
-            InterlockedExchange(&g_teamId, g_teamIds[i]);
+            InterlockedExchange(&g_teamId, g_teamIds[targetIndex]);
             Send4296();
             Send4293();
             WriteJoinLog();
             Finish();
             return;
         }
+
+        if (g_consolidateRefreshCount < kConsolidateRefreshMax) {
+            InterlockedExchange(&g_consolidateRefreshCount, g_consolidateRefreshCount + 1);
+            Send4294();
+            InterlockedExchange(&g_waitTick, static_cast<LONG>(GetGameTick()));
+            return;
+        }
+
+        if (ownStillListed && consolidateOwnTeamId != 0) {
+            // 沒有更前面的候選房時回到原房，避免因舊列表而重複建房
+            InterlockedExchange(&g_consolidateOwnTeamId, 0);
+            InterlockedExchange(&g_consolidateRefreshCount, 0);
+            InterlockedExchange(&g_battleMode, 3);
+            InterlockedExchange(&g_teamId, consolidateOwnTeamId);
+            Send4296ById(consolidateOwnTeamId);
+            Send4293();
+            Finish();
+            return;
+        }
+
+        InterlockedExchange(&g_consolidateOwnTeamId, 0);
+        InterlockedExchange(&g_consolidateRefreshCount, 0);
         InterlockedExchange(&g_battleMode, 3);
         InterlockedExchange(&g_consolidateDueTick, static_cast<LONG>(GetGameTick() + kConsolidateDelayMs));
         Send4297();
@@ -16345,6 +17594,8 @@ __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* pa
     InterlockedExchange(&g_clearStackArg, 0);
     NativeWash::HandleRecvPacket(opcode, payload, payloadLength);
     AutoExpBook::HandleRecvPacket(opcode, payload, payloadLength);
+    AutoOpenBox::HandleRecvPacket(opcode, payload, payloadLength);
+    ShenBingPu::HandleRecvPacket(opcode, payload, payloadLength);
     WorldCityBattle::HandleRecvPacket(opcode, payload, payloadLength);
     DailySign::HandleRecvPacket(opcode, payload);
     PrizePool::HandleRecvPacket(opcode, payload);
