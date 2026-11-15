@@ -1,4 +1,6 @@
 #include <windows.h>
+#include <mshtml.h>
+#include <oleacc.h>
 #include <algorithm>
 #include <climits>
 #include <cstdio>
@@ -3764,6 +3766,718 @@ volatile LONG g_accountCaptured = 0;
 wchar_t g_message[2048]{};
 wchar_t g_account[512]{};
 wchar_t g_password[512]{};
+using PredictBase64Fn = int(__cdecl*)(const char*, char*, int);
+SRWLOCK g_predictLock = SRWLOCK_INIT;
+HMODULE g_predictModule = nullptr;
+PredictBase64Fn g_predictBase64 = nullptr;
+const wchar_t kServerEnvironment[] = L"NINESPLAY_SERVER";
+const wchar_t kServerUrlPrefix[] = L"https://san.9splay.com/Game/Server/";
+const wchar_t kLogoutPath[] = L"/home/logout";
+constexpr DWORD kRedirectPollIntervalMs = 500;
+constexpr DWORD kRedirectTimeoutMs = 120000;
+volatile LONG g_redirectStarted = 0;
+wchar_t g_redirectServer[32]{};
+wchar_t g_accountElementId[128]{};
+wchar_t g_passwordElementId[128]{};
+
+bool RefillLoginFormIfNeeded(IHTMLDocument2* document);
+
+BOOL CALLBACK FindBrowserServerProc(HWND hwnd, LPARAM lParam)
+{
+    wchar_t className[64]{};
+    if (GetClassNameW(hwnd, className, static_cast<int>(_countof(className))) != 0 &&
+        _wcsicmp(className, L"Internet Explorer_Server") == 0) {
+        *reinterpret_cast<HWND*>(lParam) = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+HWND FindBrowserServer()
+{
+    if (g_mainBase == 0) {
+        return nullptr;
+    }
+    HWND mainHwnd = *reinterpret_cast<HWND volatile*>(g_mainBase + 0x2300A4);
+    if (!mainHwnd || !IsWindow(mainHwnd)) {
+        return nullptr;
+    }
+
+    HWND serverHwnd = nullptr;
+    EnumChildWindows(mainHwnd, FindBrowserServerProc,
+        reinterpret_cast<LPARAM>(&serverHwnd));
+    return serverHwnd;
+}
+
+IHTMLDocument2* GetCurrentBrowserDocument()
+{
+    HWND serverHwnd = FindBrowserServer();
+    if (!serverHwnd) {
+        return nullptr;
+    }
+
+    const UINT message = RegisterWindowMessageW(L"WM_HTML_GETOBJECT");
+    DWORD_PTR result = 0;
+    if (message == 0 ||
+        SendMessageTimeoutW(serverHwnd, message, 0, 0,
+            SMTO_ABORTIFHUNG, 1000, &result) == 0 || result == 0) {
+        return nullptr;
+    }
+
+    IHTMLDocument2* document = nullptr;
+    if (FAILED(ObjectFromLresult(static_cast<LRESULT>(result),
+            __uuidof(IHTMLDocument2), 0,
+            reinterpret_cast<void**>(&document)))) {
+        return nullptr;
+    }
+    return document;
+}
+
+bool IsLogoutHref(const wchar_t* href)
+{
+    if (!href || href[0] == L'\0') {
+        return false;
+    }
+
+    const size_t pathLength = wcslen(kLogoutPath);
+    for (const wchar_t* current = href; *current != L'\0'; ++current) {
+        if (_wcsnicmp(current, kLogoutPath, pathLength) != 0) {
+            continue;
+        }
+        const wchar_t trailing = current[pathLength];
+        if (trailing == L'\0' || trailing == L'/' ||
+            trailing == L'?' || trailing == L'#') {
+            return true;
+        }
+    }
+    return _wcsicmp(href, L"home/logout") == 0;
+}
+
+bool HasLogoutElement(IHTMLDocument2* document)
+{
+    if (!document) {
+        return false;
+    }
+
+    IHTMLDocument3* document3 = nullptr;
+    if (FAILED(document->QueryInterface(__uuidof(IHTMLDocument3),
+            reinterpret_cast<void**>(&document3))) || !document3) {
+        return false;
+    }
+
+    BSTR tagName = SysAllocString(L"a");
+    IHTMLElementCollection* anchors = nullptr;
+    const HRESULT collectionResult = tagName
+        ? document3->getElementsByTagName(tagName, &anchors)
+        : E_OUTOFMEMORY;
+    if (tagName) {
+        SysFreeString(tagName);
+    }
+    document3->Release();
+    if (FAILED(collectionResult) || !anchors) {
+        return false;
+    }
+
+    long length = 0;
+    anchors->get_length(&length);
+    bool found = false;
+    for (long i = 0; i < length && !found; ++i) {
+        VARIANT name;
+        VARIANT index;
+        VariantInit(&name);
+        VariantInit(&index);
+        name.vt = VT_I4;
+        name.lVal = i;
+
+        IDispatch* dispatch = nullptr;
+        if (SUCCEEDED(anchors->item(name, index, &dispatch)) && dispatch) {
+            IHTMLAnchorElement* anchor = nullptr;
+            if (SUCCEEDED(dispatch->QueryInterface(__uuidof(IHTMLAnchorElement),
+                    reinterpret_cast<void**>(&anchor))) && anchor) {
+                BSTR href = nullptr;
+                if (SUCCEEDED(anchor->get_href(&href)) && href) {
+                    found = IsLogoutHref(href);
+                    SysFreeString(href);
+                }
+                anchor->Release();
+            }
+            dispatch->Release();
+        }
+        VariantClear(&name);
+        VariantClear(&index);
+    }
+    anchors->Release();
+    return found;
+}
+
+bool ReadRedirectServer()
+{
+    const DWORD length = GetEnvironmentVariableW(
+        kServerEnvironment, g_redirectServer,
+        static_cast<DWORD>(_countof(g_redirectServer)));
+    if (length == 0 || length >= _countof(g_redirectServer)) {
+        g_redirectServer[0] = L'\0';
+        return false;
+    }
+    for (DWORD i = 0; i < length; ++i) {
+        if (g_redirectServer[i] < L'0' || g_redirectServer[i] > L'9') {
+            g_redirectServer[0] = L'\0';
+            return false;
+        }
+    }
+    return true;
+}
+
+bool NavigateToConfiguredServer(IHTMLDocument2* document)
+{
+    if (!document || g_redirectServer[0] == L'\0') {
+        return false;
+    }
+
+    IHTMLWindow2* window = nullptr;
+    if (FAILED(document->get_parentWindow(&window)) || !window) {
+        return false;
+    }
+
+    IHTMLLocation* location = nullptr;
+    const HRESULT locationResult = window->get_location(&location);
+    window->Release();
+    if (FAILED(locationResult) || !location) {
+        return false;
+    }
+
+    wchar_t targetUrl[256]{};
+    _snwprintf_s(targetUrl, _countof(targetUrl), _TRUNCATE,
+        L"%s%s", kServerUrlPrefix, g_redirectServer);
+    BSTR target = SysAllocString(targetUrl);
+    const bool navigated = target && SUCCEEDED(location->put_href(target));
+    if (target) {
+        SysFreeString(target);
+    }
+    location->Release();
+    return navigated;
+}
+
+DWORD WINAPI RedirectThread(LPVOID)
+{
+    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool shouldUninitialize = SUCCEEDED(comResult);
+    const ULONGLONG deadline = GetTickCount64() + kRedirectTimeoutMs;
+
+    while (GetTickCount64() < deadline) {
+        IHTMLDocument2* document = GetCurrentBrowserDocument();
+        if (document) {
+            BSTR url = nullptr;
+            if (SUCCEEDED(document->get_URL(&url)) && url) {
+                if (_wcsnicmp(url, kServerUrlPrefix,
+                        wcslen(kServerUrlPrefix)) == 0) {
+                    SysFreeString(url);
+                    document->Release();
+                    break;
+                }
+                SysFreeString(url);
+            }
+            if (HasLogoutElement(document)) {
+                const bool navigated = NavigateToConfiguredServer(document);
+                document->Release();
+                if (navigated) {
+                    break;
+                }
+                Sleep(kRedirectPollIntervalMs);
+                continue;
+            }
+            if (RefillLoginFormIfNeeded(document)) {
+                document->Release();
+                Sleep(kRedirectPollIntervalMs);
+                continue;
+            }
+            document->Release();
+        }
+        Sleep(kRedirectPollIntervalMs);
+    }
+
+    if (shouldUninitialize) {
+        CoUninitialize();
+    }
+    InterlockedExchange(&g_redirectStarted, 0);
+    return 0;
+}
+
+void ArmServerRedirect()
+{
+    if (InterlockedCompareExchange(&g_redirectStarted, 1, 0) != 0) {
+        return;
+    }
+    if (!ReadRedirectServer()) {
+        InterlockedExchange(&g_redirectStarted, 0);
+        return;
+    }
+
+    HANDLE thread = CreateThread(nullptr, 0, RedirectThread, nullptr, 0, nullptr);
+    if (!thread) {
+        InterlockedExchange(&g_redirectStarted, 0);
+        return;
+    }
+    CloseHandle(thread);
+}
+
+bool EnsurePredictorLoaded()
+{
+    AcquireSRWLockExclusive(&g_predictLock);
+    if (!g_predictBase64) {
+        wchar_t dllPath[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameW(
+            g_selfModule, dllPath, static_cast<DWORD>(_countof(dllPath)));
+        if (length != 0 && length < _countof(dllPath)) {
+            wchar_t* slash = wcsrchr(dllPath, L'\\');
+            if (slash) {
+                slash[1] = L'\0';
+                if (wcscat_s(dllPath, L"login.dll") == 0) {
+                    HMODULE module = LoadLibraryExW(
+                        dllPath, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+                    if (module) {
+                        PredictBase64Fn predict =
+                            reinterpret_cast<PredictBase64Fn>(
+                                GetProcAddress(module, "PredictBase64"));
+                        if (predict) {
+                            g_predictModule = module;
+                            g_predictBase64 = predict;
+                        }
+                        else {
+                            FreeLibrary(module);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const bool loaded = g_predictBase64 != nullptr;
+    ReleaseSRWLockExclusive(&g_predictLock);
+    return loaded;
+}
+
+bool PredictVerifyCode(const std::wstring& base64, std::wstring& prediction)
+{
+    if (base64.empty() || !EnsurePredictorLoaded()) {
+        return false;
+    }
+
+    std::string encoded;
+    encoded.reserve(base64.size());
+    for (wchar_t character : base64) {
+        if (character > 0x7F) {
+            return false;
+        }
+        encoded.push_back(static_cast<char>(character));
+    }
+    char answer[5]{};
+    if (g_predictBase64(encoded.c_str(), answer,
+            static_cast<int>(sizeof(answer))) != 0 ||
+        answer[0] == '\0') {
+        return false;
+    }
+
+    prediction.assign(answer, answer + strnlen_s(answer, sizeof(answer)));
+    return !prediction.empty();
+}
+
+bool ExtractOriginalImageBase64(IHTMLElement* imageElement, std::wstring& base64)
+{
+    if (!imageElement) {
+        return false;
+    }
+
+    IDispatch* ownerDocument = nullptr;
+    if (FAILED(imageElement->get_document(&ownerDocument)) || !ownerDocument) {
+        return false;
+    }
+
+    IHTMLDocument2* document = nullptr;
+    ownerDocument->QueryInterface(__uuidof(IHTMLDocument2),
+        reinterpret_cast<void**>(&document));
+    ownerDocument->Release();
+    if (!document) {
+        return false;
+    }
+
+    IHTMLWindow2* window = nullptr;
+    const HRESULT windowResult = document->get_parentWindow(&window);
+    document->Release();
+    if (FAILED(windowResult) || !window) {
+        return false;
+    }
+
+    const wchar_t scriptText[] =
+        L"(function(){"
+        L"var img=document.getElementById('verifyCodeImg');"
+        L"if(!img){return;}"
+        L"try{img.removeAttribute('mypatchBase64');}catch(e){}"
+        L"try{"
+        L"if(!img.complete||!img.naturalWidth||!img.naturalHeight){return;}"
+        L"var canvas=document.createElement('canvas');"
+        L"if(!canvas||!canvas.getContext){return;}"
+        L"canvas.width=img.naturalWidth;"
+        L"canvas.height=img.naturalHeight;"
+        L"canvas.getContext('2d').drawImage(img,0,0,img.naturalWidth,img.naturalHeight);"
+        L"var data=canvas.toDataURL('image/png');"
+        L"var comma=data.indexOf(',');"
+        L"if(comma>=0){img.setAttribute('mypatchBase64',data.substring(comma+1));}"
+        L"}catch(e){}"
+        L"})();";
+
+    BSTR script = SysAllocString(scriptText);
+    BSTR language = SysAllocString(L"JavaScript");
+    VARIANT result;
+    VariantInit(&result);
+    HRESULT executeResult = E_OUTOFMEMORY;
+    if (script && language) {
+        executeResult = window->execScript(script, language, &result);
+    }
+    VariantClear(&result);
+    if (language) {
+        SysFreeString(language);
+    }
+    if (script) {
+        SysFreeString(script);
+    }
+    window->Release();
+    if (FAILED(executeResult)) {
+        return false;
+    }
+
+    BSTR attributeName = SysAllocString(L"mypatchBase64");
+    if (!attributeName) {
+        return false;
+    }
+    VARIANT attributeValue;
+    VariantInit(&attributeValue);
+    const HRESULT attributeResult =
+        imageElement->getAttribute(attributeName, 0, &attributeValue);
+    SysFreeString(attributeName);
+
+    bool success = false;
+    if (SUCCEEDED(attributeResult) && attributeValue.vt == VT_BSTR &&
+        attributeValue.bstrVal && SysStringLen(attributeValue.bstrVal) != 0) {
+        base64.assign(attributeValue.bstrVal,
+            static_cast<size_t>(SysStringLen(attributeValue.bstrVal)));
+        success = true;
+    }
+    VariantClear(&attributeValue);
+    return success;
+}
+
+IHTMLElement* FindElement(IHTMLElementCollection* elements, const wchar_t* id)
+{
+    if (!elements || !id) {
+        return nullptr;
+    }
+
+    VARIANT name;
+    VARIANT index;
+    VariantInit(&name);
+    VariantInit(&index);
+    name.vt = VT_BSTR;
+    name.bstrVal = SysAllocString(id);
+    if (!name.bstrVal) {
+        return nullptr;
+    }
+
+    IDispatch* dispatch = nullptr;
+    const HRESULT itemResult = elements->item(name, index, &dispatch);
+    VariantClear(&name);
+    if (FAILED(itemResult) || !dispatch) {
+        return nullptr;
+    }
+
+    IHTMLElement* element = nullptr;
+    dispatch->QueryInterface(__uuidof(IHTMLElement),
+        reinterpret_cast<void**>(&element));
+    dispatch->Release();
+    return element;
+}
+
+bool FillInput(IUnknown* rawElement, const wchar_t* text)
+{
+    if (!rawElement || !text || text[0] == L'\0') {
+        return false;
+    }
+
+    IHTMLInputElement* input = nullptr;
+    if (FAILED(rawElement->QueryInterface(__uuidof(IHTMLInputElement),
+            reinterpret_cast<void**>(&input))) || !input) {
+        return false;
+    }
+
+    BSTR value = SysAllocString(text);
+    const bool filled = value && SUCCEEDED(input->put_value(value));
+    if (value) {
+        SysFreeString(value);
+    }
+    input->Release();
+    return filled;
+}
+
+bool QueueLoginClick(IHTMLElement* loginElement)
+{
+    if (!loginElement) {
+        return false;
+    }
+
+    IDispatch* ownerDocument = nullptr;
+    if (FAILED(loginElement->get_document(&ownerDocument)) || !ownerDocument) {
+        return false;
+    }
+
+    IHTMLDocument2* document = nullptr;
+    ownerDocument->QueryInterface(__uuidof(IHTMLDocument2),
+        reinterpret_cast<void**>(&document));
+    ownerDocument->Release();
+    if (!document) {
+        return false;
+    }
+
+    IHTMLWindow2* window = nullptr;
+    const HRESULT windowResult = document->get_parentWindow(&window);
+    document->Release();
+    if (FAILED(windowResult) || !window) {
+        return false;
+    }
+
+    const wchar_t scriptText[] =
+        L"window.setTimeout(function(){"
+        L"var button=document.getElementById('btn-wrap');"
+        L"if(!button){return;}"
+        L"try{button.click();}"
+        L"catch(e){try{if(typeof dosubmit==='function'){dosubmit();}}catch(ignore){}}"
+        L"},0);";
+    BSTR script = SysAllocString(scriptText);
+    BSTR language = SysAllocString(L"JavaScript");
+    VARIANT result;
+    VariantInit(&result);
+    HRESULT executeResult = E_OUTOFMEMORY;
+    if (script && language) {
+        executeResult = window->execScript(script, language, &result);
+    }
+    VariantClear(&result);
+    if (language) {
+        SysFreeString(language);
+    }
+    if (script) {
+        SysFreeString(script);
+    }
+    window->Release();
+    return SUCCEEDED(executeResult);
+}
+
+bool CaptureElementId(IUnknown* rawElement, wchar_t* destination, size_t capacity)
+{
+    if (!rawElement || !destination || capacity == 0) {
+        return false;
+    }
+
+    IHTMLElement* element = nullptr;
+    if (FAILED(rawElement->QueryInterface(__uuidof(IHTMLElement),
+            reinterpret_cast<void**>(&element))) || !element) {
+        return false;
+    }
+
+    BSTR id = nullptr;
+    const HRESULT result = element->get_id(&id);
+    element->Release();
+    if (FAILED(result) || !id || id[0] == L'\0') {
+        if (id) {
+            SysFreeString(id);
+        }
+        return false;
+    }
+
+    wcsncpy_s(destination, capacity, id, _TRUNCATE);
+    SysFreeString(id);
+    return destination[0] != L'\0';
+}
+
+bool ReadInputEmpty(IUnknown* rawElement, bool& empty)
+{
+    empty = false;
+    if (!rawElement) {
+        return false;
+    }
+
+    IHTMLInputElement* input = nullptr;
+    if (FAILED(rawElement->QueryInterface(__uuidof(IHTMLInputElement),
+            reinterpret_cast<void**>(&input))) || !input) {
+        return false;
+    }
+
+    BSTR value = nullptr;
+    const HRESULT result = input->get_value(&value);
+    input->Release();
+    if (FAILED(result)) {
+        if (value) {
+            SysFreeString(value);
+        }
+        return false;
+    }
+
+    empty = !value || value[0] == L'\0';
+    if (value) {
+        SysFreeString(value);
+    }
+    return true;
+}
+
+bool FillAndQueueLogin(
+    IHTMLElementCollection* elements,
+    IUnknown* accountElement,
+    IUnknown* passwordElement,
+    const wchar_t* currentPassword,
+    bool& readyToSubmit)
+{
+    readyToSubmit = false;
+    if (!elements) {
+        return false;
+    }
+
+    IHTMLElement* imageElement = FindElement(elements, L"verifyCodeImg");
+    IHTMLElement* inputElement = FindElement(elements, L"CheckText");
+    IHTMLElement* loginElement = FindElement(elements, L"btn-wrap");
+
+    IHTMLInputElement* input = nullptr;
+    if (inputElement) {
+        inputElement->QueryInterface(__uuidof(IHTMLInputElement),
+            reinterpret_cast<void**>(&input));
+    }
+
+    const wchar_t* account = g_account;
+    if (g_mainBase != 0) {
+        const wchar_t* const currentAccount =
+            *reinterpret_cast<const wchar_t* volatile*>(g_mainBase + kAccountOffset);
+        if (currentAccount && currentAccount[0] != L'\0') {
+            account = currentAccount;
+        }
+    }
+    const wchar_t* password = currentPassword;
+    if (!password || password[0] == L'\0') {
+        password = g_password;
+    }
+
+    const bool accountFilled = FillInput(accountElement, account);
+    const bool passwordFilled = FillInput(passwordElement, password);
+    bool verifyCodeFilled = false;
+    if (imageElement && input) {
+        std::wstring base64;
+        if (ExtractOriginalImageBase64(imageElement, base64)) {
+            std::wstring prediction;
+            if (PredictVerifyCode(base64, prediction)) {
+                BSTR value = SysAllocStringLen(prediction.data(),
+                    static_cast<UINT>(prediction.size()));
+                if (value) {
+                    verifyCodeFilled = SUCCEEDED(input->put_value(value));
+                    SysFreeString(value);
+                }
+            }
+        }
+    }
+
+    readyToSubmit =
+        accountFilled && passwordFilled && verifyCodeFilled && loginElement;
+    const bool clickQueued = readyToSubmit && QueueLoginClick(loginElement);
+
+    if (input) {
+        input->Release();
+    }
+    if (inputElement) {
+        inputElement->Release();
+    }
+    if (loginElement) {
+        loginElement->Release();
+    }
+    if (imageElement) {
+        imageElement->Release();
+    }
+    return clickQueued;
+}
+
+bool RefillLoginFormIfNeeded(IHTMLDocument2* document)
+{
+    if (!document || g_accountElementId[0] == L'\0' ||
+        g_passwordElementId[0] == L'\0') {
+        return false;
+    }
+
+    IHTMLElementCollection* elements = nullptr;
+    if (FAILED(document->get_all(&elements)) || !elements) {
+        return false;
+    }
+
+    IHTMLElement* accountElement = FindElement(elements, g_accountElementId);
+    IHTMLElement* passwordElement = FindElement(elements, g_passwordElementId);
+    IHTMLElement* verifyCodeElement = FindElement(elements, L"CheckText");
+    bool accountEmpty = false;
+    bool passwordEmpty = false;
+    bool verifyCodeEmpty = false;
+    const bool valuesReadable =
+        ReadInputEmpty(accountElement, accountEmpty) &&
+        ReadInputEmpty(passwordElement, passwordEmpty) &&
+        ReadInputEmpty(verifyCodeElement, verifyCodeEmpty);
+
+    bool clickQueued = false;
+    if (valuesReadable && (accountEmpty || passwordEmpty || verifyCodeEmpty)) {
+        bool readyToSubmit = false;
+        clickQueued = FillAndQueueLogin(
+            elements, accountElement, passwordElement, g_password, readyToSubmit);
+    }
+
+    if (verifyCodeElement) {
+        verifyCodeElement->Release();
+    }
+    if (passwordElement) {
+        passwordElement->Release();
+    }
+    if (accountElement) {
+        accountElement->Release();
+    }
+    elements->Release();
+    return clickQueued;
+}
+
+__declspec(noinline) void __stdcall FillAndSubmitLoginForm(
+    IUnknown* rawElements,
+    IUnknown* accountElement,
+    IUnknown* passwordElement,
+    const wchar_t* currentPassword,
+    IUnknown** clickElementSlot)
+{
+    if (!rawElements) {
+        return;
+    }
+
+    IHTMLElementCollection* elements = nullptr;
+    if (FAILED(rawElements->QueryInterface(__uuidof(IHTMLElementCollection),
+            reinterpret_cast<void**>(&elements))) || !elements) {
+        return;
+    }
+
+    CaptureElementId(accountElement, g_accountElementId, _countof(g_accountElementId));
+    CaptureElementId(passwordElement, g_passwordElementId, _countof(g_passwordElementId));
+
+    bool readyToSubmit = false;
+    const bool clickQueued = FillAndQueueLogin(
+        elements, accountElement, passwordElement, currentPassword, readyToSubmit);
+    if (clickQueued) {
+        ArmServerRedirect();
+    }
+
+    // The queued JavaScript runs after the current native login function returns,
+    // so Online.exe can finish its own password assignment before btn-wrap clicks.
+    // If queueing fails, preserve the native click as a final fallback.
+    if ((!readyToSubmit || clickQueued) && clickElementSlot && *clickElementSlot) {
+        (*clickElementSlot)->Release();
+        *clickElementSlot = nullptr;
+    }
+
+    elements->Release();
+}
 
 DWORD WINAPI PromptThread(LPVOID)
 {
@@ -3813,11 +4527,20 @@ bool BuildCode(uintptr_t base, CodeBuffer& code)
     }
 
     // Hook context: sub_440C30 has just returned from sub_402380.
-    // [EBP-20] is the decoded password CString pointer.
+    // [EBP-18] is the account input, [EBP-1C] is the password input,
+    // [EBP-14] is the current IHTMLElementCollection, [EBP-10] is the
+    // original click element, and [EBP-20] is the decoded password CString.
     return AppendByte(code, 0x9C) &&                         // pushfd
         AppendPushad(code) &&
         AppendByte(code, 0xFF) && AppendByte(code, 0x75) && AppendByte(code, 0xE0) && // password
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&Show)) &&
+        AppendByte(code, 0x8D) && AppendByte(code, 0x45) && AppendByte(code, 0xF0) && // lea eax,[ebp-10]
+        AppendByte(code, 0x50) &&                         // click element slot
+        AppendByte(code, 0xFF) && AppendByte(code, 0x75) && AppendByte(code, 0xE0) && // password
+        AppendByte(code, 0xFF) && AppendByte(code, 0x75) && AppendByte(code, 0xE4) && // password input
+        AppendByte(code, 0xFF) && AppendByte(code, 0x75) && AppendByte(code, 0xE8) && // account input
+        AppendByte(code, 0xFF) && AppendByte(code, 0x75) && AppendByte(code, 0xEC) && // element collection
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&FillAndSubmitLoginForm)) &&
         AppendPopad(code) &&
         AppendByte(code, 0x9D) &&                         // popfd
         AppendByte(code, 0x51) &&                         // push ecx

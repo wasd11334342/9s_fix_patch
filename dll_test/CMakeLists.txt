@@ -21,4 +21,4 @@ add_library(MyPatch SHARED
 
 target_compile_features(MyPatch PRIVATE cxx_std_17)
 target_compile_options(MyPatch PRIVATE /utf-8)
-target_link_libraries(MyPatch PRIVATE MbedTLS::mbedtls Psapi)
+target_link_libraries(MyPatch PRIVATE MbedTLS::mbedtls Psapi Gdiplus Ole32 OleAut32 OleAcc Crypt32)
