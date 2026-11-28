@@ -64,6 +64,19 @@ struct JumpPatchResult
 
 uintptr_t g_mainBase = 0;
 
+DWORD NextLocalDay0101Tick()
+{
+    SYSTEMTIME localTime{};
+    GetLocalTime(&localTime);
+    const uint64_t elapsedSeconds =
+        static_cast<uint64_t>(localTime.wHour) * 3600 +
+        static_cast<uint64_t>(localTime.wMinute) * 60 +
+        localTime.wSecond;
+    const uint64_t remainingMs =
+        (86400ULL - elapsedSeconds) * 1000ULL + 60000ULL;
+    return GetTickCount() + static_cast<DWORD>(remainingMs);
+}
+
 bool IsNativeEntryReady()
 {
     if (g_mainBase == 0) {
@@ -330,6 +343,7 @@ extern volatile LONG g_dianFengZhuLuSwitch;
 extern volatile LONG g_huanJingSwitch;
 extern volatile LONG g_crossArenaSignupSwitch;
 extern volatile LONG g_supremeVoteSwitch;
+bool TryGetConfigPath(const wchar_t** pathOut);
 }
 
 namespace AlBattle
@@ -2800,6 +2814,7 @@ namespace CrossArenaSignup
 {
 void Tick();
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+void OnEnabledChanged(LONG enabled);
 }
 
 namespace SupremeVote
@@ -2835,6 +2850,7 @@ volatile LONG g_queryIssued = 0;
 volatile LONG g_waiting = 0;
 volatile LONG g_resolved = 0;
 volatile LONG g_pendingAction = kNoAction;
+volatile LONG g_pauseUntil = 0;
 
 struct Reader
 {
@@ -2919,21 +2935,52 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
     }
 }
 
+void StopUntilTomorrow()
+{
+    InterlockedExchange(&g_pauseUntil, static_cast<LONG>(NextLocalDay0101Tick()));
+    InterlockedExchange(&g_queryIssued, 0);
+    InterlockedExchange(&g_waiting, 0);
+    InterlockedExchange(&g_resolved, 0);
+    InterlockedExchange(&g_pendingAction, kNoAction);
+}
+
+void OnEnabledChanged(LONG enabled)
+{
+    InterlockedExchange(&g_queryIssued, 0);
+    InterlockedExchange(&g_waiting, 0);
+    InterlockedExchange(&g_resolved, 0);
+    InterlockedExchange(&g_pendingAction, kNoAction);
+    InterlockedExchange(&g_pauseUntil, 0);
+    (void)enabled;
+}
+
 void Tick()
 {
     if (g_mainBase == 0 || TaskDispatchUi::g_crossArenaSignupSwitch == 0) return;
+
+    const DWORD now = GetTickCount();
+    const DWORD pauseUntil = static_cast<DWORD>(g_pauseUntil);
+    if (pauseUntil != 0 && static_cast<LONG>(now - pauseUntil) < 0) {
+        return;
+    }
+    if (pauseUntil != 0) {
+        InterlockedExchange(&g_pauseUntil, 0);
+    }
 
     const LONG action = InterlockedExchange(&g_pendingAction, kNoAction);
     switch (action) {
     case kSendSignup:
         SendPacket(kSignup, nullptr, 0);
         GameLog::Write(L"%s", kSignupLog);
+        StopUntilTomorrow();
         return;
     case kLogAlreadySignup:
         GameLog::Write(L"%s", kAlreadySignupLog);
+        StopUntilTomorrow();
         return;
     case kLogNotSignupPeriod:
         GameLog::Write(L"%s", kNotSignupPeriodLog);
+        StopUntilTomorrow();
         return;
     default:
         break;
@@ -2952,32 +2999,31 @@ void Tick()
 namespace SupremeVote
 {
 
-constexpr uint32_t kBattle = 0x2C41;
+constexpr uint32_t kPortal = 0x2C44;
+constexpr uint32_t kContestInfo = 0x2C43;
 constexpr uint32_t kCheersPanel = 0x2C42;
-constexpr uint32_t kSchedule = 0x2C47;
 constexpr uint32_t kContestPanel = 0x2C4A;
 constexpr uint32_t kCheersPanelResult = 0x2C49;
 constexpr uint32_t kScheduleResult = 0x2C4E;
 constexpr uint32_t kRequestConsume = 0x0204;
-constexpr uint32_t kConfirmConsume = 0x0205;
 constexpr uint32_t kConsumeCost = 0x0206;
 constexpr uint32_t kConsumeTypeCheers = 48;
-constexpr size_t kMatchCount = 8;
+constexpr size_t kMatchCount = 15;
 constexpr DWORD kRetryIntervalMs = 300000;
 constexpr DWORD kStageTimeoutMs = 15000;
 
 enum State : LONG
 {
     kIdle = 0,
-    kNeedSchedule,
+    kNeedPortal,
     kWaitingSchedule,
-    kNeedBattle,
-    kWaitingBattle,
+    kNeedContestInfo,
+    kWaitingContestInfo,
     kNeedCheersPanel,
     kWaitingCheersPanel,
     kNeedConsume,
     kWaitingConsume,
-    kNeedConfirm
+    kWaitingConsumeResult
 };
 
 volatile LONG g_state = kIdle;
@@ -2986,9 +3032,32 @@ volatile LONG g_currentMatch = 0;
 volatile LONG g_doneMask = 0;
 volatile LONG g_currentBattleId = 0;
 volatile LONG g_currentNodeId = 0;
+volatile LONG g_observationMask = 0;
+volatile LONG g_observationPending = 0;
+volatile LONG g_observationBattleId = 0;
+volatile LONG g_observationPanelType = 0;
+volatile LONG g_observationLeftState = 0;
+volatile LONG g_observationLeftAble = 0;
+volatile LONG g_observationLeftNodeId = 0;
+volatile LONG g_observationRightState = 0;
+volatile LONG g_observationRightAble = 0;
+volatile LONG g_observationRightNodeId = 0;
+volatile LONG g_observationAction = 0;
+volatile LONG g_cheersObservationPending = 0;
+volatile LONG g_cheersObservationBattleId = 0;
+volatile LONG g_cheersObservationNodeId = 0;
+volatile LONG g_cheersObservationGold = 0;
+volatile LONG g_consumeObservationPending = 0;
+volatile LONG g_consumeObservationBattleId = 0;
+volatile LONG g_consumeObservationNodeId = 0;
+volatile LONG g_consumeObservationCost = 0;
+volatile LONG g_verifyPending = 0;
+volatile LONG g_successLogPending = 0;
+volatile LONG g_retrySoon = 0;
 volatile DWORD g_stageDeadline = 0;
 volatile DWORD g_nextScheduleTick = 0;
 uint32_t g_matchIds[kMatchCount]{};
+uint32_t g_lastMatchIds[kMatchCount]{};
 
 struct Reader
 {
@@ -3044,6 +3113,13 @@ struct Contestant
     BYTE cheerAble = 0;
 };
 
+struct ScheduleEntry
+{
+    uint32_t id = 0;
+    uint32_t state = 0;
+    bool hasParticipant = false;
+};
+
 bool TimeReached(DWORD now, DWORD target)
 {
     return static_cast<LONG>(now - target) >= 0;
@@ -3084,6 +3160,14 @@ void SendPair(uint32_t opcode, uint32_t first, uint32_t second)
     SendPacket(opcode, payload, sizeof(payload));
 }
 
+void SendPortal()
+{
+    BYTE payload[5]{};
+    payload[0] = 0;
+    WriteBe32(payload + 1, 0xFFFFFFFFu);
+    SendPacket(kPortal, payload, sizeof(payload));
+}
+
 void SendConsume(uint32_t opcode, uint32_t battleId, uint32_t nodeId)
 {
     BYTE payload[14]{};
@@ -3094,13 +3178,39 @@ void SendConsume(uint32_t opcode, uint32_t battleId, uint32_t nodeId)
     SendPacket(opcode, payload, sizeof(payload));
 }
 
+void BeginConsumeRequest()
+{
+    const DWORD now = GetTickCount();
+    g_stageDeadline = now + kStageTimeoutMs;
+    InterlockedExchange(&g_state, kWaitingConsumeResult);
+    SendConsume(
+        kRequestConsume,
+        static_cast<uint32_t>(g_currentBattleId),
+        static_cast<uint32_t>(g_currentNodeId));
+}
+
 void ScheduleRetry(DWORD now)
 {
     std::memset(g_matchIds, 0, sizeof(g_matchIds));
     InterlockedExchange(&g_currentMatch, 0);
     InterlockedExchange(&g_currentBattleId, 0);
     InterlockedExchange(&g_currentNodeId, 0);
+    InterlockedExchange(&g_verifyPending, 0);
+    InterlockedExchange(&g_retrySoon, 0);
     g_nextScheduleTick = now + kRetryIntervalMs;
+    InterlockedExchange(&g_state, kIdle);
+}
+
+void StopUntilTomorrow()
+{
+    std::memset(g_matchIds, 0, sizeof(g_matchIds));
+    InterlockedExchange(&g_currentMatch, 0);
+    InterlockedExchange(&g_currentBattleId, 0);
+    InterlockedExchange(&g_currentNodeId, 0);
+    InterlockedExchange(&g_doneMask, 0);
+    InterlockedExchange(&g_verifyPending, 0);
+    InterlockedExchange(&g_retrySoon, 0);
+    g_nextScheduleTick = NextLocalDay0101Tick();
     InterlockedExchange(&g_state, kIdle);
 }
 
@@ -3110,6 +3220,7 @@ void AdvanceMatch(bool markDone)
     if (index >= 0 && index < static_cast<LONG>(kMatchCount) && markDone) {
         InterlockedOr(&g_doneMask, 1L << index);
     }
+    InterlockedExchange(&g_verifyPending, 0);
 
     ++index;
     while (index < static_cast<LONG>(kMatchCount)) {
@@ -3117,13 +3228,17 @@ void AdvanceMatch(bool markDone)
             InterlockedExchange(&g_currentMatch, index);
             InterlockedExchange(&g_currentBattleId, static_cast<LONG>(g_matchIds[index]));
             InterlockedExchange(&g_currentNodeId, 0);
-            InterlockedExchange(&g_state, kNeedBattle);
+            InterlockedExchange(&g_state, kNeedContestInfo);
             return;
         }
         ++index;
     }
 
-    ScheduleRetry(GetTickCount());
+    if (InterlockedExchange(&g_retrySoon, 0) != 0) {
+        ScheduleRetry(GetTickCount());
+    } else {
+        StopUntilTomorrow();
+    }
 }
 
 void StartCurrentScan()
@@ -3134,12 +3249,12 @@ void StartCurrentScan()
             InterlockedExchange(&g_currentMatch, index);
             InterlockedExchange(&g_currentBattleId, static_cast<LONG>(g_matchIds[index]));
             InterlockedExchange(&g_currentNodeId, 0);
-            InterlockedExchange(&g_state, kNeedBattle);
+            InterlockedExchange(&g_state, kNeedContestInfo);
             return;
         }
         ++index;
     }
-    ScheduleRetry(GetTickCount());
+    StopUntilTomorrow();
 }
 
 bool ParseSchedule(const BYTE* payload, uint32_t payloadLength, uint32_t output[kMatchCount])
@@ -3150,19 +3265,36 @@ bool ParseSchedule(const BYTE* payload, uint32_t payloadLength, uint32_t output[
     if (!reader.ReadU16(count) || count != 31) return false;
 
     std::memset(output, 0, sizeof(uint32_t) * kMatchCount);
+    ScheduleEntry entries[31]{};
     for (uint16_t index = 0; index < count; ++index) {
         uint32_t id = 0;
         uint32_t ignored = 0;
         uint32_t state = 0;
         BYTE group = 0;
+        uint16_t nameLength = 0;
         if (!reader.ReadU32(id) || !reader.ReadByte(group) || !reader.Skip(8) ||
-            !reader.SkipUtf() || !reader.ReadU32(ignored) || !reader.ReadU32(state) ||
+            !reader.ReadU16(nameLength) || !reader.Skip(nameLength) ||
+            !reader.ReadU32(ignored) || !reader.ReadU32(state) ||
             !reader.ReadU32(ignored) || !reader.SkipUtf() || !reader.SkipUtf() ||
             !reader.SkipUtf()) {
             return false;
         }
-        if (index >= 7 && index < 15 && state > 0) {
-            output[index - 7] = id;
+        entries[index].id = id;
+        entries[index].state = state;
+        entries[index].hasParticipant = nameLength > 0;
+    }
+
+    size_t outputIndex = 0;
+    for (size_t parentIndex = 0; parentIndex + 1 < 15; ++parentIndex) {
+        const size_t leftIndex = parentIndex * 2 + 1;
+        const size_t rightIndex = (parentIndex + 1) * 2;
+        if (rightIndex >= 31 || outputIndex >= kMatchCount) break;
+        if (entries[parentIndex].id != 0 &&
+            entries[leftIndex].hasParticipant &&
+            entries[rightIndex].hasParticipant &&
+            entries[leftIndex].state > 0 &&
+            entries[rightIndex].state > 0) {
+            output[outputIndex++] = entries[parentIndex].id;
         }
     }
 
@@ -3216,15 +3348,18 @@ bool ParseCheersPanel(
     const BYTE* payload,
     uint32_t payloadLength,
     uint32_t& battleId,
-    uint32_t& nodeId)
+    uint32_t& nodeId,
+    int32_t& gold)
 {
     if (!payload || payloadLength < 19) return false;
     Reader reader{ payload, payload + payloadLength };
-    uint32_t ignored = 0;
+    uint32_t coupon = 0;
+    uint32_t rawGold = 0;
     BYTE ignoredByte = 0;
     return reader.ReadU32(battleId) && reader.ReadU32(nodeId) &&
-        reader.ReadU32(ignored) && reader.ReadU32(ignored) &&
-        reader.ReadByte(ignoredByte) && reader.SkipUtf();
+        reader.ReadU32(coupon) && reader.ReadU32(rawGold) &&
+        reader.ReadByte(ignoredByte) && reader.SkipUtf() &&
+        (gold = static_cast<int32_t>(rawGold), true);
 }
 
 bool ParseConsumeCost(
@@ -3254,6 +3389,66 @@ bool ParseConsumeCost(
     return count >= 2 && reader.ReadU32(cost) && reader.SkipUtf();
 }
 
+void PublishContestObservation(
+    uint32_t battleId,
+    const Contestant contestants[2],
+    BYTE contestPanelType,
+    LONG action)
+{
+    const LONG index = InterlockedCompareExchange(&g_currentMatch, 0, 0);
+    if (index < 0 || index >= static_cast<LONG>(kMatchCount)) return;
+    const LONG bit = 1L << index;
+    if ((InterlockedOr(&g_observationMask, bit) & bit) != 0) return;
+
+    InterlockedExchange(&g_observationBattleId, static_cast<LONG>(battleId));
+    InterlockedExchange(&g_observationPanelType, static_cast<LONG>(contestPanelType));
+    InterlockedExchange(&g_observationLeftState, static_cast<LONG>(contestants[0].cheersState));
+    InterlockedExchange(&g_observationLeftAble, static_cast<LONG>(contestants[0].cheerAble));
+    InterlockedExchange(&g_observationLeftNodeId, static_cast<LONG>(contestants[0].nodeId));
+    InterlockedExchange(&g_observationRightState, static_cast<LONG>(contestants[1].cheersState));
+    InterlockedExchange(&g_observationRightAble, static_cast<LONG>(contestants[1].cheerAble));
+    InterlockedExchange(&g_observationRightNodeId, static_cast<LONG>(contestants[1].nodeId));
+    InterlockedExchange(&g_observationAction, action);
+    InterlockedExchange(&g_observationPending, 1);
+}
+
+void FlushContestObservation()
+{
+    InterlockedExchange(&g_observationPending, 0);
+}
+
+void PublishCheersObservation(uint32_t battleId, uint32_t nodeId, int32_t gold)
+{
+    InterlockedExchange(&g_cheersObservationBattleId, static_cast<LONG>(battleId));
+    InterlockedExchange(&g_cheersObservationNodeId, static_cast<LONG>(nodeId));
+    InterlockedExchange(&g_cheersObservationGold, static_cast<LONG>(gold));
+    InterlockedExchange(&g_cheersObservationPending, 1);
+}
+
+void FlushCheersObservation()
+{
+    InterlockedExchange(&g_cheersObservationPending, 0);
+}
+
+void PublishConsumeObservation(uint32_t battleId, uint32_t nodeId, uint32_t cost)
+{
+    InterlockedExchange(&g_consumeObservationBattleId, static_cast<LONG>(battleId));
+    InterlockedExchange(&g_consumeObservationNodeId, static_cast<LONG>(nodeId));
+    InterlockedExchange(&g_consumeObservationCost, static_cast<LONG>(cost));
+    InterlockedExchange(&g_consumeObservationPending, 1);
+}
+
+void FlushConsumeObservation()
+{
+    InterlockedExchange(&g_consumeObservationPending, 0);
+}
+
+void FlushSuccessLog()
+{
+    if (InterlockedExchange(&g_successLogPending, 0) == 0) return;
+    GameLog::Write(L"爭霸戰 助威");
+}
+
 void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength)
 {
     const uint32_t packet = opcode & 0xFFFF;
@@ -3262,12 +3457,16 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
     if (packet == kScheduleResult && state == kWaitingSchedule) {
         uint32_t matches[kMatchCount]{};
         if (!ParseSchedule(payload, payloadLength, matches)) return;
+        if (std::memcmp(matches, g_lastMatchIds, sizeof(matches)) != 0) {
+            std::memcpy(g_lastMatchIds, matches, sizeof(matches));
+            InterlockedExchange(&g_doneMask, 0);
+        }
         std::memcpy(g_matchIds, matches, sizeof(g_matchIds));
         StartCurrentScan();
         return;
     }
 
-    if (packet == kContestPanel && state == kWaitingBattle) {
+    if (packet == kContestPanel && state == kWaitingContestInfo) {
         uint32_t battleId = 0;
         Contestant contestants[2]{};
         BYTE contestPanelType = 0;
@@ -3281,33 +3480,59 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
             return;
         }
 
-        if (contestants[0].cheersState == 2 || contestants[1].cheersState == 2) {
-            AdvanceMatch(true);
-        } else if (contestPanelType == 1 &&
-            contestants[0].cheersState == 1 &&
-            contestants[0].cheerAble == 1 &&
-            contestants[1].cheerAble == 1) {
+        const bool leftCheered = contestPanelType == 1 &&
+            contestants[0].cheersState == 2;
+        const bool leftEligible = contestPanelType == 1 &&
+            contestants[0].cheersState == 1;
+        PublishContestObservation(
+            battleId,
+            contestants,
+            contestPanelType,
+            leftEligible ? 2 : (leftCheered ? 1 : 0));
+
+        if (leftEligible) {
+            if (InterlockedExchange(&g_verifyPending, 0) != 0) {
+                InterlockedExchange(&g_retrySoon, 1);
+                AdvanceMatch(false);
+                return;
+            }
             InterlockedExchange(&g_currentNodeId, static_cast<LONG>(contestants[0].nodeId));
             InterlockedExchange(&g_state, kNeedCheersPanel);
+        } else if (leftCheered) {
+            if (InterlockedExchange(&g_verifyPending, 0) != 0) {
+                InterlockedExchange(&g_successLogPending, 1);
+            }
+            AdvanceMatch(true);
         } else {
             AdvanceMatch(false);
         }
         return;
     }
 
-    if (packet == kCheersPanelResult && state == kWaitingCheersPanel) {
+    if (packet == kCheersPanelResult &&
+        (state == kWaitingCheersPanel || state == kWaitingConsumeResult)) {
         uint32_t battleId = 0;
         uint32_t nodeId = 0;
-        if (!ParseCheersPanel(payload, payloadLength, battleId, nodeId) ||
+        int32_t gold = 0;
+        if (!ParseCheersPanel(payload, payloadLength, battleId, nodeId, gold) ||
             battleId != static_cast<uint32_t>(g_currentBattleId) ||
             nodeId != static_cast<uint32_t>(g_currentNodeId)) {
             return;
         }
-        InterlockedExchange(&g_state, kNeedConsume);
+        PublishCheersObservation(battleId, nodeId, gold);
+        if (state == kWaitingConsumeResult) {
+            InterlockedExchange(&g_verifyPending, 1);
+            InterlockedExchange(&g_state, kNeedContestInfo);
+        } else if (gold == 0) {
+            BeginConsumeRequest();
+        } else {
+            AdvanceMatch(true);
+        }
         return;
     }
 
-    if (packet == kConsumeCost && state == kWaitingConsume) {
+    if (packet == kConsumeCost &&
+        (state == kWaitingConsume || state == kWaitingConsumeResult)) {
         uint32_t battleId = 0;
         uint32_t nodeId = 0;
         uint32_t cost = 0;
@@ -3316,11 +3541,14 @@ void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLeng
             nodeId != static_cast<uint32_t>(g_currentNodeId)) {
             return;
         }
+        PublishConsumeObservation(battleId, nodeId, cost);
         if (cost == 0) {
-            InterlockedExchange(&g_state, kNeedConfirm);
+            InterlockedExchange(&g_verifyPending, 1);
+            InterlockedExchange(&g_state, kNeedContestInfo);
         } else {
             AdvanceMatch(true);
         }
+        return;
     }
 }
 
@@ -3328,36 +3556,42 @@ void TickImpl()
 {
     if (g_mainBase == 0 || TaskDispatchUi::g_supremeVoteSwitch == 0) return;
 
+    FlushContestObservation();
+    FlushCheersObservation();
+    FlushConsumeObservation();
+    FlushSuccessLog();
+
     const DWORD now = GetTickCount();
     LONG state = g_state;
     if (state == kIdle) {
-        if ((g_doneMask & 0xFF) == 0xFF) return;
         if (!TimeReached(now, g_nextScheduleTick)) return;
-        InterlockedExchange(&g_state, kNeedSchedule);
-        state = kNeedSchedule;
+        InterlockedExchange(&g_state, kNeedPortal);
+        state = kNeedPortal;
     }
 
-    if ((state == kWaitingSchedule || state == kWaitingBattle ||
-         state == kWaitingCheersPanel || state == kWaitingConsume) &&
+    if ((state == kWaitingSchedule || state == kWaitingContestInfo ||
+         state == kWaitingCheersPanel || state == kWaitingConsume ||
+         state == kWaitingConsumeResult) &&
         TimeReached(now, g_stageDeadline)) {
         if (state == kWaitingSchedule) {
             ScheduleRetry(now);
         } else {
+            InterlockedExchange(&g_retrySoon, 1);
             AdvanceMatch(false);
         }
         return;
     }
 
     switch (state) {
-    case kNeedSchedule:
-        SendPacket(kSchedule, nullptr, 0);
+    case kNeedPortal:
+        SendPortal();
         g_stageDeadline = now + kStageTimeoutMs;
         InterlockedExchange(&g_state, kWaitingSchedule);
         break;
-    case kNeedBattle:
-        SendU32(kBattle, static_cast<uint32_t>(g_currentBattleId));
+    case kNeedContestInfo:
+        SendU32(kContestInfo, static_cast<uint32_t>(g_currentBattleId));
         g_stageDeadline = now + kStageTimeoutMs;
-        InterlockedExchange(&g_state, kWaitingBattle);
+        InterlockedExchange(&g_state, kWaitingContestInfo);
         break;
     case kNeedCheersPanel:
         SendPair(
@@ -3368,19 +3602,7 @@ void TickImpl()
         InterlockedExchange(&g_state, kWaitingCheersPanel);
         break;
     case kNeedConsume:
-        SendConsume(
-            kRequestConsume,
-            static_cast<uint32_t>(g_currentBattleId),
-            static_cast<uint32_t>(g_currentNodeId));
-        g_stageDeadline = now + kStageTimeoutMs;
-        InterlockedExchange(&g_state, kWaitingConsume);
-        break;
-    case kNeedConfirm:
-        SendConsume(
-            kConfirmConsume,
-            static_cast<uint32_t>(g_currentBattleId),
-            static_cast<uint32_t>(g_currentNodeId));
-        AdvanceMatch(true);
+        BeginConsumeRequest();
         break;
     default:
         break;
@@ -3403,7 +3625,16 @@ void OnEnabledChanged(LONG enabled)
     InterlockedExchange(&g_currentMatch, 0);
     InterlockedExchange(&g_currentBattleId, 0);
     InterlockedExchange(&g_currentNodeId, 0);
+    InterlockedExchange(&g_doneMask, 0);
+    InterlockedExchange(&g_observationMask, 0);
+    InterlockedExchange(&g_observationPending, 0);
+    InterlockedExchange(&g_cheersObservationPending, 0);
+    InterlockedExchange(&g_consumeObservationPending, 0);
+    InterlockedExchange(&g_verifyPending, 0);
+    InterlockedExchange(&g_successLogPending, 0);
+    InterlockedExchange(&g_retrySoon, 0);
     std::memset(g_matchIds, 0, sizeof(g_matchIds));
+    std::memset(g_lastMatchIds, 0, sizeof(g_lastMatchIds));
     if (enabled != 0) {
         g_nextScheduleTick = 0;
     }
@@ -3453,6 +3684,562 @@ void SetCheckboxFont(HFONT font);
 void ShowCheckbox();
 void DestroyCheckbox();
 bool PersistSwitch(LONG value);
+}
+
+namespace CountryDonate
+{
+extern volatile LONG g_uiSwitch;
+void Tick();
+void HandleRecvPacket(uint32_t opcode, const BYTE* payload, uint32_t payloadLength);
+bool HandleUiCommand(WPARAM wParam);
+void RefreshPersistentSwitch();
+void EnsureCheckbox(HWND parent, int x, int y, int width, int height);
+void SetCheckboxFont(HFONT font);
+void ShowCheckbox();
+void DestroyCheckbox();
+bool PersistSwitch(LONG value);
+}
+
+namespace CountryDonate
+{
+
+constexpr UINT kCheckboxId = 0x7B10;
+constexpr uint32_t kCountryQueryOpcode = 0x3AAD;
+constexpr uint32_t kCountryPanelOpcode = 0x3AAE;
+constexpr uint32_t kCountryDonateOpcode = 0x3AAF;
+constexpr uint32_t kGuardQueryOpcode = 0x418A;
+constexpr uint32_t kGuardPanelOpcode = 0x418B;
+constexpr uint32_t kGuardDonateOpcode = 0x418C;
+constexpr DWORD kQueryIntervalMs = 60000;
+constexpr DWORD kResponseTimeoutMs = 15000;
+constexpr uint16_t kMaxResources = 32;
+const wchar_t kConfigSection[] = L"MAIN";
+const wchar_t kConfigKey[] = L"bCountryDonate";
+const wchar_t kCheckboxText[] = L"\x5EFA\x7BC9\x7981\x885B\x8ECD";
+
+enum Phase : LONG
+{
+    kIdle = 0,
+    kWaitingInitial,
+    kWaitingRefresh
+};
+
+volatile LONG g_uiSwitch = 0;
+volatile LONG g_uiSwitchKeyReady = 0;
+volatile LONG g_uiSwitchDirty = 0;
+volatile LONG g_enabled = 0;
+volatile LONG g_nextQueryTick = 0;
+volatile LONG g_countryPhase = kIdle;
+volatile LONG g_countryDeadline = 0;
+volatile LONG g_countryPendingRefreshes = 0;
+volatile LONG g_guardPhase = kIdle;
+volatile LONG g_guardDeadline = 0;
+volatile LONG g_guardPendingRefreshes = 0;
+volatile LONG g_pendingLogs = 0;
+HWND g_checkboxHwnd = nullptr;
+
+enum DonationLog : LONG
+{
+    kCountrySilverLog = 1L << 0,
+    kCountryWoodLog = 1L << 1,
+    kGuardSilverLog = 1L << 2,
+    kGuardWoodLog = 1L << 3
+};
+
+class Reader
+{
+public:
+    Reader(const BYTE* data, uint32_t length)
+        : cursor_(data), end_(data ? data + length : nullptr)
+    {
+    }
+
+    bool ReadU16(uint16_t& value)
+    {
+        if (!cursor_ || cursor_ + 2 > end_) return false;
+        value = ReadBe16Unaligned(cursor_);
+        cursor_ += 2;
+        return true;
+    }
+
+    bool ReadU32(uint32_t& value)
+    {
+        if (!cursor_ || cursor_ + 4 > end_) return false;
+        value = ReadBe32Unaligned(cursor_);
+        cursor_ += 4;
+        return true;
+    }
+
+    bool SkipUtf()
+    {
+        uint16_t length = 0;
+        if (!ReadU16(length) || !cursor_ ||
+            length > static_cast<size_t>(end_ - cursor_)) {
+            return false;
+        }
+        cursor_ += length;
+        return true;
+    }
+
+private:
+    const BYTE* cursor_ = nullptr;
+    const BYTE* end_ = nullptr;
+};
+
+bool TimeReached(DWORD now, DWORD target)
+{
+    return static_cast<LONG>(now - target) >= 0;
+}
+
+void ClearCountryState()
+{
+    InterlockedExchange(&g_countryPhase, kIdle);
+    InterlockedExchange(&g_countryDeadline, 0);
+    InterlockedExchange(&g_countryPendingRefreshes, 0);
+}
+
+void ClearGuardState()
+{
+    InterlockedExchange(&g_guardPhase, kIdle);
+    InterlockedExchange(&g_guardDeadline, 0);
+    InterlockedExchange(&g_guardPendingRefreshes, 0);
+}
+
+void DrainPendingLogs()
+{
+    const LONG pending = InterlockedExchange(&g_pendingLogs, 0);
+    if ((pending & kCountrySilverLog) != 0) {
+        GameLog::Write(L"建築捐獻 銀幣");
+    }
+    if ((pending & kCountryWoodLog) != 0) {
+        GameLog::Write(L"建築捐獻 木材");
+    }
+    if ((pending & kGuardSilverLog) != 0) {
+        GameLog::Write(L"禁衛軍捐獻 銀幣");
+    }
+    if ((pending & kGuardWoodLog) != 0) {
+        GameLog::Write(L"禁衛軍捐獻 木材");
+    }
+}
+
+void SetEnabled(LONG enabled)
+{
+    const LONG next = enabled != 0 ? 1 : 0;
+    const LONG previous = InterlockedExchange(&g_enabled, next);
+    if (previous != next) {
+        ClearCountryState();
+        ClearGuardState();
+        InterlockedExchange(&g_nextQueryTick, 0);
+    }
+}
+
+bool PersistSwitch(LONG value)
+{
+    const wchar_t* path = nullptr;
+    if (!TaskDispatchUi::TryGetConfigPath(&path)) return false;
+    __try {
+        if (!WritePrivateProfileStringW(
+                kConfigSection,
+                kConfigKey,
+                value != 0 ? L"1" : L"0",
+                path)) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    InterlockedExchange(&g_uiSwitchKeyReady, 1);
+    InterlockedExchange(&g_uiSwitchDirty, 0);
+    return true;
+}
+
+bool LoadSwitch()
+{
+    const wchar_t* path = nullptr;
+    if (!TaskDispatchUi::TryGetConfigPath(&path)) return false;
+    __try {
+        wchar_t value[16]{};
+        const wchar_t missingMarker[] = { 0xFFFF, 0x0000 };
+        const DWORD length = GetPrivateProfileStringW(
+            kConfigSection,
+            kConfigKey,
+            missingMarker,
+            value,
+            _countof(value),
+            path);
+        const bool missing = length == 0 ||
+            (length == 1 && value[0] == missingMarker[0] && value[1] == L'\0');
+        if (missing) {
+            InterlockedExchange(&g_uiSwitch, 0);
+            SetEnabled(0);
+            return PersistSwitch(0);
+        }
+
+        const LONG enabled = GetPrivateProfileIntW(
+            kConfigSection,
+            kConfigKey,
+            0,
+            path) != 0 ? 1 : 0;
+        InterlockedExchange(&g_uiSwitch, enabled);
+        SetEnabled(enabled);
+        InterlockedExchange(&g_uiSwitchKeyReady, 1);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void RefreshPersistentSwitch()
+{
+    if (g_uiSwitchKeyReady != 0) return;
+    const bool ready = g_uiSwitchDirty != 0
+        ? PersistSwitch(g_uiSwitch)
+        : LoadSwitch();
+    if (ready && g_checkboxHwnd && IsWindow(g_checkboxHwnd)) {
+        SendMessageW(
+            g_checkboxHwnd,
+            BM_SETCHECK,
+            g_uiSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+            0);
+    }
+}
+
+void SyncUiSwitch()
+{
+    if (!g_checkboxHwnd || !IsWindow(g_checkboxHwnd)) return;
+    const LONG value =
+        SendMessageW(g_checkboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
+    InterlockedExchange(&g_uiSwitch, value);
+    SetEnabled(value);
+    InterlockedExchange(&g_uiSwitchDirty, 1);
+    PersistSwitch(value);
+}
+
+bool HandleUiCommand(WPARAM wParam)
+{
+    if (LOWORD(wParam) != kCheckboxId) return false;
+    SyncUiSwitch();
+    return true;
+}
+
+void EnsureCheckbox(HWND parent, int x, int y, int width, int height)
+{
+    if (g_checkboxHwnd && IsWindow(g_checkboxHwnd)) return;
+    g_checkboxHwnd = CreateWindowExW(
+        0,
+        L"Button",
+        kCheckboxText,
+        0x50018003,
+        x,
+        y,
+        width,
+        height,
+        parent,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kCheckboxId)),
+        nullptr,
+        nullptr);
+}
+
+void SetCheckboxFont(HFONT font)
+{
+    if (g_checkboxHwnd && IsWindow(g_checkboxHwnd) && font) {
+        SendMessageW(
+            g_checkboxHwnd,
+            WM_SETFONT,
+            reinterpret_cast<WPARAM>(font),
+            TRUE);
+    }
+}
+
+void ShowCheckbox()
+{
+    if (!g_checkboxHwnd || !IsWindow(g_checkboxHwnd)) return;
+    SendMessageW(
+        g_checkboxHwnd,
+        BM_SETCHECK,
+        g_uiSwitch != 0 ? BST_CHECKED : BST_UNCHECKED,
+        0);
+    ShowWindow(g_checkboxHwnd, SW_SHOW);
+}
+
+void DestroyCheckbox()
+{
+    if (g_checkboxHwnd && IsWindow(g_checkboxHwnd)) {
+        DestroyWindow(g_checkboxHwnd);
+    }
+    g_checkboxHwnd = nullptr;
+}
+
+void SendPacket(uint32_t opcode, const void* payload, uint32_t payloadLength)
+{
+    using SendPacketFn = void(__stdcall*)(uint32_t, const void*, uint32_t);
+    reinterpret_cast<SendPacketFn>(g_mainBase + 0x4A360)(
+        opcode,
+        payload,
+        payloadLength);
+}
+
+void SendCountryDonation(uint16_t type)
+{
+    BYTE payload[2] = {
+        static_cast<BYTE>((type >> 8) & 0xFF),
+        static_cast<BYTE>(type & 0xFF),
+    };
+    SendPacket(kCountryDonateOpcode, payload, sizeof(payload));
+}
+
+void SendGuardDonation(uint32_t type)
+{
+    BYTE payload[4] = {
+        static_cast<BYTE>((type >> 24) & 0xFF),
+        static_cast<BYTE>((type >> 16) & 0xFF),
+        static_cast<BYTE>((type >> 8) & 0xFF),
+        static_cast<BYTE>(type & 0xFF),
+    };
+    SendPacket(kGuardDonateOpcode, payload, sizeof(payload));
+}
+
+bool ParseCountryPanel(
+    const BYTE* payload,
+    uint32_t payloadLength,
+    uint32_t& donateMask)
+{
+    donateMask = 0;
+    Reader reader(payload, payloadLength);
+    uint16_t itemCount = 0;
+    if (!reader.SkipUtf() ||
+        !reader.ReadU16(itemCount) ||
+        itemCount > kMaxResources) {
+        return false;
+    }
+
+    for (uint16_t itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+        uint16_t bonusCount = 0;
+        if (!reader.ReadU16(bonusCount) || bonusCount > kMaxResources) {
+            return false;
+        }
+
+        uint16_t firstType = 0;
+        for (uint16_t bonusIndex = 0; bonusIndex < bonusCount; ++bonusIndex) {
+            uint16_t type = 0;
+            uint32_t value = 0;
+            if (!reader.ReadU16(type) ||
+                !reader.ReadU32(value) ||
+                !reader.SkipUtf()) {
+                return false;
+            }
+            if (bonusIndex == 0) firstType = type;
+        }
+
+        uint32_t maxDonate = 0;
+        uint32_t curDonate = 0;
+        uint32_t leftTime = 0;
+        uint32_t maxCd = 0;
+        if (!reader.ReadU32(maxDonate) ||
+            !reader.ReadU32(curDonate) ||
+            !reader.ReadU32(leftTime) ||
+            !reader.ReadU32(maxCd) ||
+            !reader.SkipUtf()) {
+            return false;
+        }
+
+        if ((firstType == 3 || firstType == 4) &&
+            curDonate < maxDonate &&
+            leftTime < maxCd) {
+            donateMask |= 1u << firstType;
+        }
+    }
+
+    uint16_t extraType = 0;
+    uint32_t extraValue = 0;
+    return reader.ReadU16(extraType) &&
+        reader.ReadU32(extraValue) &&
+        reader.SkipUtf() &&
+        reader.SkipUtf();
+}
+
+bool ParseGuardPanel(
+    const BYTE* payload,
+    uint32_t payloadLength,
+    uint32_t& donateMask)
+{
+    donateMask = 0;
+    Reader reader(payload, payloadLength);
+    uint32_t ignored = 0;
+    uint16_t resourceCount = 0;
+    if (!reader.ReadU32(ignored) ||
+        !reader.ReadU32(ignored) ||
+        !reader.ReadU16(resourceCount) ||
+        resourceCount > kMaxResources) {
+        return false;
+    }
+
+    for (uint16_t index = 0; index < resourceCount; ++index) {
+        uint32_t type = 0;
+        uint32_t valueHigh = 0;
+        uint32_t valueLow = 0;
+        uint32_t maxHigh = 0;
+        uint32_t maxLow = 0;
+        uint32_t valuePerTime = 0;
+        uint32_t countDown = 0;
+        uint32_t cdLimit = 0;
+        if (!reader.ReadU32(type) ||
+            !reader.ReadU32(valueHigh) ||
+            !reader.ReadU32(valueLow) ||
+            !reader.ReadU32(maxHigh) ||
+            !reader.ReadU32(maxLow) ||
+            !reader.ReadU32(valuePerTime) ||
+            !reader.ReadU32(countDown) ||
+            !reader.ReadU32(cdLimit) ||
+            !reader.SkipUtf()) {
+            return false;
+        }
+
+        if ((type == 3 || type == 4) &&
+            (valueHigh != maxHigh || valueLow != maxLow) &&
+            countDown < cdLimit) {
+            donateMask |= 1u << type;
+        }
+    }
+
+    return reader.ReadU32(ignored) &&
+        reader.ReadU32(ignored) &&
+        reader.ReadU32(ignored) &&
+        reader.SkipUtf();
+}
+
+void SendCountryMask(uint32_t mask)
+{
+    LONG sent = 0;
+    if ((mask & (1u << 3)) != 0) {
+        SendCountryDonation(3);
+        InterlockedOr(&g_pendingLogs, kCountrySilverLog);
+        ++sent;
+    }
+    if ((mask & (1u << 4)) != 0) {
+        SendCountryDonation(4);
+        InterlockedOr(&g_pendingLogs, kCountryWoodLog);
+        ++sent;
+    }
+    InterlockedExchange(&g_countryPendingRefreshes, sent);
+    InterlockedExchange(
+        &g_countryPhase,
+        sent > 0 ? kWaitingRefresh : kIdle);
+}
+
+void SendGuardMask(uint32_t mask)
+{
+    LONG sent = 0;
+    if ((mask & (1u << 3)) != 0) {
+        SendGuardDonation(3);
+        InterlockedOr(&g_pendingLogs, kGuardSilverLog);
+        ++sent;
+    }
+    if ((mask & (1u << 4)) != 0) {
+        SendGuardDonation(4);
+        InterlockedOr(&g_pendingLogs, kGuardWoodLog);
+        ++sent;
+    }
+    InterlockedExchange(&g_guardPendingRefreshes, sent);
+    InterlockedExchange(
+        &g_guardPhase,
+        sent > 0 ? kWaitingRefresh : kIdle);
+}
+
+void HandleRecvPacket(
+    uint32_t opcode,
+    const BYTE* payload,
+    uint32_t payloadLength)
+{
+    if (InterlockedCompareExchange(&g_enabled, 0, 0) == 0) return;
+
+    const uint32_t packet = opcode & 0xFFFF;
+    if (packet == kCountryPanelOpcode) {
+        const LONG phase = InterlockedCompareExchange(&g_countryPhase, 0, 0);
+        if (phase == kWaitingInitial) {
+            uint32_t mask = 0;
+            if (!ParseCountryPanel(payload, payloadLength, mask)) return;
+            SendCountryMask(mask);
+        } else if (phase == kWaitingRefresh) {
+            uint32_t ignoredMask = 0;
+            if (!ParseCountryPanel(payload, payloadLength, ignoredMask)) return;
+            const LONG remaining =
+                InterlockedDecrement(&g_countryPendingRefreshes);
+            if (remaining <= 0) {
+                ClearCountryState();
+            }
+        }
+        return;
+    }
+
+    if (packet == kGuardPanelOpcode) {
+        const LONG phase = InterlockedCompareExchange(&g_guardPhase, 0, 0);
+        if (phase == kWaitingInitial) {
+            uint32_t mask = 0;
+            if (!ParseGuardPanel(payload, payloadLength, mask)) return;
+            SendGuardMask(mask);
+        } else if (phase == kWaitingRefresh) {
+            uint32_t ignoredMask = 0;
+            if (!ParseGuardPanel(payload, payloadLength, ignoredMask)) return;
+            const LONG remaining =
+                InterlockedDecrement(&g_guardPendingRefreshes);
+            if (remaining <= 0) {
+                ClearGuardState();
+            }
+        }
+    }
+}
+
+void Tick()
+{
+    if (g_mainBase == 0) {
+        return;
+    }
+    DrainPendingLogs();
+    if (InterlockedCompareExchange(&g_enabled, 0, 0) == 0) return;
+
+    const DWORD now = GetTickCount();
+    const DWORD countryDeadline =
+        static_cast<DWORD>(g_countryDeadline);
+    if (InterlockedCompareExchange(&g_countryPhase, 0, 0) != kIdle &&
+        TimeReached(now, countryDeadline)) {
+        ClearCountryState();
+    }
+    const DWORD guardDeadline =
+        static_cast<DWORD>(g_guardDeadline);
+    if (InterlockedCompareExchange(&g_guardPhase, 0, 0) != kIdle &&
+        TimeReached(now, guardDeadline)) {
+        ClearGuardState();
+    }
+
+    const DWORD nextQuery =
+        static_cast<DWORD>(g_nextQueryTick);
+    if (nextQuery != 0 && !TimeReached(now, nextQuery)) {
+        return;
+    }
+
+    if (InterlockedCompareExchange(&g_countryPhase, 0, 0) != kIdle ||
+        InterlockedCompareExchange(&g_guardPhase, 0, 0) != kIdle) {
+        return;
+    }
+
+    InterlockedExchange(
+        &g_nextQueryTick,
+        static_cast<LONG>(now + kQueryIntervalMs));
+    InterlockedExchange(
+        &g_countryDeadline,
+        static_cast<LONG>(now + kResponseTimeoutMs));
+    InterlockedExchange(
+        &g_guardDeadline,
+        static_cast<LONG>(now + kResponseTimeoutMs));
+    InterlockedExchange(&g_countryPendingRefreshes, 0);
+    InterlockedExchange(&g_guardPendingRefreshes, 0);
+    InterlockedExchange(&g_countryPhase, kWaitingInitial);
+    InterlockedExchange(&g_guardPhase, kWaitingInitial);
+    SendPacket(kCountryQueryOpcode, nullptr, 0);
+    SendPacket(kGuardQueryOpcode, nullptr, 0);
+}
+
 }
 
 namespace ShenBingPu
@@ -8814,7 +9601,6 @@ __declspec(noinline) void __stdcall IndependentTimerTick(void* owner)
     TeamBattleReward::Tick();
     DianFengZhuLu::Tick();
     HuanJing::Tick();
-    SupremeVote::Tick();
     AutoOpenBox::ConfirmTick();
     NativeOptimization::Tick(g_mainBase);
 
@@ -8851,6 +9637,7 @@ bool BuildMainCode(uintptr_t base, CodeBuffer& code)
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&SupremeVote::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&AutoExpBook::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&AutoOpenBox::Tick)) &&
+        AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&CountryDonate::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&CountryTransport::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&SecretTreasure::Tick)) &&
         AppendRel32Instruction(code, 0xE8, reinterpret_cast<uintptr_t>(&AutoHighestRole::OnMainCycle)) &&
@@ -12033,6 +12820,7 @@ bool LoadCrossArenaSignupSwitch()
             (length == 1 && value[0] == missingMarker[0] && value[1] == L'\0');
         if (missing) {
             InterlockedExchange(&g_crossArenaSignupSwitch, 0);
+            CrossArenaSignup::OnEnabledChanged(0);
             return PersistCrossArenaSignupSwitch(0);
         }
         const LONG enabled = GetPrivateProfileIntW(
@@ -12041,6 +12829,7 @@ bool LoadCrossArenaSignupSwitch()
             0,
             path) != 0 ? 1 : 0;
         InterlockedExchange(&g_crossArenaSignupSwitch, enabled);
+        CrossArenaSignup::OnEnabledChanged(enabled);
         InterlockedExchange(&g_crossArenaSignupKeyReady, 1);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -12213,6 +13002,7 @@ void SyncCrossArenaSignupSwitch()
     const LONG value =
         SendMessageW(g_crossArenaSignupCheckboxHwnd, BM_GETCHECK, 0, 0) != 0 ? 1 : 0;
     InterlockedExchange(&g_crossArenaSignupSwitch, value);
+    CrossArenaSignup::OnEnabledChanged(value);
     InterlockedExchange(&g_crossArenaSignupDirty, 1);
     PersistCrossArenaSignupSwitch(value);
 }
@@ -12457,12 +13247,17 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam)
                          : DefWindowProcW(hwnd, message, wParam, lParam);
     }
+    if (message == WM_COMMAND && CountryDonate::HandleUiCommand(wParam)) {
+        return g_oldProc ? CallWindowProcW(g_oldProc, hwnd, message, wParam, lParam)
+                         : DefWindowProcW(hwnd, message, wParam, lParam);
+    }
 
     if (message == WM_TIMER && wParam == kTimerId) {
         RefreshPersistentSwitches();
         CountryTransport::RefreshPersistentSwitch();
         SecretTreasure::RefreshPersistentSwitch();
         AutoOpenBox::RefreshPersistentSwitch();
+        CountryDonate::RefreshPersistentSwitch();
         SyncSwitch();
         return 1;
     }
@@ -12481,6 +13276,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             CountryTransport::RefreshPersistentSwitch();
             SecretTreasure::RefreshPersistentSwitch();
             AutoOpenBox::RefreshPersistentSwitch();
+            CountryDonate::RefreshPersistentSwitch();
             if (!g_checkboxHwnd) {
                 g_checkboxHwnd = CreateWindowExW(
                     0,
@@ -12653,6 +13449,12 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                 g_y + (g_h * 2),
                 g_w,
                 g_h);
+            CountryDonate::EnsureCheckbox(
+                g_parentHwnd,
+                g_x - g_w - 6,
+                g_y + (g_h * 3),
+                g_w,
+                g_h);
 
             if (g_checkboxHwnd) {
                 HFONT font = reinterpret_cast<HFONT>(SendMessageW(g_weeklyHwnd, WM_GETFONT, 0, 0));
@@ -12692,6 +13494,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                     CountryTransport::SetCheckboxFont(font);
                     SecretTreasure::SetCheckboxFont(font);
                     AutoOpenBox::SetCheckboxFont(font);
+                    CountryDonate::SetCheckboxFont(font);
                 }
                 ShowWindow(g_checkboxHwnd, SW_SHOW);
                 if (g_battleTokenCheckboxHwnd) {
@@ -12758,6 +13561,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
                 CountryTransport::ShowCheckbox();
                 SecretTreasure::ShowCheckbox();
                 AutoOpenBox::ShowCheckbox();
+                CountryDonate::ShowCheckbox();
                 SetTimer(g_parentHwnd, kTimerId, 1000, nullptr);
                 SendMessageW(g_checkboxHwnd, BM_SETCHECK, g_switch != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
                 SyncSwitch();
@@ -12779,6 +13583,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             CountryTransport::PersistSwitch(CountryTransport::g_uiSwitch);
             SecretTreasure::PersistSwitch(SecretTreasure::g_uiSwitch);
             AutoOpenBox::PersistSwitch(AutoOpenBox::g_uiSwitch);
+            CountryDonate::PersistSwitch(CountryDonate::g_uiSwitch);
             KillTimer(g_parentHwnd, kTimerId);
             if (g_checkboxHwnd && IsWindow(g_checkboxHwnd)) {
                 DestroyWindow(g_checkboxHwnd);
@@ -12813,6 +13618,7 @@ LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
             CountryTransport::DestroyCheckbox();
             SecretTreasure::DestroyCheckbox();
             AutoOpenBox::DestroyCheckbox();
+            CountryDonate::DestroyCheckbox();
             g_checkboxHwnd = nullptr;
             g_battleTokenCheckboxHwnd = nullptr;
             g_zhaoXianNaKeCheckboxHwnd = nullptr;
@@ -13025,6 +13831,7 @@ DWORD WINAPI SetupThread(LPVOID)
         if (g_supremeVoteKeyReady == 0) {
             LoadSupremeVoteSwitch();
         }
+        CountryDonate::RefreshPersistentSwitch();
         if (FindAndInstall()) {
             return 0;
         }
@@ -19647,6 +20454,7 @@ __declspec(noinline) void __stdcall DispatchHook(uint32_t opcode, const BYTE* pa
     NativeWash::HandleRecvPacket(opcode, payload, payloadLength);
     AutoExpBook::HandleRecvPacket(opcode, payload, payloadLength);
     AutoOpenBox::HandleRecvPacket(opcode, payload, payloadLength);
+    CountryDonate::HandleRecvPacket(opcode, payload, payloadLength);
     ShenBingPu::HandleRecvPacket(opcode, payload, payloadLength);
     WorldCityBattle::HandleRecvPacket(opcode, payload, payloadLength);
     DailySign::HandleRecvPacket(opcode, payload);
